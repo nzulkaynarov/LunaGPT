@@ -1,0 +1,98 @@
+services:
+  # ============================================================================
+  # 1. LunaGPT Gateway (LiteLLM Proxy & Router)
+  # Единая точка входа для WebUI, VS Code, Antigravity, Aider и CLI-агентов
+  # ============================================================================
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: lunagpt-gateway
+    restart: unless-stopped
+    ports:
+      - "${LITELLM_PORT:-4000}:4000"
+    volumes:
+      - ./config/litellm-config.yaml:/app/config.yaml:ro
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+      - OLLAMA_API_BASE=${OLLAMA_API_BASE:-http://host.docker.internal:11434}
+      - LANGFUSE_HOST=${LANGFUSE_HOST:-http://langfuse-server:3000}
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY}
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "4"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - langfuse-server
+
+  # ============================================================================
+  # 2. LunaGPT Web UI (Open WebUI)
+  # Личный веб-чат (ChatGPT аналог), база знаний (RAG) и мобильный доступ
+  # ============================================================================
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: lunagpt-webui
+    restart: unless-stopped
+    ports:
+      - "${WEBUI_PORT:-3000}:8080"
+    environment:
+      - OPENAI_API_BASE_URL=http://litellm:4000/v1
+      - OPENAI_API_KEY=${LITELLM_MASTER_KEY}
+      - ENABLE_OLLAMA_API=False
+      - WEBUI_NAME=LunaGPT
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY}
+      - RAG_EMBEDDING_ENGINE=openai
+      - RAG_OPENAI_API_BASE_URL=http://litellm:4000/v1
+      - RAG_OPENAI_API_KEY=${LITELLM_MASTER_KEY}
+      - RAG_EMBEDDING_MODEL=luna-embed
+    volumes:
+      - open-webui-data:/app/backend/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - litellm
+
+  # ============================================================================
+  # 3. Langfuse Server (LLM Observability, Metrics & Tracing)
+  # Мониторинг промптов, затрат токенов, латентности и поведения агентов
+  # ============================================================================
+  langfuse-server:
+    image: ghcr.io/langfuse/langfuse:2
+    container_name: lunagpt-langfuse
+    restart: unless-stopped
+    ports:
+      - "${LANGFUSE_PORT:-3001}:3000"
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:lunagpt_secure_postgres_pass@langfuse-db:5432/langfuse}
+      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET:-lunagpt_nextauth_secret_random_string_32chars}
+      - SALT=${SALT:-lunagpt_salt_random_string_value_32ch}
+      - NEXTAUTH_URL=http://localhost:${LANGFUSE_PORT:-3001}
+      - TELEMETRY_ENABLED=false
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+
+  # ============================================================================
+  # 4. PostgreSQL для Langfuse
+  # ============================================================================
+  langfuse-db:
+    image: postgres:16-alpine
+    container_name: lunagpt-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-lunagpt_secure_postgres_pass}
+      - POSTGRES_DB=${POSTGRES_DB:-langfuse}
+    volumes:
+      - langfuse-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-langfuse}"]
+      interval: 3s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  open-webui-data:
+    name: lunagpt_open_webui_data
+  langfuse-db-data:
+    name: lunagpt_langfuse_data

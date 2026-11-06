@@ -1,0 +1,86 @@
+# ==============================================================================
+# LunaGPT — LiteLLM Gateway & Intelligent Agent Router
+# Документация: https://docs.litellm.ai/docs/proxy/config_settings
+# ==============================================================================
+
+model_list:
+  # ----------------------------------------------------------------------------
+  # 1. Локальные модели на AMD RX 580 (Ollama, $0 cost, 34 tok/s)
+  # ----------------------------------------------------------------------------
+  - model_name: luna-coder
+    litellm_params:
+      model: ollama/qwen2.5-coder:7b
+      api_base: os.environ/OLLAMA_API_BASE
+    model_info:
+      description: "Локальная модель для автокомплита и кода на GPU RX 580 (бесплатно, офлайн)"
+      mode: chat
+
+  - model_name: luna-embed
+    litellm_params:
+      model: ollama/bge-m3:latest
+      api_base: os.environ/OLLAMA_API_BASE
+    model_info:
+      description: "Мультиязычные локальные эмбеддинги для RAG и поиска по коду"
+      mode: embedding
+
+  # ----------------------------------------------------------------------------
+  # 2. Быстрые облачные модели (Google Gemini 2.5 Flash)
+  # ----------------------------------------------------------------------------
+  - model_name: luna-fast
+    litellm_params:
+      model: gemini/gemini-2.5-flash
+      api_key: os.environ/GEMINI_API_KEY
+    model_info:
+      description: "Сверхбыстрая облачная модель для длинных документов, переводов и суммаризации"
+      mode: chat
+
+  # ----------------------------------------------------------------------------
+  # 3. Интеллектуальные архитектурные модели (Claude 3.5 Sonnet & Gemini Pro)
+  # ----------------------------------------------------------------------------
+  - model_name: luna-smart
+    litellm_params:
+      model: anthropic/claude-3-5-sonnet-20241022
+      api_key: os.environ/ANTHROPIC_API_KEY
+    model_info:
+      description: "Флагманский агент Anthropic для сложной архитектуры, рефакторинга и логики"
+      mode: chat
+
+  - model_name: luna-pro
+    litellm_params:
+      model: gemini/gemini-2.5-pro
+      api_key: os.environ/GEMINI_API_KEY
+    model_info:
+      description: "Глубокий анализ кода и огромные контексты до 1-2 млн токенов"
+      mode: chat
+
+  # ----------------------------------------------------------------------------
+  # 4. Логический роутер с отказоустойчивостью (Failover / Routing Group)
+  # ----------------------------------------------------------------------------
+  - model_name: luna-auto
+    litellm_params:
+      model: ollama/qwen2.5-coder:7b
+      api_base: os.environ/OLLAMA_API_BASE
+    model_info:
+      description: "Авто-выбор: код отдаётся локальной RX 580, при перегрузке — Gemini Flash"
+      mode: chat
+
+router_settings:
+  routing_strategy: latency-based-routing
+  fallbacks:
+    - luna-coder: ["luna-fast"]
+    - luna-auto: ["luna-fast", "luna-smart"]
+    - luna-smart: ["luna-pro"]
+  allowed_fails: 2
+  cooldown_time: 30
+
+# ==============================================================================
+# 5. Langfuse Observability & Tracing (Логирование каждого токена и промпта)
+# ==============================================================================
+litellm_settings:
+  drop_params: true
+  set_verbose: false
+  success_callback: ["langfuse"]
+  failure_callback: ["langfuse"]
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
