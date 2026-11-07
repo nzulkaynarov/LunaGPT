@@ -10,7 +10,7 @@ from lunagpt.services.router import detect_criticism_and_model
 
 @pytest.mark.asyncio
 async def test_v1_models_endpoint() -> None:
-    """Test GET /v1/models returns standard chat model list without embedding models."""
+    """Test GET /v1/models returns curated 3-tier chat model list without internal models."""
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.get("/v1/models")
@@ -18,12 +18,13 @@ async def test_v1_models_endpoint() -> None:
         data = resp.json()
         assert data["object"] == "list"
         model_ids = [m["id"] for m in data["data"]]
-        assert "luna-auto" in model_ids
+        assert len(model_ids) == 3
         assert "luna-smart" in model_ids
-        assert "luna-coder" in model_ids
         assert "luna-fast" in model_ids
         assert "luna-pro" in model_ids
-        assert "luna-embed" not in model_ids  # embedding model excluded from chat list
+        assert "luna-coder" not in model_ids
+        assert "luna-auto" not in model_ids
+        assert "luna-embed" not in model_ids
 
 
 @pytest.mark.asyncio
@@ -42,12 +43,12 @@ def test_router_list_and_dict_content() -> None:
     """Ensure detect_criticism_and_model handles lists and dicts without crashing."""
     list_prompt = [{"type": "text", "text": "код не работает, исправь"}]
     model, reason, is_crit = detect_criticism_and_model(list_prompt)
-    assert model == "luna-smart"
+    assert model == "luna-pro"
     assert is_crit is True
 
     dict_prompt = {"text": "Напиши простой скрипт"}
     model, reason, is_crit = detect_criticism_and_model(dict_prompt)
-    assert model == "luna-coder"
+    assert model == "luna-smart"
     assert is_crit is False
 
 

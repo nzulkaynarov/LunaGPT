@@ -66,28 +66,28 @@ def classify_task(prompt: str) -> tuple[str, str, bool]:
 
     if is_criticism:
         return (
-            "luna-smart",
-            "Детекция критики/ошибки: авто-эскалация на Claude 3.5 Sonnet с рефлексией",
+            "luna-pro",
+            "Детекция критики/ошибки: авто-эскалация на Claude Opus 4.6 с глубокой рефлексией",
             True,
         )
 
     if any(k in prompt_lower for k in SMART_KEYWORDS):
         return (
-            "luna-smart",
-            "Сложная архитектурная задача / глубокий анализ (Claude 3.5 Sonnet)",
+            "luna-pro",
+            "Сложная архитектурная задача / глубокий системный анализ (Claude Opus 4.6)",
             False,
         )
 
     if len(prompt) > 2000 or any(k in prompt_lower for k in FAST_KEYWORDS):
         return (
             "luna-fast",
-            "Объёмный текст / перевод / суммаризация (Gemini 2.5 Flash)",
+            "Объёмный текст / перевод / суммаризация (Gemini 3.5 Flash Lite)",
             False,
         )
 
     return (
-        "luna-coder",
-        "Код / генерация скрипта / локальная задача (Ollama RX 580 8GB $0)",
+        "luna-smart",
+        "Универсальный интеллект: аналитика, код, логика (Claude Sonnet 4.6)",
         False,
     )
 

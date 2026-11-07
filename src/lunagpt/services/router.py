@@ -32,17 +32,19 @@ CRITICISM_KEYWORDS = [
     "сломал",
 ]
 
-SMART_KEYWORDS = [
+PRO_KEYWORDS = [
     "архитектур",
     "спроектируй",
-    "refactor",
-    "security",
-    "уязвимост",
     "system design",
     "паттерн",
     "trade-off",
     "стратеги",
+    "security audit",
+    "уязвимост",
     "orchestrat",
+    "deep thinking",
+    "глубокий анализ",
+    "детальный аудит",
 ]
 
 FAST_KEYWORDS = [
@@ -96,28 +98,28 @@ def detect_criticism_and_model(prompt: Any) -> tuple[str, str, bool]:
 
     if is_criticism:
         return (
-            "luna-smart",
-            "Детекция критики/ошибки: авто-эскалация на Claude 3.5 Sonnet с рефлексией",
+            "luna-pro",
+            "Детекция критики/ошибки: авто-эскалация на Claude Opus 4.6 (luna-pro) с глубокой рефлексией",
             True,
         )
 
-    if any(k in prompt_lower for k in SMART_KEYWORDS):
+    if any(k in prompt_lower for k in PRO_KEYWORDS):
         return (
-            "luna-smart",
-            "Сложная архитектурная задача / глубокий анализ (Claude 3.5 Sonnet)",
+            "luna-pro",
+            "Сложная архитектурная задача / глубокий системный аудит (Claude Opus 4.6)",
             False,
         )
 
     if len(clean_text) > 2000 or any(k in prompt_lower for k in FAST_KEYWORDS):
         return (
             "luna-fast",
-            "Объёмный текст / перевод / суммаризация (Gemini 2.5 Flash)",
+            "Объёмный текст / перевод / выжимка (Gemini 3.5 Flash Lite)",
             False,
         )
 
     return (
-        "luna-coder",
-        "Код / генерация скрипта / типовая задача (Ollama RX 580 8GB $0)",
+        "luna-smart",
+        "Универсальный интеллект: аналитика, код, логика (Claude Sonnet 4.6)",
         False,
     )
 
@@ -245,13 +247,18 @@ async def execute_openai_chat_completion(
 
     detected_model, reason, is_criticism = detect_criticism_and_model(user_query)
 
-    # Safe fallback if embedding model or auto was requested
-    if req.model in ("luna-auto", "auto", "luna-embed", "embed") or not req.model:
+    # Safe fallback and alias mapping (3-tier lineup)
+    requested_model = (req.model or "luna-smart").strip()
+    if requested_model in ("luna-auto", "auto", "default", ""):
         target_model = detected_model
-    elif is_criticism:
-        target_model = "luna-smart"
+    elif requested_model in ("luna-embed", "embed"):
+        target_model = "luna-fast"
+    elif requested_model == "luna-smart" and is_criticism:
+        target_model = "luna-pro"
+    elif requested_model in ("luna-fast", "luna-smart", "luna-pro", "luna-coder"):
+        target_model = requested_model
     else:
-        target_model = req.model
+        target_model = "luna-smart"
 
     # 2. Query past lessons from pgvector
     lessons_injected = 0

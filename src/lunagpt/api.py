@@ -51,15 +51,13 @@ async def health_check() -> dict[str, str]:
 
 @app.get("/v1/models", response_model=ModelListResponse)
 async def list_models() -> ModelListResponse:
-    """Standard OpenAI /v1/models endpoint."""
+    """Standard OpenAI /v1/models endpoint offering the 3-tier curated lineup."""
     return ModelListResponse(
         object="list",
         data=[
-            ModelItem(id="luna-auto", owned_by="lunagpt"),
             ModelItem(id="luna-smart", owned_by="anthropic"),
-            ModelItem(id="luna-pro", owned_by="anthropic"),
             ModelItem(id="luna-fast", owned_by="google"),
-            ModelItem(id="luna-coder", owned_by="ollama"),
+            ModelItem(id="luna-pro", owned_by="anthropic"),
         ],
     )
 

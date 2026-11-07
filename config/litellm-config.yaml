@@ -67,8 +67,10 @@ model_list:
 router_settings:
   routing_strategy: latency-based-routing
   fallbacks:
-    - luna-coder: ["luna-fast"]
     - luna-smart: ["luna-pro", "luna-fast"]
+    - luna-pro: ["luna-smart", "luna-fast"]
+    - luna-fast: ["luna-smart"]
+    - luna-coder: ["luna-fast"]
     - luna-auto: ["luna-smart", "luna-fast"]
   allowed_fails: 2
   cooldown_time: 30
