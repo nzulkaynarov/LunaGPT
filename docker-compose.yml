@@ -60,6 +60,12 @@ services:
       - RAG_OPENAI_API_BASE_URL=http://core:8010/v1
       - RAG_OPENAI_API_KEY=${LITELLM_MASTER_KEY}
       - RAG_EMBEDDING_MODEL=luna-embed
+      - CONTENT_EXTRACTION_ENGINE=external
+      - EXTERNAL_DOCUMENT_LOADER_URL=http://core:8010
+      - EXTERNAL_DOCUMENT_LOADER_API_KEY=${LITELLM_MASTER_KEY}
+      - VECTOR_DB=pgvector
+      - PGVECTOR_DB_URL=postgresql://postgres:${POSTGRES_PASSWORD:-lunagpt_secure_postgres_pass}@langfuse-db:5432/lunagpt
+      - PGVECTOR_INITIALIZE_MAX_VECTOR_LENGTH=1024
       - BYPASS_MODEL_ACCESS_CONTROL=True
       - BYPASS_RETRIEVAL_ACCESS_CONTROL=True
       - DEFAULT_USER_ROLE=user
@@ -67,7 +73,7 @@ services:
       - TASK_MODEL=luna-fast
       - TASK_MODEL_EXTERNAL=luna-fast
       - AUDIO_STT_ENGINE=web
-      - AUDIO_TTS_ENGINE=web
+      - AUDIO_TTS_ENGINE=
       - ENABLE_WEB_SEARCH=True
       - WEB_SEARCH_ENGINE=searxng
       - SEARXNG_QUERY_URL=http://searxng:8080/search?q=<query>

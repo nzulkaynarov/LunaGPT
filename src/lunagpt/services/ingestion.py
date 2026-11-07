@@ -4,6 +4,8 @@ import io
 import re
 import time
 import uuid
+import xml.etree.ElementTree as ET
+import zipfile
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -63,8 +65,8 @@ def _extract_text_docling(filename: str, content_bytes: bytes) -> str | None:
         return None
 
 
-def _extract_text(filename: str, content_bytes: bytes) -> str:
-    """Extract text from PDF, DOCX, HTML, Markdown, or plain text."""
+def extract_text(filename: str, content_bytes: bytes) -> str:
+    """Extract text from PDF, DOCX, PPTX, XLSX, ODT, HTML, Markdown, or plain text."""
     # 1. Try Docling first if available
     docling_result = _extract_text_docling(filename, content_bytes)
     if docling_result:
@@ -80,14 +82,40 @@ def _extract_text(filename: str, content_bytes: bytes) -> str:
 
     # 3. DOCX extraction
     if suffix in (".docx", ".doc"):
-        doc = DocxDocument(io.BytesIO(content_bytes))
-        paras = [p.text for p in doc.paragraphs if p.text.strip()]
-        for table in doc.tables:
-            for row in table.rows:
-                paras.append(" | ".join(cell.text.strip() for cell in row.cells))
-        return "\n\n".join(paras)
+        try:
+            doc = DocxDocument(io.BytesIO(content_bytes))
+            paras = [p.text for p in doc.paragraphs if p.text.strip()]
+            for table in doc.tables:
+                for row in table.rows:
+                    paras.append(" | ".join(cell.text.strip() for cell in row.cells))
+            return "\n\n".join(paras)
+        except Exception:
+            pass
 
-    # 4. HTML extraction
+    # 4. PPTX / XLSX / ODT (XML-in-ZIP archives)
+    if suffix in (".pptx", ".xlsx", ".odt") or zipfile.is_zipfile(io.BytesIO(content_bytes)):
+        try:
+            extracted_parts: list[str] = []
+            with zipfile.ZipFile(io.BytesIO(content_bytes)) as zf:
+                for name in sorted(zf.namelist()):
+                    if name.endswith(".xml") and (
+                        "slides/slide" in name
+                        or "sharedStrings" in name
+                        or "worksheets/sheet" in name
+                        or name == "content.xml"
+                        or name == "word/document.xml"
+                    ):
+                        xml_bytes = zf.read(name)
+                        root = ET.fromstring(xml_bytes)
+                        texts = [t.strip() for t in root.itertext() if t and t.strip()]
+                        if texts:
+                            extracted_parts.append(" ".join(texts))
+            if extracted_parts:
+                return "\n\n".join(extracted_parts)
+        except Exception:
+            pass
+
+    # 5. HTML extraction
     if suffix in (".html", ".htm"):
         parser = _HTMLTextExtractor()
         try:
@@ -97,11 +125,17 @@ def _extract_text(filename: str, content_bytes: bytes) -> str:
         except Exception:
             pass
 
-    # 5. Markdown / Plain Text
+    # 6. Markdown / Plain Text
     try:
         return content_bytes.decode("utf-8")
     except UnicodeDecodeError:
-        return content_bytes.decode("latin-1", errors="replace")
+        try:
+            return content_bytes.decode("cp1251")
+        except UnicodeDecodeError:
+            return content_bytes.decode("latin-1", errors="replace")
+
+
+_extract_text = extract_text
 
 
 def _chunk_text(text: str, chunk_size: int = 1000, overlap: int = 150) -> list[str]:

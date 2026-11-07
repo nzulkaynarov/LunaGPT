@@ -88,3 +88,33 @@ def test_chat_schema_flexible_formats() -> None:
     )
     assert len(req.messages) == 2
     assert req.user["name"] == "Admin"
+
+
+@pytest.mark.asyncio
+async def test_process_external_document_endpoint() -> None:
+    """Test PUT /process for Open WebUI ExternalDocumentLoader compatibility."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # 1. Plain text / Markdown with URL-encoded filename
+        resp = await client.put(
+            "/process",
+            content="Привет, мир! Это тестовый документ.".encode(),
+            headers={"X-Filename": "%D0%BE%D1%82%D1%87%D0%B5%D1%82.md", "Content-Type": "text/markdown"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "Привет, мир!" in data["page_content"]
+        assert data["metadata"]["source"] == "отчет.md"
+
+        # 2. HTML document stripping scripts and tags
+        html_bytes = b"<html><head><script>alert(1)</script></head><body><h1>Title</h1><p>Body text</p></body></html>"
+        resp_html = await client.put(
+            "/process",
+            content=html_bytes,
+            headers={"X-Filename": "page.html", "Content-Type": "text/html"},
+        )
+        assert resp_html.status_code == 200
+        html_data = resp_html.json()
+        assert "Title" in html_data["page_content"]
+        assert "Body text" in html_data["page_content"]
+        assert "alert(1)" not in html_data["page_content"]

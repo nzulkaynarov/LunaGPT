@@ -5,9 +5,10 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
+from urllib.parse import unquote
 
 import httpx
-from fastapi import Body, Depends, FastAPI, File, HTTPException, Response, UploadFile
+from fastapi import Body, Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,7 +27,7 @@ from lunagpt.schemas import (
     PromptRequest,
     PromptResponse,
 )
-from lunagpt.services.ingestion import delete_document, ingest_document, list_documents
+from lunagpt.services.ingestion import delete_document, extract_text, ingest_document, list_documents
 from lunagpt.services.memory import export_dpo_dataset, save_feedback_memory
 from lunagpt.services.router import execute_openai_chat_completion, execute_smart_routing
 
@@ -81,17 +82,40 @@ async def openai_chat_completions(req: ChatCompletionRequest, db: AsyncSession =
 @app.post("/v1/embeddings")
 async def openai_embeddings(req: dict[str, Any] = Body(...)) -> Response:
     """OpenAI-compatible embeddings endpoint forwarding to LiteLLM (bge-m3)."""
+    payload = dict(req)
+    payload["model"] = "luna-embed"
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {settings.litellm_master_key}",
     }
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(settings.litellm_embeddings_endpoint, json=req, headers=headers)
+            resp = await client.post(settings.litellm_embeddings_endpoint, json=payload, headers=headers)
             resp.raise_for_status()
             return Response(content=resp.content, media_type="application/json")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.api_route("/process", methods=["PUT", "POST"])
+async def process_external_document(request: Request) -> dict[str, Any]:
+    """External document extractor endpoint compatible with Open WebUI ExternalDocumentLoader."""
+    raw_filename = request.headers.get("X-Filename") or request.headers.get("x-filename") or "document.txt"
+    filename = unquote(raw_filename)
+    content_bytes = await request.body()
+    try:
+        text = extract_text(filename, content_bytes)
+        if not text or not text.strip():
+            text = f"[Document: {filename}]"
+        return {
+            "page_content": text,
+            "metadata": {
+                "source": filename,
+                "content_type": request.headers.get("Content-Type", "application/octet-stream"),
+            },
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Document extraction failed: {exc}") from exc
 
 
 @app.post("/api/v1/chat", response_model=PromptResponse)
