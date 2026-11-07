@@ -45,7 +45,7 @@ services:
   # 3. LunaGPT Web UI (Open WebUI)
   # ============================================================================
   open-webui:
-    image: ghcr.io/open-webui/open-webui:0.5.20
+    image: ghcr.io/open-webui/open-webui:main-slim
     container_name: lunagpt-webui
     restart: unless-stopped
     ports:
