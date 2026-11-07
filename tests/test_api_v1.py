@@ -1,5 +1,8 @@
 """Unit tests for LunaGPT OpenAI-compatible v1 endpoints."""
 
+from typing import Any
+
+import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -118,3 +121,47 @@ async def test_process_external_document_endpoint() -> None:
         assert "Title" in html_data["page_content"]
         assert "Body text" in html_data["page_content"]
         assert "alert(1)" not in html_data["page_content"]
+
+
+@pytest.mark.asyncio
+async def test_audio_transcriptions_empty_file() -> None:
+    """Test POST /v1/audio/transcriptions returns 400 on empty audio."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/v1/audio/transcriptions",
+            files={"file": ("empty.ogg", b"", "audio/ogg")},
+        )
+        assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_audio_transcriptions_mocked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test POST /v1/audio/transcriptions forwards to LiteLLM and returns transcribed text."""
+    from unittest.mock import MagicMock
+
+    orig_post = httpx.AsyncClient.post
+
+    async def mock_post(self: Any, url: Any, *args: Any, **kwargs: Any) -> Any:
+        if "chat/completions" in str(url):
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.raise_for_status = MagicMock()
+            mock_resp.json.return_value = {
+                "choices": [{"message": {"content": "Привет, поставь детям паузу на 30 минут"}}]
+            }
+            return mock_resp
+        return await orig_post(self, url, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/v1/audio/transcriptions",
+            files={"file": ("voice.oga", b"fake_ogg_bytes_12345", "audio/ogg")},
+            data={"language": "ru"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["text"] == "Привет, поставь детям паузу на 30 минут"

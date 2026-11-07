@@ -1,5 +1,6 @@
 """FastAPI Application exposing LunaGPT Core endpoints."""
 
+import base64
 import json
 import uuid
 from collections.abc import AsyncIterator
@@ -8,7 +9,7 @@ from typing import Any
 from urllib.parse import unquote
 
 import httpx
-from fastapi import Body, Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -95,6 +96,80 @@ async def openai_embeddings(req: dict[str, Any] = Body(...)) -> Response:
             return Response(content=resp.content, media_type="application/json")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/v1/audio/transcriptions")
+async def audio_transcriptions(
+    file: UploadFile = File(...),
+    model: str = Form("luna-fast"),
+    language: str | None = Form(None),
+    prompt: str | None = Form(None),
+    response_format: str = Form("json"),
+) -> dict[str, Any]:
+    """OpenAI-compatible speech-to-text audio transcription powered by multimodal luna-fast."""
+    try:
+        content = await file.read()
+        if not content:
+            raise HTTPException(status_code=400, detail="Empty audio file")
+
+        filename = file.filename or "audio.ogg"
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "ogg"
+        if ext in ("oga", "ogg"):
+            audio_format = "ogg"
+        elif ext in ("wav", "wave"):
+            audio_format = "wav"
+        elif ext in ("mp3", "mpeg"):
+            audio_format = "mp3"
+        elif ext in ("m4a", "mp4"):
+            audio_format = "mp4"
+        elif ext in ("webm",):
+            audio_format = "webm"
+        else:
+            audio_format = "ogg"
+
+        b64_audio = base64.b64encode(content).decode("utf-8")
+        instruction = (
+            "Transcribe this audio recording accurately in its spoken language. "
+            "Return ONLY the verbatim transcribed text without any timestamps, explanation, or quotes."
+        )
+        if language:
+            instruction += f" The spoken language is {language}."
+        if prompt:
+            instruction += f" Context/Glossary: {prompt}."
+
+        payload = {
+            "model": "luna-fast",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_audio",
+                            "input_audio": {
+                                "data": b64_audio,
+                                "format": audio_format,
+                            },
+                        },
+                        {"type": "text", "text": instruction},
+                    ],
+                }
+            ],
+            "temperature": 0.0,
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {settings.litellm_master_key}",
+        }
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(settings.litellm_endpoint, json=payload, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+            transcription = data["choices"][0]["message"]["content"].strip()
+            return {"text": transcription}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {exc}") from exc
 
 
 @app.api_route("/process", methods=["PUT", "POST"])
