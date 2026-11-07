@@ -39,6 +39,30 @@ async def test_health_endpoint() -> None:
         assert data["service"] == "lunagpt-core"
 
 
+@pytest.mark.asyncio
+async def test_documents_list_endpoint() -> None:
+    """Test GET /api/v1/documents returns document list structure."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/v1/documents")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "documents" in data
+        assert "total" in data
+        assert isinstance(data["documents"], list)
+
+
+@pytest.mark.asyncio
+async def test_feedback_export_dpo_endpoint() -> None:
+    """Test GET /api/v1/feedback/export-dpo returns list."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/v1/feedback/export-dpo")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert isinstance(data, list)
+
+
 def test_router_list_and_dict_content() -> None:
     """Ensure detect_criticism_and_model handles lists and dicts without crashing."""
     list_prompt = [{"type": "text", "text": "код не работает, исправь"}]

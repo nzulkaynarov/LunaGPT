@@ -1,6 +1,7 @@
 """Smart Router with Negative Feedback Detection, Reflection, and Model Escalation."""
 
 import json
+import re
 import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -13,23 +14,41 @@ from lunagpt.schemas import ChatCompletionRequest, PromptRequest, PromptResponse
 from lunagpt.services.ingestion import search_document_chunks
 from lunagpt.services.memory import search_relevant_feedback
 
-CRITICISM_KEYWORDS = [
+BACKGROUND_TASK_PATTERNS = [
+    "### Task:",
+    "Generate a concise, 3-5 word title",
+    "Generate 1-3 broad tags",
+    "Generate 3 relevant follow-up",
+    "Provide a search query to find information",
+]
+
+CRITICISM_PHRASES = [
     "не работает",
-    "ошибка",
     "неправильно",
     "ты ошибся",
+    "вы ошиблись",
     "переделай",
     "исправь",
-    "не то",
-    "баг",
-    "exception",
-    "failed",
-    "error",
-    "wrong",
+    "сломал",
+    "ты сломал",
+    "не помогло",
+    "выдает ошибку",
+    "выдаёт ошибку",
+    "в коде ошибка",
+    "ошибка осталась",
+    "все еще ошибка",
+    "всё ещё ошибка",
+    "снова ошибка",
     "fix this",
     "redo",
-    "invalid",
-    "сломал",
+    "wrong",
+    "broken",
+    "did not work",
+    "still failing",
+    "still error",
+    "doesn't work",
+    "you are wrong",
+    "it failed",
 ]
 
 PRO_KEYWORDS = [
@@ -86,15 +105,36 @@ def _extract_text_from_content(content: Any) -> str:
     return str(content)
 
 
-def detect_criticism_and_model(prompt: Any) -> tuple[str, str, bool]:
+def is_openwebui_task(text: str) -> bool:
+    """Detect automated background utility tasks from Open WebUI."""
+    return any(p in text for p in BACKGROUND_TASK_PATTERNS)
+
+
+def detect_criticism_and_model(prompt: Any, has_history: bool = True) -> tuple[str, str, bool]:
     """
     Classify model and detect user dissatisfaction / criticism.
     Supports str, list of parts, or dicts.
     Returns (model_name, decision_reason, is_criticism).
     """
     clean_text = _extract_text_from_content(prompt)
+    if is_openwebui_task(clean_text):
+        return (
+            "luna-fast",
+            "Служебная фоновая задача Open WebUI (Gemini 3.5 Flash Lite)",
+            False,
+        )
+
     prompt_lower = clean_text.lower()
-    is_criticism = any(k in prompt_lower for k in CRITICISM_KEYWORDS)
+
+    # Criticism is only possible if there is previous dialogue history with the assistant
+    is_criticism = False
+    if has_history:
+        has_phrase = any(phrase in prompt_lower for phrase in CRITICISM_PHRASES)
+        has_word_match = bool(
+            re.search(r"\b(не то|это не то|ответ не то|код сломан)\b", prompt_lower)
+            or re.search(r"\b(баг|exception|failed|error|ошибка)\b", prompt_lower)
+        )
+        is_criticism = has_phrase or has_word_match
 
     if is_criticism:
         return (
@@ -245,11 +285,15 @@ async def execute_openai_chat_completion(
             if user_query:
                 break
 
-    detected_model, reason, is_criticism = detect_criticism_and_model(user_query)
+    has_assistant_history = any(m.role == "assistant" for m in req.messages)
+    is_background = is_openwebui_task(user_query)
+    detected_model, reason, is_criticism = detect_criticism_and_model(user_query, has_history=has_assistant_history)
 
     # Safe fallback and alias mapping (3-tier lineup)
     requested_model = (req.model or "luna-smart").strip()
-    if requested_model in ("luna-auto", "auto", "default", ""):
+    if is_background:
+        target_model = "luna-fast"
+    elif requested_model in ("luna-auto", "auto", "default", ""):
         target_model = detected_model
     elif requested_model in ("luna-embed", "embed"):
         target_model = "luna-fast"
@@ -260,10 +304,12 @@ async def execute_openai_chat_completion(
     else:
         target_model = "luna-smart"
 
-    # 2. Query past lessons from pgvector
+    # 2. Query past lessons and RAG documents from pgvector (skip for background tasks)
     lessons_injected = 0
+    rag_chunks_injected = 0
     extra_system_parts: list[str] = []
-    if user_query:
+
+    if user_query and not is_background:
         try:
             memories = await search_relevant_feedback(db, user_query, limit=2)
             if memories:
@@ -278,6 +324,15 @@ async def execute_openai_chat_completion(
                     f"### PAST LESSONS & PREVENTED MISTAKES:\n{lessons_text}\n"
                     "Do NOT repeat the previous mistakes mentioned above."
                 )
+        except Exception:
+            pass
+
+        try:
+            chunks = await search_document_chunks(db, user_query, limit=3)
+            if chunks:
+                rag_chunks_injected = len(chunks)
+                rag_text = "\n\n".join([f"[{c.chunk_index}] {c.content}" for c in chunks])
+                extra_system_parts.append(f"### RELEVANT KNOWLEDGE BASE CONTEXT (RAG):\n{rag_text}")
         except Exception:
             pass
 
@@ -322,15 +377,24 @@ async def execute_openai_chat_completion(
 
     # 4. Prepare LiteLLM payload with all client parameters
     trace_id = str(uuid.uuid4())
+    user_id = "default-user"
+    if isinstance(req.user, dict):
+        user_id = str(req.user.get("email") or req.user.get("id") or req.user.get("name") or "default-user")
+    elif isinstance(req.user, str) and req.user:
+        user_id = req.user
+
     payload: dict[str, Any] = {
         "model": target_model,
         "messages": out_messages,
         "stream": req.stream,
         "metadata": {
             "trace_id": trace_id,
+            "user_id": user_id,
             "routing_reason": reason,
             "is_criticism": is_criticism,
             "lessons_injected": lessons_injected,
+            "rag_chunks_injected": rag_chunks_injected,
+            "is_background_task": is_background,
             "source": "lunagpt_core_openai_compat",
         },
     }

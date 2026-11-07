@@ -26,7 +26,7 @@ class PromptResponse(BaseModel):
     duration_sec: float
     response: str
     trace_id: str
-    tokens: dict = Field(default_factory=dict)
+    tokens: dict[str, Any] = Field(default_factory=dict)
     lessons_injected: int = 0
     rag_chunks_injected: int = 0
 
@@ -60,6 +60,40 @@ class DocumentIngestResponse(BaseModel):
     file_type: str
     chunks_count: int
     duration_sec: float
+
+
+class DocumentItem(BaseModel):
+    """Document list item."""
+
+    id: str
+    title: str
+    file_type: str
+    chunks_count: int = 0
+    created_at: str
+
+
+class DocumentListResponse(BaseModel):
+    """List of ingested documents."""
+
+    documents: list[DocumentItem]
+    total: int
+
+
+class DeleteResponse(BaseModel):
+    """Deletion response."""
+
+    success: bool
+    message: str
+
+
+class DPOItem(BaseModel):
+    """Direct Preference Optimization (DPO) training pair."""
+
+    prompt: str
+    chosen: str
+    rejected: str | None = None
+    model: str
+    score: float
 
 
 class ChatMessage(BaseModel):

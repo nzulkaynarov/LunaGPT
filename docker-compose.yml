@@ -63,7 +63,9 @@ services:
       - BYPASS_MODEL_ACCESS_CONTROL=True
       - BYPASS_RETRIEVAL_ACCESS_CONTROL=True
       - DEFAULT_USER_ROLE=user
-      - DEFAULT_MODELS=luna-auto
+      - DEFAULT_MODELS=luna-smart
+      - TASK_MODEL=luna-fast
+      - TASK_MODEL_EXTERNAL=luna-fast
       - AUDIO_STT_ENGINE=web
       - AUDIO_TTS_ENGINE=web
       - ENABLE_WEB_SEARCH=True
@@ -157,6 +159,9 @@ services:
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
       - LUNAGPT_DATABASE_URL=postgresql+psycopg://postgres:${POSTGRES_PASSWORD:-lunagpt_secure_postgres_pass}@langfuse-db:5432/lunagpt
       - REDIS_URL=redis://lunagpt-redis:6379/0
+      - LANGFUSE_HOST=${LANGFUSE_HOST:-http://langfuse-server:3000}
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-pk-lf-luna-local-public-key}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-sk-lf-luna-local-secret-key}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

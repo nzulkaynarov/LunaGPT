@@ -6,10 +6,11 @@ import time
 import uuid
 from html.parser import HTMLParser
 from pathlib import Path
+from typing import Any
 
 from docx import Document as DocxDocument
 from pypdf import PdfReader
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lunagpt.models import Document, DocumentChunk
@@ -54,7 +55,7 @@ def _extract_text_docling(filename: str, content_bytes: bytes) -> str | None:
         temp_path.write_bytes(content_bytes)
         try:
             conv_result = converter.convert(temp_path)
-            return conv_result.document.export_to_markdown()
+            return str(conv_result.document.export_to_markdown())
         finally:
             if temp_path.exists():
                 temp_path.unlink()
@@ -165,11 +166,59 @@ async def ingest_document(db: AsyncSession, filename: str, content_bytes: bytes)
     return doc_id, len(chunks), round(elapsed, 2)
 
 
-async def search_document_chunks(db: AsyncSession, query: str, limit: int = 3) -> list[DocumentChunk]:
-    """Retrieve top-K most relevant chunks using cosine similarity."""
+async def search_document_chunks(
+    db: AsyncSession, query: str, limit: int = 3, threshold: float = 0.65
+) -> list[DocumentChunk]:
+    """
+    Retrieve top-K most relevant chunks using cosine similarity.
+    Only returns chunks where cosine similarity >= threshold (distance <= 1 - threshold).
+    """
     query_emb = await get_embedding(query)
+    dist_expr = DocumentChunk.embedding.cosine_distance(query_emb)
 
-    stmt = select(DocumentChunk).order_by(DocumentChunk.embedding.cosine_distance(query_emb)).limit(limit)
+    max_distance = 1.0 - threshold
+    stmt = select(DocumentChunk).where(dist_expr <= max_distance).order_by(dist_expr).limit(limit)
     result = await db.execute(stmt)
     chunks = result.scalars().all()
     return list(chunks)
+
+
+async def list_documents(db: AsyncSession) -> list[dict[str, Any]]:
+    """List all ingested documents and their chunk counts."""
+    stmt = (
+        select(
+            Document.id,
+            Document.title,
+            Document.file_type,
+            Document.created_at,
+            func.count(DocumentChunk.id).label("chunks_count"),
+        )
+        .outerjoin(DocumentChunk, Document.id == DocumentChunk.document_id)
+        .group_by(Document.id)
+        .order_by(Document.created_at.desc())
+    )
+    result = await db.execute(stmt)
+    docs = []
+    for row in result.all():
+        docs.append(
+            {
+                "id": str(row.id),
+                "title": row.title,
+                "file_type": row.file_type,
+                "created_at": row.created_at.isoformat() if row.created_at else "",
+                "chunks_count": int(row.chunks_count),
+            }
+        )
+    return docs
+
+
+async def delete_document(db: AsyncSession, document_id: uuid.UUID) -> bool:
+    """Delete a document and its cascading chunks."""
+    stmt = select(Document).where(Document.id == document_id)
+    result = await db.execute(stmt)
+    doc = result.scalar_one_or_none()
+    if not doc:
+        return False
+    await db.delete(doc)
+    await db.commit()
+    return True

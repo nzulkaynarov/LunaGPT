@@ -7,6 +7,7 @@ LunaGPT Intelligent Agent Router CLI
 
 import json
 import os
+import re
 import sys
 import time
 from urllib.request import Request, urlopen
@@ -14,23 +15,41 @@ from urllib.request import Request, urlopen
 LITELLM_ENDPOINT = os.getenv("LITELLM_ENDPOINT", "http://localhost:4000/v1/chat/completions")
 LITELLM_KEY = os.getenv("LITELLM_MASTER_KEY", "sk-luna-master-key-2026")
 
-CRITICISM_KEYWORDS = [
+BACKGROUND_TASK_PATTERNS = [
+    "### Task:",
+    "Generate a concise, 3-5 word title",
+    "Generate 1-3 broad tags",
+    "Generate 3 relevant follow-up",
+    "Provide a search query to find information",
+]
+
+CRITICISM_PHRASES = [
     "не работает",
-    "ошибка",
     "неправильно",
     "ты ошибся",
+    "вы ошиблись",
     "переделай",
     "исправь",
-    "не то",
-    "баг",
-    "exception",
-    "failed",
-    "error",
-    "wrong",
+    "сломал",
+    "ты сломал",
+    "не помогло",
+    "выдает ошибку",
+    "выдаёт ошибку",
+    "в коде ошибка",
+    "ошибка осталась",
+    "все еще ошибка",
+    "всё ещё ошибка",
+    "снова ошибка",
     "fix this",
     "redo",
-    "invalid",
-    "сломал",
+    "wrong",
+    "broken",
+    "did not work",
+    "still failing",
+    "still error",
+    "doesn't work",
+    "you are wrong",
+    "it failed",
 ]
 
 SMART_KEYWORDS = [
@@ -60,9 +79,23 @@ FAST_KEYWORDS = [
 ]
 
 
-def classify_task(prompt: str) -> tuple[str, str, bool]:
+def classify_task(prompt: str, has_history: bool = True) -> tuple[str, str, bool]:
+    if any(p in prompt for p in BACKGROUND_TASK_PATTERNS):
+        return (
+            "luna-fast",
+            "Служебная фоновая задача Open WebUI (Gemini 3.5 Flash Lite)",
+            False,
+        )
+
     prompt_lower = prompt.lower()
-    is_criticism = any(k in prompt_lower for k in CRITICISM_KEYWORDS)
+    is_criticism = False
+    if has_history:
+        has_phrase = any(phrase in prompt_lower for phrase in CRITICISM_PHRASES)
+        has_word_match = bool(
+            re.search(r"\b(не то|это не то|ответ не то|код сломан)\b", prompt_lower)
+            or re.search(r"\b(баг|exception|failed|error|ошибка)\b", prompt_lower)
+        )
+        is_criticism = has_phrase or has_word_match
 
     if is_criticism:
         return (

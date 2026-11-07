@@ -1,6 +1,7 @@
 """FastAPI Application exposing LunaGPT Core endpoints."""
 
 import json
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -14,7 +15,10 @@ from lunagpt.config import settings
 from lunagpt.db import Base, engine, get_db_session
 from lunagpt.schemas import (
     ChatCompletionRequest,
+    DeleteResponse,
     DocumentIngestResponse,
+    DocumentItem,
+    DocumentListResponse,
     FeedbackRequest,
     FeedbackResponse,
     ModelItem,
@@ -22,8 +26,8 @@ from lunagpt.schemas import (
     PromptRequest,
     PromptResponse,
 )
-from lunagpt.services.ingestion import ingest_document
-from lunagpt.services.memory import save_feedback_memory
+from lunagpt.services.ingestion import delete_document, ingest_document, list_documents
+from lunagpt.services.memory import export_dpo_dataset, save_feedback_memory
 from lunagpt.services.router import execute_openai_chat_completion, execute_smart_routing
 
 
@@ -128,5 +132,32 @@ async def ingest_document_endpoint(
             chunks_count=chunks_count,
             duration_sec=duration,
         )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/documents", response_model=DocumentListResponse)
+async def get_documents(db: AsyncSession = Depends(get_db_session)) -> DocumentListResponse:
+    """List all ingested documents and their chunk counts."""
+    docs = await list_documents(db)
+    items = [DocumentItem(**d) for d in docs]
+    return DocumentListResponse(documents=items, total=len(items))
+
+
+@app.delete("/api/v1/documents/{document_id}", response_model=DeleteResponse)
+async def remove_document(document_id: uuid.UUID, db: AsyncSession = Depends(get_db_session)) -> DeleteResponse:
+    """Delete an ingested document and its chunks."""
+    deleted = await delete_document(db, document_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return DeleteResponse(success=True, message=f"Document {document_id} and associated chunks deleted successfully.")
+
+
+@app.get("/api/v1/feedback/export-dpo")
+async def export_dpo(db: AsyncSession = Depends(get_db_session)) -> list[dict[str, Any]]:
+    """Export feedback memory pairs as DPO training records (prompt, chosen, rejected)."""
+    try:
+        data: list[dict[str, Any]] = await export_dpo_dataset(db)
+        return data
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc

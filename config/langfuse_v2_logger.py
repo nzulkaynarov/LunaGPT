@@ -64,7 +64,7 @@ class LangfuseV2Logger(CustomLogger):
         )
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
-                if resp.status not in (200, 201):
+                if resp.status not in (200, 201, 207):
                     logger.warning(f"Langfuse v2 ingestion response: {resp.status}")
                 else:
                     logger.info("Successfully sent trace to Langfuse v2")
@@ -76,6 +76,13 @@ class LangfuseV2Logger(CustomLogger):
     ) -> None:
         """Log successful chat/completion generation to Langfuse v2."""
         try:
+            call_type = kwargs.get("call_type")
+            if call_type == "embedding" or not hasattr(response_obj, "choices"):
+                return
+            model = kwargs.get("model") or "unknown-model"
+            if "bge-m3" in model or "embed" in model:
+                return
+
             litellm_params = kwargs.get("litellm_params", {}) or {}
             raw_metadata = litellm_params.get("metadata", {}) or {}
             metadata = _safe_serialize(raw_metadata)
