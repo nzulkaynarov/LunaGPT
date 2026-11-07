@@ -1,0 +1,18 @@
+use_default_settings: true
+general:
+  debug: false
+  instance_name: "LunaGPT Search"
+search:
+  safe_search: 0
+  autocomplete: ""
+  formats:
+    - html
+    - json
+outgoing:
+  request_timeout: 10.0
+  max_request_timeout: 15.0
+server:
+  port: 8080
+  bind_address: "0.0.0.0"
+  secret_key: "lunagpt_searxng_super_secret_key_random_string_2026"
+  limiter: false

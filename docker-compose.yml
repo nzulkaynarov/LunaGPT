@@ -66,6 +66,9 @@ services:
       - DEFAULT_MODELS=luna-auto
       - AUDIO_STT_ENGINE=web
       - AUDIO_TTS_ENGINE=web
+      - ENABLE_WEB_SEARCH=True
+      - WEB_SEARCH_ENGINE=searxng
+      - SEARXNG_QUERY_URL=http://searxng:8080/search?q=<query>
     volumes:
       - open-webui-data:/app/backend/data
     extra_hosts:
@@ -122,6 +125,20 @@ services:
       interval: 3s
       timeout: 3s
       retries: 5
+
+  # ============================================================================
+  # 6. SearXNG (Приватный метапоисковик для автономного веб-поиска LunaGPT)
+  # ============================================================================
+  searxng:
+    image: searxng/searxng:latest
+    container_name: lunagpt-searxng
+    restart: unless-stopped
+    ports:
+      - "8082:8080"
+    volumes:
+      - ./config/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8082/
 
 volumes:
   open-webui-data:
