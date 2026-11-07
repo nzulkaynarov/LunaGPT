@@ -1,5 +1,5 @@
 # LunaGPT Management Makefile
-.PHONY: help setup up down restart logs status test-router clean
+.PHONY: help setup up down restart logs status test-router test lint clean
 
 help: ## Показать список доступных команд
 	@grep -E '^[a-z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -7,15 +7,16 @@ help: ## Показать список доступных команд
 setup: ## Создать .env из .env.example (если не создан)
 	@if [ ! -f .env ]; then cp .env.example .env && echo "✓ Файл .env создан. Заполните API ключи в .env"; else echo "✓ Файл .env уже существует"; fi
 
-up: setup ## Запустить весь стек LunaGPT (Gateway, WebUI, Langfuse)
-	docker compose up -d
+up: setup ## Запустить инфраструктуру LunaGPT (Gateway, Postgres+pgvector, Redis, Langfuse)
+	docker compose up -d langfuse-db redis langfuse-server litellm
 	@echo "\n======================================================="
 	@echo "🎉 LunaGPT успешно запущен!"
 	@echo "======================================================="
-	@echo "• Web UI (Чат / Документы): http://localhost:3000"
-	@echo "• Langfuse (Трейсинг и аналитика): http://localhost:3001"
+	@echo "• Langfuse (Аналитика и трейсинг): http://localhost:3001"
 	@echo "• LiteLLM Gateway (API :4000/v1): http://localhost:4000"
 	@echo "• Локальная Ollama (GPU RX 580):  http://localhost:11434"
+	@echo "• PostgreSQL + pgvector (База):    localhost:5433"
+	@echo "• Redis 7.4 (Кэш & Rate Limit):    localhost:6380"
 	@echo "======================================================="
 
 down: ## Остановить контейнеры LunaGPT
@@ -35,7 +36,14 @@ status: ## Проверить статус контейнеров и локал�
 test-router: ## Протестировать логический роутер агентов
 	python3 agents/router_agent.py "Спроектируй схему шины событий для ERP"
 	python3 agents/router_agent.py "Напиши юнит-тест на Python для проверки авторизации"
-	python3 agents/router_agent.py "Сделай краткую выжимку этого длинного юридического соглашения"
+	python3 agents/router_agent.py "Этот код не работает и возвращает ошибку"
+
+test: ## Запуск модульных тестов
+	uv run pytest tests/
+
+lint: ## Проверка качества кода с ruff
+	ruff check src/ tests/
+	ruff format --check src/ tests/
 
 clean: ## Удалить данные контейнеров (очистка томов)
 	docker compose down -v

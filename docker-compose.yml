@@ -11,26 +11,41 @@ services:
       - "${LITELLM_PORT:-4000}:4000"
     volumes:
       - ./config/litellm-config.yaml:/app/config.yaml:ro
+      - ./config/langfuse_v2_logger.py:/app/config/langfuse_v2_logger.py:ro
     environment:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
       - OLLAMA_API_BASE=${OLLAMA_API_BASE:-http://host.docker.internal:11434}
       - LANGFUSE_HOST=${LANGFUSE_HOST:-http://langfuse-server:3000}
-      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY}
-      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY}
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-pk-lf-luna-local-public-key}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-sk-lf-luna-local-secret-key}
+      - REDIS_HOST=lunagpt-redis
+      - REDIS_PORT=6379
     command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "4"]
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
       - langfuse-server
+      - redis
 
   # ============================================================================
-  # 2. LunaGPT Web UI (Open WebUI)
-  # Личный веб-чат (ChatGPT аналог), база знаний (RAG) и мобильный доступ
+  # 2. Redis 7.4 (Кэширование, rate limiting и координация воркеров)
+  # ============================================================================
+  redis:
+    image: redis:7.4.11
+    container_name: lunagpt-redis
+    restart: unless-stopped
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis-data:/data
+
+  # ============================================================================
+  # 3. LunaGPT Web UI (Open WebUI)
   # ============================================================================
   open-webui:
-    image: ghcr.io/open-webui/open-webui:main
+    image: ghcr.io/open-webui/open-webui:0.5.20
     container_name: lunagpt-webui
     restart: unless-stopped
     ports:
@@ -53,8 +68,7 @@ services:
       - litellm
 
   # ============================================================================
-  # 3. Langfuse Server (LLM Observability, Metrics & Tracing)
-  # Мониторинг промптов, затрат токенов, латентности и поведения агентов
+  # 4. Langfuse Server (LLM Observability, Metrics & Tracing)
   # ============================================================================
   langfuse-server:
     image: ghcr.io/langfuse/langfuse:2
@@ -68,23 +82,35 @@ services:
       - SALT=${SALT:-lunagpt_salt_random_string_value_32ch}
       - NEXTAUTH_URL=http://localhost:${LANGFUSE_PORT:-3001}
       - TELEMETRY_ENABLED=false
+      - LANGFUSE_INIT_ORG_ID=lunagpt-org
+      - LANGFUSE_INIT_ORG_NAME=LunaGPT
+      - LANGFUSE_INIT_PROJECT_ID=lunagpt
+      - LANGFUSE_INIT_PROJECT_NAME=LunaGPT
+      - LANGFUSE_INIT_PROJECT_PUBLIC_KEY=pk-lf-luna-local-public-key
+      - LANGFUSE_INIT_PROJECT_SECRET_KEY=sk-lf-luna-local-secret-key
+      - LANGFUSE_INIT_USER_EMAIL=admin@lunagpt.local
+      - LANGFUSE_INIT_USER_NAME=Administrator
+      - LANGFUSE_INIT_USER_PASSWORD=lunagpt_admin_password_2026
     depends_on:
       langfuse-db:
         condition: service_healthy
 
   # ============================================================================
-  # 4. PostgreSQL для Langfuse
+  # 5. PostgreSQL 17 + pgvector (Langfuse + Векторная память LunaGPT)
   # ============================================================================
   langfuse-db:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:0.8.7-pg17
     container_name: lunagpt-postgres
     restart: unless-stopped
+    ports:
+      - "5433:5432"
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-postgres}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-lunagpt_secure_postgres_pass}
       - POSTGRES_DB=${POSTGRES_DB:-langfuse}
     volumes:
       - langfuse-db-data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-langfuse}"]
       interval: 3s
@@ -96,3 +122,5 @@ volumes:
     name: lunagpt_open_webui_data
   langfuse-db-data:
     name: lunagpt_langfuse_data
+  redis-data:
+    name: lunagpt_redis_data
