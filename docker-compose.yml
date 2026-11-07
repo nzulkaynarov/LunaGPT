@@ -149,6 +149,8 @@ services:
     restart: unless-stopped
     ports:
       - "8010:8010"
+    volumes:
+      - ./src:/app/src:ro
     environment:
       - LITELLM_ENDPOINT=http://litellm:4000/v1/chat/completions
       - LITELLM_EMBEDDINGS_ENDPOINT=http://litellm:4000/v1/embeddings

@@ -1,5 +1,7 @@
 """Pydantic v2 schemas for API requests and responses."""
 
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -61,13 +63,16 @@ class DocumentIngestResponse(BaseModel):
 
 
 class ChatMessage(BaseModel):
-    """Standard OpenAI chat message schema."""
+    """Standard OpenAI chat message schema supporting strings, lists, dicts, and tool calls."""
 
     role: str
-    content: str = ""
+    content: Any | None = None
     name: str | None = None
+    tool_calls: list[Any] | None = None
+    tool_call_id: str | None = None
+    function_call: Any | None = None
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="allow")
 
 
 class ChatCompletionRequest(BaseModel):
@@ -79,9 +84,14 @@ class ChatCompletionRequest(BaseModel):
     temperature: float | None = None
     top_p: float | None = None
     max_tokens: int | None = None
-    user: str | None = None
+    max_completion_tokens: int | None = None
+    user: Any | None = None
+    tools: list[Any] | None = None
+    tool_choice: Any | None = None
+    stop: Any | None = None
+    seed: int | None = None
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="allow")
 
 
 class ModelItem(BaseModel):

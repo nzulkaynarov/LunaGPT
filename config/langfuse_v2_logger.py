@@ -12,9 +12,9 @@ import json
 import logging
 import os
 import time
-import uuid
-from typing import Any, Dict, List, Optional
 import urllib.request
+import uuid
+from typing import Any
 
 from litellm.integrations.custom_logger import CustomLogger
 
@@ -47,7 +47,7 @@ class LangfuseV2Logger(CustomLogger):
         self.auth_header = f"Basic {base64.b64encode(auth_str.encode('utf-8')).decode('utf-8')}"
         logger.info(f"LangfuseV2Logger initialized for host: {self.host}")
 
-    def _send_batch(self, batch: List[Dict[str, Any]]) -> None:
+    def _send_batch(self, batch: list[dict[str, Any]]) -> None:
         if not self.public_key or not self.secret_key:
             return
 
@@ -71,7 +71,9 @@ class LangfuseV2Logger(CustomLogger):
         except Exception as exc:
             logger.error(f"Failed to send trace batch to Langfuse v2: {exc}")
 
-    async def async_log_success_event(self, kwargs: Dict[str, Any], response_obj: Any, start_time: Any, end_time: Any) -> None:
+    async def async_log_success_event(
+        self, kwargs: dict[str, Any], response_obj: Any, start_time: Any, end_time: Any
+    ) -> None:
         """Log successful chat/completion generation to Langfuse v2."""
         try:
             litellm_params = kwargs.get("litellm_params", {}) or {}
@@ -102,7 +104,7 @@ class LangfuseV2Logger(CustomLogger):
             start_iso = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(start_ts))
             end_iso = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(end_ts))
 
-            batch: List[Dict[str, Any]] = [
+            batch: list[dict[str, Any]] = [
                 {
                     "id": str(uuid.uuid4()),
                     "type": "trace-create",

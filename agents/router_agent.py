@@ -15,19 +15,48 @@ LITELLM_ENDPOINT = os.getenv("LITELLM_ENDPOINT", "http://localhost:4000/v1/chat/
 LITELLM_KEY = os.getenv("LITELLM_MASTER_KEY", "sk-luna-master-key-2026")
 
 CRITICISM_KEYWORDS = [
-    "не работает", "ошибка", "неправильно", "ты ошибся", "переделай",
-    "исправь", "не то", "баг", "exception", "failed", "error", "wrong",
-    "fix this", "redo", "invalid", "сломал"
+    "не работает",
+    "ошибка",
+    "неправильно",
+    "ты ошибся",
+    "переделай",
+    "исправь",
+    "не то",
+    "баг",
+    "exception",
+    "failed",
+    "error",
+    "wrong",
+    "fix this",
+    "redo",
+    "invalid",
+    "сломал",
 ]
 
 SMART_KEYWORDS = [
-    "архитектур", "спроектируй", "refactor", "security", "уязвимост",
-    "system design", "паттерн", "trade-off", "стратеги", "orchestrat"
+    "архитектур",
+    "спроектируй",
+    "refactor",
+    "security",
+    "уязвимост",
+    "system design",
+    "паттерн",
+    "trade-off",
+    "стратеги",
+    "orchestrat",
 ]
 
 FAST_KEYWORDS = [
-    "переведи", "кратко изложи", "summary", "документ", "стать",
-    "html", "таблиц", "сравни текст", "выжимк", "объясни простыми словами"
+    "переведи",
+    "кратко изложи",
+    "summary",
+    "документ",
+    "стать",
+    "html",
+    "таблиц",
+    "сравни текст",
+    "выжимк",
+    "объясни простыми словами",
 ]
 
 
@@ -75,26 +104,20 @@ def execute_routed_query(prompt: str, user_id: str = "umarbek", session_id: str 
 
     payload = {
         "model": target_model,
-        "messages": [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": prompt}
-        ],
+        "messages": [{"role": "system", "content": system_content}, {"role": "user", "content": prompt}],
         "metadata": {
             "user_id": user_id,
             "session_id": session_id,
             "routing_reason": decision_reason,
             "is_criticism": is_criticism,
-            "agent_router": "LunaGPT-v2"
-        }
+            "agent_router": "LunaGPT-v2",
+        },
     }
 
     req = Request(
         LITELLM_ENDPOINT,
         data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {LITELLM_KEY}"
-        }
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {LITELLM_KEY}"},
     )
 
     start_time = time.time()
@@ -110,15 +133,10 @@ def execute_routed_query(prompt: str, user_id: str = "umarbek", session_id: str 
                 "reason": decision_reason,
                 "duration_sec": round(elapsed, 2),
                 "response": response_text,
-                "usage": usage
+                "usage": usage,
             }
     except Exception as e:
-        return {
-            "success": False,
-            "model": target_model,
-            "reason": decision_reason,
-            "error": str(e)
-        }
+        return {"success": False, "model": target_model, "reason": decision_reason, "error": str(e)}
 
 
 if __name__ == "__main__":

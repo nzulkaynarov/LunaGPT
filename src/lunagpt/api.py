@@ -60,7 +60,6 @@ async def list_models() -> ModelListResponse:
             ModelItem(id="luna-pro", owned_by="anthropic"),
             ModelItem(id="luna-fast", owned_by="google"),
             ModelItem(id="luna-coder", owned_by="ollama"),
-            ModelItem(id="luna-embed", owned_by="ollama"),
         ],
     )
 
