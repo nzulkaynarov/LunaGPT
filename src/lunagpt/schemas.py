@@ -58,3 +58,43 @@ class DocumentIngestResponse(BaseModel):
     file_type: str
     chunks_count: int
     duration_sec: float
+
+
+class ChatMessage(BaseModel):
+    """Standard OpenAI chat message schema."""
+
+    role: str
+    content: str = ""
+    name: str | None = None
+
+    model_config = ConfigDict(extra="ignore")
+
+
+class ChatCompletionRequest(BaseModel):
+    """Standard OpenAI /v1/chat/completions request schema."""
+
+    model: str = "luna-auto"
+    messages: list[ChatMessage]
+    stream: bool = False
+    temperature: float | None = None
+    top_p: float | None = None
+    max_tokens: int | None = None
+    user: str | None = None
+
+    model_config = ConfigDict(extra="ignore")
+
+
+class ModelItem(BaseModel):
+    """Standard OpenAI model object."""
+
+    id: str
+    object: str = "model"
+    created: int = 1700000000
+    owned_by: str = "lunagpt"
+
+
+class ModelListResponse(BaseModel):
+    """Standard OpenAI /v1/models response."""
+
+    object: str = "list"
+    data: list[ModelItem]
