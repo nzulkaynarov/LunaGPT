@@ -51,13 +51,13 @@ services:
     ports:
       - "${WEBUI_PORT:-3000}:8080"
     environment:
-      - OPENAI_API_BASE_URL=http://host.docker.internal:8010/v1
+      - OPENAI_API_BASE_URL=http://core:8010/v1
       - OPENAI_API_KEY=${LITELLM_MASTER_KEY}
       - ENABLE_OLLAMA_API=False
       - WEBUI_NAME=LunaGPT
       - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY}
       - RAG_EMBEDDING_ENGINE=openai
-      - RAG_OPENAI_API_BASE_URL=http://host.docker.internal:8010/v1
+      - RAG_OPENAI_API_BASE_URL=http://core:8010/v1
       - RAG_OPENAI_API_KEY=${LITELLM_MASTER_KEY}
       - RAG_EMBEDDING_MODEL=luna-embed
       - BYPASS_MODEL_ACCESS_CONTROL=True
@@ -74,7 +74,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
-      - litellm
+      - core
 
   # ============================================================================
   # 4. Langfuse Server (LLM Observability, Metrics & Tracing)
@@ -139,6 +139,29 @@ services:
       - ./config/searxng/settings.yml:/etc/searxng/settings.yml:ro
     environment:
       - SEARXNG_BASE_URL=http://localhost:8082/
+
+  # ============================================================================
+  # 7. LunaGPT Core Service (FastAPI Active Learning, Memory & RAG)
+  # ============================================================================
+  core:
+    image: lunagpt-core:local
+    container_name: lunagpt-core
+    restart: unless-stopped
+    ports:
+      - "8010:8010"
+    environment:
+      - LITELLM_ENDPOINT=http://litellm:4000/v1/chat/completions
+      - LITELLM_EMBEDDINGS_ENDPOINT=http://litellm:4000/v1/embeddings
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+      - LUNAGPT_DATABASE_URL=postgresql+psycopg://postgres:${POSTGRES_PASSWORD:-lunagpt_secure_postgres_pass}@langfuse-db:5432/lunagpt
+      - REDIS_URL=redis://lunagpt-redis:6379/0
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+      litellm:
+        condition: service_started
 
 volumes:
   open-webui-data:
