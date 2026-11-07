@@ -16,8 +16,8 @@ class Settings(BaseSettings):
     langfuse_public_key: str = "pk-lf-luna-local-public-key"
     langfuse_secret_key: str = "sk-lf-luna-local-secret-key"
 
-    # Database with pgvector
-    database_url: str = "postgresql+asyncpg://postgres:lunagpt_secure_postgres_pass@localhost:5433/lunagpt"
+    # Dedicated PostgreSQL with pgvector for LunaGPT Core
+    lunagpt_database_url: str = "postgresql+psycopg://postgres:lunagpt_secure_postgres_pass@localhost:5433/lunagpt"
 
     # Redis Cache
     redis_url: str = "redis://localhost:6380/0"

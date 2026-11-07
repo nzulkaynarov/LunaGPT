@@ -12,7 +12,7 @@ from sqlalchemy.orm import DeclarativeBase
 from lunagpt.config import settings
 
 engine = create_async_engine(
-    settings.database_url,
+    settings.lunagpt_database_url,
     echo=False,
     future=True,
     pool_size=10,

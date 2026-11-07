@@ -14,3 +14,15 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+# Testing and coverage
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+
+# IDE & Editor local sessions
+.continue/
+.vscode/
+.idea/
