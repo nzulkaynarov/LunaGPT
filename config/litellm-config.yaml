@@ -35,22 +35,22 @@ model_list:
       mode: chat
 
   # ----------------------------------------------------------------------------
-  # 3. Интеллектуальные архитектурные модели
+  # 3. Интеллектуальные архитектурные модели (Anthropic Claude 4.6 Sonnet & Opus)
   # ----------------------------------------------------------------------------
   - model_name: luna-smart
     litellm_params:
-      model: gemini/gemini-3.5-flash-lite
-      api_key: os.environ/GEMINI_API_KEY
+      model: anthropic/claude-sonnet-4-6
+      api_key: os.environ/ANTHROPIC_API_KEY
     model_info:
-      description: "Облачная модель глубокой рефлексии и анализа ошибок"
+      description: "Флагманский Claude Sonnet 4.6 для сложной архитектуры, рефакторинга и логики"
       mode: chat
 
   - model_name: luna-pro
     litellm_params:
-      model: gemini/gemini-3.5-flash-lite
-      api_key: os.environ/GEMINI_API_KEY
+      model: anthropic/claude-opus-4-6
+      api_key: os.environ/ANTHROPIC_API_KEY
     model_info:
-      description: "Глубокий анализ кода и большие контексты"
+      description: "Максимальный интеллект Claude Opus 4.6 для комплексного аудита"
       mode: chat
 
   # ----------------------------------------------------------------------------
@@ -61,15 +61,15 @@ model_list:
       model: ollama/qwen2.5-coder:7b
       api_base: os.environ/OLLAMA_API_BASE
     model_info:
-      description: "Авто-выбор: код отдаётся локальной RX 580, при перегрузке — Gemini"
+      description: "Авто-выбор: код отдаётся локальной RX 580, при перегрузке — Claude Sonnet"
       mode: chat
 
 router_settings:
   routing_strategy: latency-based-routing
   fallbacks:
     - luna-coder: ["luna-fast"]
-    - luna-smart: ["luna-coder"]
-    - luna-auto: ["luna-fast", "luna-coder"]
+    - luna-smart: ["luna-pro", "luna-fast"]
+    - luna-auto: ["luna-smart", "luna-fast"]
   allowed_fails: 2
   cooldown_time: 30
 
