@@ -36,9 +36,7 @@ async def health_check() -> dict:
 
 
 @app.post("/api/v1/chat", response_model=PromptResponse)
-async def chat_endpoint(
-    req: PromptRequest, db: AsyncSession = Depends(get_db_session)
-) -> PromptResponse:
+async def chat_endpoint(req: PromptRequest, db: AsyncSession = Depends(get_db_session)) -> PromptResponse:
     """Execute routed chat prompt with memory and RAG injection."""
     try:
         return await execute_smart_routing(db, req)
@@ -47,9 +45,7 @@ async def chat_endpoint(
 
 
 @app.post("/api/v1/feedback", response_model=FeedbackResponse)
-async def feedback_endpoint(
-    req: FeedbackRequest, db: AsyncSession = Depends(get_db_session)
-) -> FeedbackResponse:
+async def feedback_endpoint(req: FeedbackRequest, db: AsyncSession = Depends(get_db_session)) -> FeedbackResponse:
     """Save user correction/mistake to pgvector memory."""
     try:
         mem_id = await save_feedback_memory(db, req)

@@ -25,9 +25,7 @@ async def get_embedding(text: str) -> list[float]:
     }
 
     async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
-            settings.litellm_embeddings_endpoint, json=payload, headers=headers
-        )
+        resp = await client.post(settings.litellm_embeddings_endpoint, json=payload, headers=headers)
         resp.raise_for_status()
         data = resp.json()
         embedding: list[float] = data["data"][0]["embedding"]

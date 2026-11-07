@@ -1,6 +1,7 @@
 """SQLAlchemy 2.0 Async database engine and session factory."""
 
 from collections.abc import AsyncGenerator
+
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -28,6 +29,7 @@ async_session_factory = async_sessionmaker(
 
 class Base(DeclarativeBase):
     """Base ORM model."""
+
     pass
 
 

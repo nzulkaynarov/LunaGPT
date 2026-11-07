@@ -1,6 +1,7 @@
 """Unit tests for LunaGPT Smart Router without external dependencies."""
 
 import unittest
+
 from lunagpt.services.router import detect_criticism_and_model
 
 

@@ -1,7 +1,7 @@
 """Smart Router with Negative Feedback Detection, Reflection, and Model Escalation."""
 
-from typing import Tuple
 import uuid
+
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,23 +11,52 @@ from lunagpt.services.ingestion import search_document_chunks
 from lunagpt.services.memory import search_relevant_feedback
 
 CRITICISM_KEYWORDS = [
-    "не работает", "ошибка", "неправильно", "ты ошибся", "переделай",
-    "исправь", "не то", "баг", "exception", "failed", "error", "wrong",
-    "fix this", "redo", "invalid", "сломал"
+    "не работает",
+    "ошибка",
+    "неправильно",
+    "ты ошибся",
+    "переделай",
+    "исправь",
+    "не то",
+    "баг",
+    "exception",
+    "failed",
+    "error",
+    "wrong",
+    "fix this",
+    "redo",
+    "invalid",
+    "сломал",
 ]
 
 SMART_KEYWORDS = [
-    "архитектур", "спроектируй", "refactor", "security", "уязвимост",
-    "system design", "паттерн", "trade-off", "стратеги", "orchestrat"
+    "архитектур",
+    "спроектируй",
+    "refactor",
+    "security",
+    "уязвимост",
+    "system design",
+    "паттерн",
+    "trade-off",
+    "стратеги",
+    "orchestrat",
 ]
 
 FAST_KEYWORDS = [
-    "переведи", "кратко изложи", "summary", "документ", "стать",
-    "html", "таблиц", "сравни текст", "выжимк", "объясни простыми словами"
+    "переведи",
+    "кратко изложи",
+    "summary",
+    "документ",
+    "стать",
+    "html",
+    "таблиц",
+    "сравни текст",
+    "выжимк",
+    "объясни простыми словами",
 ]
 
 
-def detect_criticism_and_model(prompt: str) -> Tuple[str, str, bool]:
+def detect_criticism_and_model(prompt: str) -> tuple[str, str, bool]:
     """
     Classify model and detect user dissatisfaction / criticism.
     Returns (model_name, decision_reason, is_criticism).
@@ -63,9 +92,7 @@ def detect_criticism_and_model(prompt: str) -> Tuple[str, str, bool]:
     )
 
 
-async def execute_smart_routing(
-    db: AsyncSession, req: PromptRequest
-) -> PromptResponse:
+async def execute_smart_routing(db: AsyncSession, req: PromptRequest) -> PromptResponse:
     """
     Main agent execution flow:
     1. Detect criticism & select model.
@@ -77,9 +104,7 @@ async def execute_smart_routing(
     model, reason, is_criticism = detect_criticism_and_model(req.prompt)
     trace_id = str(uuid.uuid4())
 
-    system_instructions = [
-        "You are LunaGPT, a premier intelligent sovereign AI coding assistant."
-    ]
+    system_instructions = ["You are LunaGPT, a premier intelligent sovereign AI coding assistant."]
 
     lessons_count = 0
     if req.use_memory:
@@ -107,9 +132,7 @@ async def execute_smart_routing(
             if chunks:
                 rag_count = len(chunks)
                 rag_text = "\n\n".join([f"[{c.chunk_index}] {c.content}" for c in chunks])
-                system_instructions.append(
-                    f"### RELEVANT KNOWLEDGE BASE CONTEXT (RAG):\n{rag_text}"
-                )
+                system_instructions.append(f"### RELEVANT KNOWLEDGE BASE CONTEXT (RAG):\n{rag_text}")
         except Exception:
             pass
 
@@ -146,12 +169,11 @@ async def execute_smart_routing(
     }
 
     import time
+
     start_t = time.time()
 
     async with httpx.AsyncClient(timeout=90.0) as client:
-        resp = await client.post(
-            settings.litellm_endpoint, json=payload, headers=headers
-        )
+        resp = await client.post(settings.litellm_endpoint, json=payload, headers=headers)
         resp.raise_for_status()
         data = resp.json()
         duration = round(time.time() - start_t, 2)

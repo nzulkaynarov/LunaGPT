@@ -1,9 +1,10 @@
 """Document ingestion service with chunking and pgvector storage."""
 
 import io
-from pathlib import Path
 import time
 import uuid
+from pathlib import Path
+
 from pypdf import PdfReader
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -58,9 +59,7 @@ def _chunk_text(text: str, chunk_size: int = 1000, overlap: int = 150) -> list[s
     return chunks if chunks else [text[:chunk_size]]
 
 
-async def ingest_document(
-    db: AsyncSession, filename: str, content_bytes: bytes
-) -> tuple[uuid.UUID, int, float]:
+async def ingest_document(db: AsyncSession, filename: str, content_bytes: bytes) -> tuple[uuid.UUID, int, float]:
     """Ingest document, chunk it, compute embeddings, and store in pgvector."""
     start_time = time.time()
     raw_text = _extract_text(filename, content_bytes)
@@ -92,17 +91,11 @@ async def ingest_document(
     return doc_id, len(chunks), round(elapsed, 2)
 
 
-async def search_document_chunks(
-    db: AsyncSession, query: str, limit: int = 3
-) -> list[DocumentChunk]:
+async def search_document_chunks(db: AsyncSession, query: str, limit: int = 3) -> list[DocumentChunk]:
     """Retrieve top-K most relevant chunks using cosine similarity."""
     query_emb = await get_embedding(query)
 
-    stmt = (
-        select(DocumentChunk)
-        .order_by(DocumentChunk.embedding.cosine_distance(query_emb))
-        .limit(limit)
-    )
+    stmt = select(DocumentChunk).order_by(DocumentChunk.embedding.cosine_distance(query_emb)).limit(limit)
     result = await db.execute(stmt)
     chunks = result.scalars().all()
     return list(chunks)

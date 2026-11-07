@@ -1,7 +1,5 @@
 """Pydantic v2 schemas for API requests and responses."""
 
-from datetime import datetime
-import uuid
 from pydantic import BaseModel, ConfigDict, Field
 
 

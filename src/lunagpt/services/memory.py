@@ -1,6 +1,7 @@
 """Vector memory service for querying and saving feedback lessons in pgvector."""
 
 import uuid
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,11 +39,7 @@ async def search_relevant_feedback(
     """Search for past similar mistakes/corrections using cosine similarity."""
     prompt_emb = await get_embedding(prompt)
 
-    stmt = (
-        select(FeedbackMemory)
-        .order_by(FeedbackMemory.prompt_embedding.cosine_distance(prompt_emb))
-        .limit(limit)
-    )
+    stmt = select(FeedbackMemory).order_by(FeedbackMemory.prompt_embedding.cosine_distance(prompt_emb)).limit(limit)
     result = await db.execute(stmt)
     memories = result.scalars().all()
     return list(memories)
