@@ -105,6 +105,7 @@ class AssistantMember(Base):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     usage_day: Mapped[date | None] = mapped_column(Date, nullable=True)
     requests_today: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    homesec_person_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
@@ -118,6 +119,7 @@ class AssistantInvite(Base):
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     invite_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     access_hours: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    homesec_person_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 

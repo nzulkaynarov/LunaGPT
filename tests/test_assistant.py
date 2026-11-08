@@ -1,6 +1,7 @@
 """Luna AI Assistant: access rules, routing and failure notices."""
 
 import json
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
@@ -231,13 +232,103 @@ async def test_stranger_cannot_answer_quiz(harness: Any, monkeypatch: pytest.Mon
     callback.answer.assert_awaited_once_with("Нет доступа", show_alert=True)
 
 
+PEOPLE = [
+    {"id": 3, "name": "Миша", "role": "kid", "devices": 2, "telegram_id": None},
+    {"id": 4, "name": "Мама", "role": "adult", "devices": 1, "telegram_id": 44},
+]
+
+
 @pytest.mark.asyncio
-async def test_kid_invite_requires_known_homesec_person(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_family_lists_people_from_pi(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     instance, send, _ = harness
     _as_member(monkeypatch, _member("owner"))
-    instance._pi.quiz_available = AsyncMock(side_effect=PiNotFoundError("x"))
-    await instance.on_message(_message("/invite kid Незнакомец"))
-    assert "нет человека" in _sent(send)
+    instance._pi.people = AsyncMock(return_value=PEOPLE)
+    await instance.on_message(_message("/family"))
+    rows = send.call_args.kwargs["reply_markup"].inline_keyboard
+    assert rows[0][0].callback_data == "link:3" and rows[0][0].text.startswith("➕ Миша")
+    assert rows[1][0].text.startswith("✅ Мама")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["adult", "kid", "guest"])
+async def test_only_owner_opens_family(harness: Any, monkeypatch: pytest.MonkeyPatch, role: str) -> None:
+    instance, _, _ = harness
+    _as_member(monkeypatch, _member(role))
+    instance._pi.people = AsyncMock(return_value=PEOPLE)
+    await instance.on_message(_message("/family"))
+    instance._pi.people.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_owner_gets_link_with_role_from_pi(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, send, _ = harness
+    _as_member(monkeypatch, _member("owner"))
+    instance._pi.people = AsyncMock(return_value=PEOPLE)
+    create = AsyncMock(return_value="TOKEN")
+    monkeypatch.setattr(access, "create_invite", create)
+    callback = MagicMock(data="link:3", answer=AsyncMock())
+    callback.from_user.id = 1
+    await instance.on_callback(callback)
+    assert create.call_args.args[1:] == ("Миша", "kid") and create.call_args.kwargs == {"person_id": 3}
+    assert "start=TOKEN" in _sent(send)
+
+
+@pytest.mark.asyncio
+async def test_non_owner_cannot_create_family_link(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, _, _ = harness
+    _as_member(monkeypatch, _member("adult"))
+    create = AsyncMock()
+    monkeypatch.setattr(access, "create_invite", create)
+    callback = MagicMock(data="link:3", answer=AsyncMock())
+    callback.from_user.id = 1
+    await instance.on_callback(callback)
+    create.assert_not_awaited()
+    callback.answer.assert_awaited_once_with("Нет доступа", show_alert=True)
+
+
+@pytest.mark.asyncio
+async def test_redeeming_family_link_writes_telegram_to_pi(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, _, _ = harness
+    member = _member("kid", 5)
+    member.homesec_person_id = 3
+    monkeypatch.setattr(access, "redeem_invite", AsyncMock(return_value=member))
+    instance._pi.link_telegram = AsyncMock()
+    await instance.on_message(_message("/start TOKEN", 5))
+    instance._pi.link_telegram.assert_awaited_once_with(3, 5)
+
+
+@pytest.mark.asyncio
+async def test_family_members_are_not_invited_by_typing_names(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, send, _ = harness
+    _as_member(monkeypatch, _member("owner"))
+    await instance.on_message(_message("/invite kid Миша"))
+    assert _sent(send) == bot.FAMILY_HINT
+
+
+def _db_with_members(members: list[AssistantMember]) -> MagicMock:
+    db = MagicMock(commit=AsyncMock(), delete=AsyncMock())
+    return db
+
+
+@pytest.mark.asyncio
+async def test_reconcile_follows_pi_and_removes_deleted_people(monkeypatch: pytest.MonkeyPatch) -> None:
+    renamed = _member("guest", 5)
+    renamed.homesec_person_id = 3
+    removed = _member("kid", 6)
+    removed.homesec_person_id = 99
+    owner = _member("owner", 7)
+    owner.homesec_person_id = 98
+    linked = _member("adult", 44)
+    linked.homesec_person_id = 4
+    unlinked_guest = _member("guest", 8)
+    monkeypatch.setattr(
+        access, "list_members", AsyncMock(return_value=[renamed, removed, owner, linked, unlinked_guest])
+    )
+    db = _db_with_members([])
+    assert await access.reconcile_family(db, PEOPLE) == [(3, 5)]
+    assert (renamed.name, renamed.role) == ("Миша", "kid")
+    db.delete.assert_awaited_once_with(removed)  # the owner survives a missing profile
+    assert unlinked_guest.name == "Тест"
 
 
 @pytest.mark.asyncio
@@ -291,6 +382,18 @@ async def test_pi_without_api_is_up_but_api_calls_fail(response: httpx.Response)
     assert await client.is_healthy() is True  # the Pi answered, so it is up
     with pytest.raises(PiUnavailableError):
         await client.heartbeat([1])
+
+
+@pytest.mark.asyncio
+async def test_owner_keeps_role_when_linking_own_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    invite = MagicMock(used_at=None, access_hours=None, role="adult", homesec_person_id=4)
+    invite.name = "Нурбек"
+    invite.invite_expires_at = datetime.now(UTC) + timedelta(hours=1)
+    owner = _member("owner", 7)
+    db = MagicMock(commit=AsyncMock(), rollback=AsyncMock(), execute=AsyncMock(), get=AsyncMock(return_value=owner))
+    db.execute.return_value.scalar_one_or_none = MagicMock(return_value=invite)
+    member = await access.redeem_invite(db, "token", 7)
+    assert member is owner and owner.role == "owner" and owner.homesec_person_id == 4
 
 
 @pytest.mark.asyncio

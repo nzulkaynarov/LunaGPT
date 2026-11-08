@@ -5,6 +5,7 @@
 | Вопрос | Решение | Основание |
 |---|---|---|
 | Клиент Telegram | aiogram 3 | Уже работает в HomeSec; самописный клиент заменён |
+| Подключение семьи | Люди и устройства только на Pi, Telegram привязывается одноразовой deep-link ссылкой | Официальный механизм Telegram для привязки аккаунта; параметр до 64 символов |
 | Основная локальная модель | `gemma4:e4b`, без рассуждений | Собственный бенчмарк 8 задач HomeSec и 14 детских вопросов, см. ниже |
 | Контроль падений | Heartbeat от Luna на Pi (dead man's switch), опрос Pi с ПК | Push-heartbeat это стандартный шаблон; Uptime Kuma и Healthchecks рассылают по фиксированным каналам, а нужна рассылка всем участникам через токен Luna |
 | Падение обеих машин | Внешний Healthchecks.io (план) | Единственный вариант, не зависящий от дома |
@@ -30,6 +31,7 @@
 
 ## Источники
 
+- Telegram: [Deep linking](https://core.telegram.org/bots/features), [формат ссылок](https://core.telegram.org/api/links)
 - LiteLLM: [MCP Permission Management](https://docs.litellm.ai/docs/mcp_control), [MCP Overview](https://docs.litellm.ai/docs/mcp)
 - Open WebUI: [MCP](https://docs.openwebui.com/features/extensibility/mcp/)
 - Google Workspace: [google_workspace_mcp](https://github.com/taylorwilsdon/google_workspace_mcp)

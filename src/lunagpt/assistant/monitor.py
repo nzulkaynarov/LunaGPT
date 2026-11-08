@@ -15,6 +15,7 @@ logger = logging.getLogger("lunagpt.assistant.monitor")
 
 CHECK_INTERVAL_SECONDS = 60
 HEARTBEAT_INTERVAL_SECONDS = 30
+FAMILY_SYNC_INTERVAL_SECONDS = 300
 FAILURES_BEFORE_ALERT = 3
 PI_DOWN_TEXT = "⚠️ HomeSec на Raspberry Pi не отвечает. Команды сети могут быть недоступны. Luna работает."
 PI_UP_TEXT = "✅ HomeSec на Raspberry Pi снова на связи."
@@ -58,6 +59,27 @@ async def watch_pi(bot: Bot, pi: PiClient, session_factory: async_sessionmaker[A
                 except TelegramAPIError as exc:
                     logger.warning("could not notify a parent: %s", type(exc).__name__)
         await asyncio.sleep(CHECK_INTERVAL_SECONDS)
+
+
+async def sync_family_once(pi: PiClient, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    """Follow renames, role changes and removals made on the Pi, and repair missing links."""
+    people = await pi.people()
+    async with session_factory() as db:
+        missing_links = await access.reconcile_family(db, people)
+    for person_id, telegram_id in missing_links:
+        try:
+            await pi.link_telegram(person_id, telegram_id)
+        except PiConflictError:
+            logger.warning("telegram account of person %s is linked to someone else", person_id)
+
+
+async def watch_family(pi: PiClient, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    while True:
+        try:
+            await sync_family_once(pi, session_factory)
+        except (PiUnavailableError, PiNotFoundError) as exc:
+            logger.warning("family sync failed: %s", type(exc).__name__)
+        await asyncio.sleep(FAMILY_SYNC_INTERVAL_SECONDS)
 
 
 async def send_heartbeats(pi: PiClient, session_factory: async_sessionmaker[AsyncSession]) -> None:

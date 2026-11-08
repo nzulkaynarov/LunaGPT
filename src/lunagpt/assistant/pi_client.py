@@ -60,6 +60,13 @@ class PiClient:
     async def heartbeat(self, member_chat_ids: list[int]) -> None:
         await self._request("POST", "heartbeat", {"member_chat_ids": member_chat_ids})
 
+    async def people(self) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = await self._request("GET", "people")
+        return result
+
+    async def link_telegram(self, person_id: int, telegram_id: int) -> None:
+        await self._request("PUT", f"people/{person_id}/telegram", {"telegram_id": telegram_id})
+
     async def quota(self, name: str) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = await self._request("GET", f"{self._person(name)}/quota")
         return result

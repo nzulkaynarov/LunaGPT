@@ -45,7 +45,8 @@ HISTORY_MESSAGES = 8
 RATE_LIMIT = 10
 RATE_WINDOW_SECONDS = 60
 UNKNOWN_REPLY_INTERVAL_SECONDS = 3600
-INVITE_USAGE = "Формат: /invite guest Анна 6, или /invite kid Миша, или /invite adult Мама"
+INVITE_USAGE = "Формат для гостя: /invite guest Анна 6. Семья подключается через /family."
+FAMILY_HINT = "Семья уже есть в HomeSec. Открой /family и выбери человека."
 
 NOT_INVITED = "Luna работает только по приглашениям. Попроси ссылку у родителей."
 BAD_INVITE = "Приглашение недействительно или уже использовано. Попроси новое."
@@ -55,7 +56,7 @@ TEXT_ONLY = "Пока я понимаю только текст."
 HELP_TEXT = {
     "owner": (
         "Пиши мне любые вопросы. Найду свежее в интернете.\n"
-        "/invite — пригласить\n/members — участники\n/remove <id> — удалить"
+        "/family — подключить семью\n/invite guest <имя> <часы> — гость\n/members — участники\n/remove <id> — удалить"
     ),
     "adult": "Пиши мне любые вопросы. Найду свежее в интернете.\n/invite guest <имя> <часы> — пригласить гостя",
     "kid": "Спрашивай что угодно: уроки, игры, код, идеи. Могу поискать в интернете.\nКнопки внизу покажут твоё время.",
@@ -150,7 +151,12 @@ class LunaBot:
         user_id = callback.from_user.id
         async with self._sessions() as db:
             member = await access.get_member(db, user_id)
-        if member is None or not (callback.data or "").startswith("quiz:"):
+        data = callback.data or ""
+        if member is not None and member.role == "owner" and data.startswith("link:"):
+            await callback.answer()
+            await self._send_family_link(member, int(data.split(":")[1]))
+            return
+        if member is None or not data.startswith("quiz:"):
             await callback.answer("Нет доступа", show_alert=True)
             return
         await callback.answer()
@@ -248,8 +254,60 @@ class LunaBot:
         if member is None:
             await self._send(user_id, BAD_INVITE)
             return
+        if member.homesec_person_id is not None:
+            await self._link_on_pi(member)
         keyboard = kid_keyboard() if member.role == "kid" else None
         await self._send(user_id, f"Привет, {member.name}! Я Luna.\n{HELP_TEXT[member.role]}", keyboard)
+
+    async def _link_on_pi(self, member: AssistantMember) -> None:
+        """Store the Telegram account on the Pi; the periodic sync retries if it is offline."""
+        try:
+            await self._pi.link_telegram(int(member.homesec_person_id or 0), member.telegram_id)
+        except PiConflictError:
+            await self._send(member.telegram_id, "Этот Telegram уже привязан к другому человеку в HomeSec.")
+        except (PiNotFoundError, PiUnavailableError) as exc:
+            logger.warning("could not link telegram on the pi: %s", type(exc).__name__)
+
+    async def _family(self, member: AssistantMember) -> None:
+        try:
+            people = await self._pi.people()
+        except (PiNotFoundError, PiUnavailableError):
+            await self._send(member.telegram_id, PI_OFFLINE)
+            return
+        rows = [
+            [
+                InlineKeyboardButton(
+                    text=f"{'✅' if p['telegram_id'] else '➕'} {p['name']} · {p['role']} · устройств {p['devices']}"[
+                        :60
+                    ],
+                    callback_data=f"link:{p['id']}",
+                )
+            ]
+            for p in people
+        ]
+        await self._send(
+            member.telegram_id,
+            "Семья из HomeSec. Выбери человека, чтобы получить его личную ссылку:",
+            InlineKeyboardMarkup(inline_keyboard=rows),
+        )
+
+    async def _send_family_link(self, member: AssistantMember, person_id: int) -> None:
+        try:
+            person = next((p for p in await self._pi.people() if int(p["id"]) == person_id), None)
+        except (PiNotFoundError, PiUnavailableError):
+            await self._send(member.telegram_id, PI_OFFLINE)
+            return
+        if person is None:
+            await self._send(member.telegram_id, "Такого человека больше нет в HomeSec.")
+            return
+        role = access.PERSON_ROLE_TO_MEMBER_ROLE.get(person["role"], "guest")
+        async with self._sessions() as db:
+            token = await access.create_invite(db, person["name"], role, person_id=person_id)
+        await self._send(
+            member.telegram_id,
+            f"Перешли эту ссылку: {person['name']}. Одноразовая, действует 72 часа:\n"
+            f"https://t.me/{self._username}?start={token}",
+        )
 
     async def _reject_unknown(self, user_id: int) -> None:
         now = time.monotonic()
@@ -264,6 +322,8 @@ class LunaBot:
         command = parts[0][1:].split("@")[0].lower()
         if command == "invite":
             await self._invite(member, parts[1:])
+        elif command == "family" and member.role == "owner":
+            await self._family(member)
         elif command == "members" and member.role == "owner":
             await self._members(member)
         elif command == "remove" and member.role == "owner":
@@ -273,7 +333,10 @@ class LunaBot:
             await self._send(member.telegram_id, HELP_TEXT[member.role], keyboard)
 
     async def _invite(self, member: AssistantMember, args: list[str]) -> None:
-        if len(args) < 2 or args[0] not in access.ROLES:
+        if args and args[0] in ("adult", "kid"):
+            await self._send(member.telegram_id, FAMILY_HINT)
+            return
+        if len(args) < 2 or args[0] != "guest":
             await self._send(member.telegram_id, INVITE_USAGE)
             return
         role = args[0]
@@ -282,25 +345,12 @@ class LunaBot:
             return
         hours = int(args[-1]) if len(args) > 2 and args[-1].isdigit() else None
         name = " ".join(args[1:-1] if hours is not None else args[1:])[:100]
-        if role == "kid" and not await self._known_on_pi(name):
-            await self._send(member.telegram_id, f"В HomeSec нет человека «{name}». Укажи имя точно как в панели.")
-            return
         async with self._sessions() as db:
             token = await access.create_invite(db, name, role, hours)
         await self._send(
             member.telegram_id,
             f"Ссылка для {name} ({role}), действует 72 часа, один раз:\nhttps://t.me/{self._username}?start={token}",
         )
-
-    async def _known_on_pi(self, name: str) -> bool:
-        """Children must match a HomeSec person; an offline Pi does not block inviting."""
-        try:
-            await self._pi.quiz_available(name)
-        except PiNotFoundError:
-            return False
-        except (PiUnavailableError, PiConflictError):
-            return True
-        return True
 
     async def _members(self, member: AssistantMember) -> None:
         async with self._sessions() as db:
