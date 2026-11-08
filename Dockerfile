@@ -11,8 +11,12 @@ WORKDIR /app
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy
 
-# Install dependencies and project in virtualenv
+# 1. Install dependencies first for optimal Docker layer caching
 COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-install-project --no-dev
+
+# 2. Copy project metadata and source code, then install project
+COPY README.md ./
 COPY src /app/src
 RUN uv sync --frozen --no-dev
 
@@ -29,9 +33,9 @@ ENV PYTHONUNBUFFERED=1 \
 
 # Copy verified virtualenv and source code from builder stage
 COPY --from=builder /app/.venv /app/.venv
+COPY README.md pyproject.toml alembic.ini /app/
 COPY src /app/src
 COPY migrations /app/migrations
-COPY alembic.ini pyproject.toml /app/
 
 # Security: run as unprivileged user
 RUN groupadd -r lunagpt && useradd -r -g lunagpt -d /app -s /sbin/nologin lunagpt && \
