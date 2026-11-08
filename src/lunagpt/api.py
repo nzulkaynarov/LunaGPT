@@ -2,6 +2,7 @@
 
 import base64
 import json
+import logging
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -11,10 +12,12 @@ from urllib.parse import unquote
 import httpx
 from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lunagpt.config import settings
-from lunagpt.db import Base, engine, get_db_session
+from lunagpt.db import get_db_session
 from lunagpt.schemas import (
     ChatCompletionRequest,
     DeleteResponse,
@@ -32,13 +35,42 @@ from lunagpt.services.ingestion import delete_document, extract_text, ingest_doc
 from lunagpt.services.memory import export_dpo_dataset, save_feedback_memory
 from lunagpt.services.router import execute_openai_chat_completion, execute_smart_routing
 
+logger = logging.getLogger("lunagpt.api")
+bearer_scheme = HTTPBearer(auto_error=False)
+
+
+async def verify_auth(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+) -> None:
+    """Validate Bearer authentication token against configured master key."""
+    if not settings.require_auth:
+        return
+
+    if not credentials or not credentials.credentials:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing Authorization header. Expected 'Authorization: Bearer <token>'",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    valid_keys = {
+        settings.litellm_master_key,
+        settings.core_api_key or settings.litellm_master_key,
+    }
+    if credentials.credentials not in valid_keys:
+        raise HTTPException(
+            status_code=403,
+            detail="Invalid API key provided",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Ensure database tables exist on startup."""
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    """Application lifespan manager."""
+    logger.info("LunaGPT Core API starting up...")
     yield
+    logger.info("LunaGPT Core API shutting down...")
 
 
 app = FastAPI(
@@ -51,12 +83,39 @@ app = FastAPI(
 
 @app.get("/health")
 async def health_check() -> dict[str, str]:
-    """Health check endpoint."""
+    """Fast liveness probe."""
     return {"status": "ok", "service": "lunagpt-core", "version": "0.3.0"}
 
 
+@app.get("/ready")
+async def readiness_check(db: AsyncSession = Depends(get_db_session)) -> dict[str, Any]:
+    """Readiness probe checking database connectivity and LiteLLM gateway status."""
+    db_ok = False
+    try:
+        res = await db.execute(text("SELECT 1"))
+        if res.scalar() == 1:
+            db_ok = True
+    except Exception as exc:
+        logger.warning("Readiness probe DB check failed: %s", exc)
+
+    gateway_ok = False
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(settings.litellm_endpoint.replace("/chat/completions", "/health/readiness"))
+            gateway_ok = resp.status_code in (200, 404)
+    except Exception:
+        pass
+
+    status = "ok" if (db_ok and gateway_ok) else "degraded"
+    return {
+        "status": status,
+        "database": "connected" if db_ok else "unreachable",
+        "gateway": "reachable" if gateway_ok else "unreachable",
+    }
+
+
 @app.get("/v1/models", response_model=ModelListResponse)
-async def list_models() -> ModelListResponse:
+async def list_models(_: None = Depends(verify_auth)) -> ModelListResponse:
     """Standard OpenAI /v1/models endpoint offering the 3-tier curated lineup."""
     return ModelListResponse(
         object="list",
@@ -69,19 +128,38 @@ async def list_models() -> ModelListResponse:
 
 
 @app.post("/v1/chat/completions")
-async def openai_chat_completions(req: ChatCompletionRequest, db: AsyncSession = Depends(get_db_session)) -> Response:
-    """OpenAI-compatible chat completions with dynamic memory and criticism escalation."""
+async def openai_chat_completions(
+    req: ChatCompletionRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+    _: None = Depends(verify_auth),
+) -> Response:
+    """OpenAI-compatible chat completions with dynamic memory, attribution, and streaming."""
     try:
-        json_data, stream_gen = await execute_openai_chat_completion(db, req)
+        json_data, stream_gen, trace_id = await execute_openai_chat_completion(db, req, request=request)
         if stream_gen is not None:
-            return StreamingResponse(stream_gen, media_type="text/event-stream")
-        return Response(content=json.dumps(json_data), media_type="application/json")
+            return StreamingResponse(
+                stream_gen,
+                media_type="text/event-stream",
+                headers={"X-Trace-Id": trace_id},
+            )
+        if json_data is not None:
+            json_data["x_lunagpt_trace_id"] = trace_id
+            json_data["trace_id"] = trace_id
+            return Response(
+                content=json.dumps(json_data),
+                media_type="application/json",
+                headers={"X-Trace-Id": trace_id},
+            )
+        return Response(content="{}", media_type="application/json", headers={"X-Trace-Id": trace_id})
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/v1/embeddings")
-async def openai_embeddings(req: dict[str, Any] = Body(...)) -> Response:
+async def openai_embeddings(req: dict[str, Any] = Body(...), _: None = Depends(verify_auth)) -> Response:
     """OpenAI-compatible embeddings endpoint forwarding to LiteLLM (bge-m3)."""
     payload = dict(req)
     payload["model"] = "luna-embed"
@@ -108,6 +186,7 @@ async def audio_transcriptions(
     language: str | None = Form(None),
     prompt: str | None = Form(None),
     response_format: str = Form("json"),
+    _: None = Depends(verify_auth),
 ) -> Response:
     """OpenAI-compatible speech-to-text audio transcription powered by multimodal luna-fast."""
     try:
@@ -186,11 +265,16 @@ async def audio_transcriptions(
 
 
 @app.api_route("/process", methods=["PUT", "POST"])
-async def process_external_document(request: Request) -> dict[str, Any]:
+async def process_external_document(request: Request, _: None = Depends(verify_auth)) -> dict[str, Any]:
     """External document extractor endpoint compatible with Open WebUI ExternalDocumentLoader."""
     raw_filename = request.headers.get("X-Filename") or request.headers.get("x-filename") or "document.txt"
     filename = unquote(raw_filename)
     content_bytes = await request.body()
+    if len(content_bytes) > settings.max_upload_size_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Uploaded file exceeds {settings.max_upload_size_bytes // (1024 * 1024)}MB size limit",
+        )
     try:
         text = extract_text(filename, content_bytes)
         if not text or not text.strip():
@@ -207,7 +291,11 @@ async def process_external_document(request: Request) -> dict[str, Any]:
 
 
 @app.post("/api/v1/chat", response_model=PromptResponse)
-async def chat_endpoint(req: PromptRequest, db: AsyncSession = Depends(get_db_session)) -> PromptResponse:
+async def chat_endpoint(
+    req: PromptRequest,
+    db: AsyncSession = Depends(get_db_session),
+    _: None = Depends(verify_auth),
+) -> PromptResponse:
     """Execute routed chat prompt with memory and RAG injection."""
     try:
         return await execute_smart_routing(db, req)
@@ -216,7 +304,11 @@ async def chat_endpoint(req: PromptRequest, db: AsyncSession = Depends(get_db_se
 
 
 @app.post("/api/v1/feedback", response_model=FeedbackResponse)
-async def feedback_endpoint(req: FeedbackRequest, db: AsyncSession = Depends(get_db_session)) -> FeedbackResponse:
+async def feedback_endpoint(
+    req: FeedbackRequest,
+    db: AsyncSession = Depends(get_db_session),
+    _: None = Depends(verify_auth),
+) -> FeedbackResponse:
     """Save user correction/mistake to pgvector memory."""
     try:
         mem_id = await save_feedback_memory(db, req)
@@ -231,11 +323,18 @@ async def feedback_endpoint(req: FeedbackRequest, db: AsyncSession = Depends(get
 
 @app.post("/api/v1/documents/ingest", response_model=DocumentIngestResponse)
 async def ingest_document_endpoint(
-    file: UploadFile = File(...), db: AsyncSession = Depends(get_db_session)
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db_session),
+    _: None = Depends(verify_auth),
 ) -> DocumentIngestResponse:
     """Ingest document (PDF, TXT, MD), compute embeddings, and store in pgvector."""
     try:
         content = await file.read()
+        if len(content) > settings.max_upload_size_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Document exceeds {settings.max_upload_size_bytes // (1024 * 1024)}MB size limit",
+            )
         doc_id, chunks_count, duration = await ingest_document(db, file.filename or "unknown.txt", content)
         return DocumentIngestResponse(
             document_id=str(doc_id),
@@ -244,12 +343,16 @@ async def ingest_document_endpoint(
             chunks_count=chunks_count,
             duration_sec=duration,
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/api/v1/documents", response_model=DocumentListResponse)
-async def get_documents(db: AsyncSession = Depends(get_db_session)) -> DocumentListResponse:
+async def get_documents(
+    db: AsyncSession = Depends(get_db_session), _: None = Depends(verify_auth)
+) -> DocumentListResponse:
     """List all ingested documents and their chunk counts."""
     docs = await list_documents(db)
     items = [DocumentItem(**d) for d in docs]
@@ -257,7 +360,11 @@ async def get_documents(db: AsyncSession = Depends(get_db_session)) -> DocumentL
 
 
 @app.delete("/api/v1/documents/{document_id}", response_model=DeleteResponse)
-async def remove_document(document_id: uuid.UUID, db: AsyncSession = Depends(get_db_session)) -> DeleteResponse:
+async def remove_document(
+    document_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db_session),
+    _: None = Depends(verify_auth),
+) -> DeleteResponse:
     """Delete an ingested document and its chunks."""
     deleted = await delete_document(db, document_id)
     if not deleted:
@@ -266,7 +373,11 @@ async def remove_document(document_id: uuid.UUID, db: AsyncSession = Depends(get
 
 
 @app.get("/api/v1/feedback/export-dpo")
-async def export_dpo(mode: str = "dpo", db: AsyncSession = Depends(get_db_session)) -> list[dict[str, Any]]:
+async def export_dpo(
+    mode: str = "dpo",
+    db: AsyncSession = Depends(get_db_session),
+    _: None = Depends(verify_auth),
+) -> list[dict[str, Any]]:
     """Export feedback memory pairs as training records (mode='dpo' for pairs with rejected, mode='sft' for all)."""
     try:
         require_rejected = mode.lower() != "sft"

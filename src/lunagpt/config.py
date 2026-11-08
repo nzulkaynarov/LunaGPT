@@ -10,6 +10,9 @@ class Settings(BaseSettings):
     litellm_endpoint: str = "http://localhost:4000/v1/chat/completions"
     litellm_embeddings_endpoint: str = "http://localhost:4000/v1/embeddings"
     litellm_master_key: str = "sk-luna-master-key-2026"
+    core_api_key: str = ""
+    require_auth: bool = True
+    max_upload_size_bytes: int = 50 * 1024 * 1024  # 50MB
 
     # Langfuse Observability
     langfuse_host: str = "http://localhost:3001"

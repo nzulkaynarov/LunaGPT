@@ -79,14 +79,20 @@ async def save_feedback_memory(db: AsyncSession, req: FeedbackRequest) -> uuid.U
 
 
 async def search_relevant_feedback(
-    db: AsyncSession, prompt: str, limit: int = 2, threshold: float = 0.72
+    db: AsyncSession,
+    prompt: str,
+    limit: int = 2,
+    threshold: float = 0.72,
+    query_emb: list[float] | None = None,
 ) -> list[FeedbackMemory]:
     """
     Search for past similar mistakes/corrections using cosine similarity.
     Only returns records where cosine similarity >= threshold (distance <= 1 - threshold).
+    Supports precomputed embedding to avoid redundant vectorization.
     """
-    prompt_emb = await get_embedding(prompt)
-    dist_expr = FeedbackMemory.prompt_embedding.cosine_distance(prompt_emb)
+    if query_emb is None:
+        query_emb = await get_embedding(prompt)
+    dist_expr = FeedbackMemory.prompt_embedding.cosine_distance(query_emb)
 
     max_distance = 1.0 - threshold
     stmt = select(FeedbackMemory).where(dist_expr <= max_distance).order_by(dist_expr).limit(limit)

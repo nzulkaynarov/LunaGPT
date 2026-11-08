@@ -1,18 +1,23 @@
 """Smart Router with Negative Feedback Detection, Reflection, and Model Escalation."""
 
 import json
+import logging
 import re
 import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
 
 import httpx
+from fastapi import HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lunagpt.config import settings
 from lunagpt.schemas import ChatCompletionRequest, PromptRequest, PromptResponse
+from lunagpt.services.embeddings import get_embedding
 from lunagpt.services.ingestion import search_document_chunks
 from lunagpt.services.memory import search_relevant_feedback
+
+logger = logging.getLogger("lunagpt.router")
 
 BACKGROUND_TASK_PATTERNS = [
     "### Task:",
@@ -180,10 +185,18 @@ async def execute_smart_routing(db: AsyncSession, req: PromptRequest) -> PromptR
 
     system_instructions = ["You are LunaGPT, a premier intelligent sovereign AI coding assistant."]
 
-    lessons_count = 0
-    if req.use_memory:
+    # Single-pass embedding for both memory and RAG
+    query_emb: list[float] | None = None
+    if req.use_memory or req.use_rag:
         try:
-            memories = await search_relevant_feedback(db, req.prompt, limit=2)
+            query_emb = await get_embedding(req.prompt)
+        except Exception as exc:
+            logger.warning("Failed to compute query embedding in smart routing: %s", exc)
+
+    lessons_count = 0
+    if req.use_memory and query_emb is not None:
+        try:
+            memories = await search_relevant_feedback(db, req.prompt, limit=2, query_emb=query_emb)
             if memories:
                 lessons_count = len(memories)
                 lessons_text = "\n".join(
@@ -196,13 +209,13 @@ async def execute_smart_routing(db: AsyncSession, req: PromptRequest) -> PromptR
                     f"### PAST LESSONS & PREVENTED MISTAKES:\n{lessons_text}\n"
                     "Do NOT repeat the previous mistakes mentioned above."
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to query feedback memories: %s", exc)
 
     rag_count = 0
-    if req.use_rag:
+    if req.use_rag and query_emb is not None:
         try:
-            chunks = await search_document_chunks(db, req.prompt, limit=3)
+            chunks = await search_document_chunks(db, req.prompt, limit=3, query_emb=query_emb)
             if chunks:
                 selected_texts: list[str] = []
                 cur_len = 0
@@ -217,8 +230,8 @@ async def execute_smart_routing(db: AsyncSession, req: PromptRequest) -> PromptR
                     rag_count = len(selected_texts)
                     rag_text = "\n\n".join(selected_texts)
                     system_instructions.append(f"### RELEVANT KNOWLEDGE BASE CONTEXT (RAG):\n{rag_text}")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to query document chunks for RAG: %s", exc)
 
     if is_criticism:
         system_instructions.append(
@@ -279,15 +292,16 @@ async def execute_smart_routing(db: AsyncSession, req: PromptRequest) -> PromptR
 
 
 async def execute_openai_chat_completion(
-    db: AsyncSession, req: ChatCompletionRequest
-) -> tuple[dict[str, Any] | None, AsyncGenerator[bytes, None] | None]:
+    db: AsyncSession, req: ChatCompletionRequest, request: Request | None = None
+) -> tuple[dict[str, Any] | None, AsyncGenerator[bytes, None] | None, str]:
     """
     OpenAI-compatible chat completion handler with:
     1. Robust extraction for text, lists, dicts, tool calls, and user metadata.
-    2. Criticism detection and automatic escalation to luna-smart (Claude Sonnet 4.6).
-    3. Dynamic injection of past lessons (feedback_memories) from pgvector.
-    4. Safe fallback for embedding models.
-    5. Transparent streaming (SSE) or full JSON response from LiteLLM.
+    2. Criticism detection and automatic escalation to luna-pro (Claude Opus 4.6).
+    3. Dynamic injection of past lessons (feedback_memories) and RAG from pgvector.
+    4. Safe single-pass vector embedding for both feedback and documents.
+    5. User and session attribution extracted from Open WebUI forwarded headers.
+    6. Robust pre-checked streaming and error propagation.
     """
     # 1. Extract latest user query safely
     user_query = ""
@@ -299,64 +313,85 @@ async def execute_openai_chat_completion(
 
     has_assistant_history = any(m.role == "assistant" for m in req.messages)
     is_background = is_openwebui_task(user_query)
-    detected_model, reason, is_criticism = detect_criticism_and_model(user_query, has_history=has_assistant_history)
+    detected_model, detector_reason, is_criticism = detect_criticism_and_model(
+        user_query, has_history=has_assistant_history
+    )
 
-    # Safe fallback and alias mapping (3-tier lineup)
+    # Safe fallback, alias mapping, and accurate decision tracking
     requested_model = (req.model or "luna-smart").strip()
     if is_background:
         target_model = "luna-fast"
+        applied_reason = "Служебная фоновая задача Open WebUI (Gemini 3.5 Flash Lite)"
+        decision_source = "background_task"
     elif requested_model in ("luna-auto", "auto", "default", ""):
         target_model = detected_model
+        applied_reason = f"Авто-роутер: {detector_reason}"
+        decision_source = "smart_router"
     elif requested_model in ("luna-embed", "embed"):
         target_model = "luna-fast"
+        applied_reason = "Перенаправление с embedding-модели на luna-fast"
+        decision_source = "alias_fallback"
     elif requested_model == "luna-smart" and is_criticism:
         target_model = "luna-pro"
+        applied_reason = "Авто-эскалация на Claude Opus 4.6 (luna-pro) из-за обнаруженной ошибки/критики"
+        decision_source = "criticism_escalation"
     elif requested_model in ("luna-fast", "luna-smart", "luna-pro", "luna-coder"):
         target_model = requested_model
+        applied_reason = f"Явный выбор пользователем: {requested_model}"
+        decision_source = "user_explicit"
     else:
         target_model = "luna-smart"
+        applied_reason = f"Fallback на luna-smart (запрошена модель: {requested_model})"
+        decision_source = "unknown_model_fallback"
 
-    # 2. Query past lessons and RAG documents from pgvector (skip for background tasks)
+    # 2. Query past lessons and RAG documents using single-pass embedding (skip for background tasks)
     lessons_injected = 0
     rag_chunks_injected = 0
     extra_system_parts: list[str] = []
 
     if user_query and not is_background:
+        query_emb: list[float] | None = None
         try:
-            memories = await search_relevant_feedback(db, user_query, limit=2)
-            if memories:
-                lessons_injected = len(memories)
-                lessons_text = "\n".join(
-                    [
-                        f"- PREVIOUS MISTAKE: {m.user_prompt}\n  CORRECTED BEHAVIOR: {m.corrected_response}"
-                        for m in memories
-                    ]
-                )
-                extra_system_parts.append(
-                    f"### PAST LESSONS & PREVENTED MISTAKES:\n{lessons_text}\n"
-                    "Do NOT repeat the previous mistakes mentioned above."
-                )
-        except Exception:
-            pass
+            query_emb = await get_embedding(user_query)
+        except Exception as exc:
+            logger.warning("Failed to compute embedding for user query: %s", exc)
 
-        try:
-            chunks = await search_document_chunks(db, user_query, limit=3)
-            if chunks:
-                selected_texts: list[str] = []
-                cur_len = 0
-                for c in chunks:
-                    chunk_text = f"[{c.chunk_index}] {c.content}"
-                    if cur_len + len(chunk_text) > MAX_RAG_CHARS and selected_texts:
-                        break
-                    selected_texts.append(chunk_text)
-                    cur_len += len(chunk_text)
+        if query_emb is not None:
+            try:
+                memories = await search_relevant_feedback(db, user_query, limit=2, query_emb=query_emb)
+                if memories:
+                    lessons_injected = len(memories)
+                    lessons_text = "\n".join(
+                        [
+                            f"- PREVIOUS MISTAKE: {m.user_prompt}\n  CORRECTED BEHAVIOR: {m.corrected_response}"
+                            for m in memories
+                        ]
+                    )
+                    extra_system_parts.append(
+                        f"### PAST LESSONS & PREVENTED MISTAKES:\n{lessons_text}\n"
+                        "Do NOT repeat the previous mistakes mentioned above."
+                    )
+            except Exception as exc:
+                logger.warning("Failed to query relevant feedback memory: %s", exc)
 
-                if selected_texts:
-                    rag_chunks_injected = len(selected_texts)
-                    rag_text = "\n\n".join(selected_texts)
-                    extra_system_parts.append(f"### RELEVANT KNOWLEDGE BASE CONTEXT (RAG):\n{rag_text}")
-        except Exception:
-            pass
+            try:
+                chunks = await search_document_chunks(db, user_query, limit=3, query_emb=query_emb)
+                if chunks:
+                    selected_texts: list[str] = []
+                    cur_len = 0
+                    for c in chunks:
+                        chunk_text = f"[{c.chunk_index}] {c.content}"
+                        if cur_len + len(chunk_text) > MAX_RAG_CHARS and selected_texts:
+                            break
+                        selected_texts.append(chunk_text)
+                        cur_len += len(chunk_text)
+
+                    if selected_texts:
+                        rag_chunks_injected = len(selected_texts)
+                        rag_text = "\n\n".join(selected_texts)
+                        extra_system_parts.append(f"### RELEVANT KNOWLEDGE BASE CONTEXT (RAG):\n{rag_text}")
+            except Exception as exc:
+                logger.warning("Failed to query document chunks for RAG: %s", exc)
 
     if is_criticism:
         extra_system_parts.append(
@@ -397,13 +432,29 @@ async def execute_openai_chat_completion(
     if extra_system_parts and not system_appended:
         out_messages.insert(0, {"role": "system", "content": "\n\n".join(extra_system_parts)})
 
-    # 4. Prepare LiteLLM payload with all client parameters
+    # 4. Prepare LiteLLM payload with verified user attribution
     trace_id = str(uuid.uuid4())
     user_id = "default-user"
-    if isinstance(req.user, dict):
-        user_id = str(req.user.get("email") or req.user.get("id") or req.user.get("name") or "default-user")
-    elif isinstance(req.user, str) and req.user:
-        user_id = req.user
+    session_id = "default-session"
+
+    if request is not None:
+        user_id = (
+            request.headers.get("x-openwebui-user-email")
+            or request.headers.get("x-openwebui-user-name")
+            or request.headers.get("x-openwebui-user-id")
+            or user_id
+        )
+        session_id = request.headers.get("x-openwebui-chat-id") or request.headers.get("x-session-id") or session_id
+
+    if user_id == "default-user":
+        if isinstance(req.user, dict):
+            user_id = str(req.user.get("email") or req.user.get("name") or req.user.get("id") or "default-user")
+        elif isinstance(req.user, str) and req.user:
+            user_id = req.user
+
+    extra_fields = getattr(req, "__pydantic_extra__", None) or {}
+    if session_id == "default-session":
+        session_id = str(extra_fields.get("chat_id") or extra_fields.get("session_id") or "default-session")
 
     payload: dict[str, Any] = {
         "model": target_model,
@@ -412,7 +463,11 @@ async def execute_openai_chat_completion(
         "metadata": {
             "trace_id": trace_id,
             "user_id": user_id,
-            "routing_reason": reason,
+            "session_id": session_id,
+            "routing_reason": applied_reason,
+            "decision_source": decision_source,
+            "detector_recommendation": detected_model,
+            "detector_reason": detector_reason,
             "is_criticism": is_criticism,
             "lessons_injected": lessons_injected,
             "rag_chunks_injected": rag_chunks_injected,
@@ -446,21 +501,31 @@ async def execute_openai_chat_completion(
         "Authorization": f"Bearer {settings.litellm_master_key}",
     }
 
-    # 5. Handle streaming vs non-streaming
+    # 5. Handle streaming vs non-streaming with pre-validated upstream status
     if req.stream:
+        client = httpx.AsyncClient(timeout=180.0)
+        req_stream = client.build_request("POST", settings.litellm_endpoint, json=payload, headers=headers)
+        response = await client.send(req_stream, stream=True)
+        if response.status_code >= 400:
+            error_body = await response.aread()
+            await response.aclose()
+            await client.aclose()
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"LiteLLM upstream error: {error_body.decode('utf-8', errors='replace')}",
+            )
 
         async def stream_generator() -> AsyncGenerator[bytes, None]:
-            async with (
-                httpx.AsyncClient(timeout=180.0) as client,
-                client.stream("POST", settings.litellm_endpoint, json=payload, headers=headers) as response,
-            ):
-                response.raise_for_status()
+            try:
                 async for chunk in response.aiter_raw():
                     yield chunk
+            finally:
+                await response.aclose()
+                await client.aclose()
 
-        return None, stream_generator()
+        return None, stream_generator(), trace_id
 
     async with httpx.AsyncClient(timeout=120.0) as client:
         resp = await client.post(settings.litellm_endpoint, json=payload, headers=headers)
         resp.raise_for_status()
-        return resp.json(), None
+        return resp.json(), None, trace_id

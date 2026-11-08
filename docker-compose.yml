@@ -8,7 +8,7 @@ services:
     container_name: lunagpt-gateway
     restart: unless-stopped
     ports:
-      - "${LITELLM_PORT:-4000}:4000"
+      - "127.0.0.1:${LITELLM_PORT:-4000}:4000"
     volumes:
       - ./config/litellm-config.yaml:/app/config.yaml:ro
       - ./config/langfuse_v2_logger.py:/app/config/langfuse_v2_logger.py:ro
@@ -22,6 +22,7 @@ services:
       - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-sk-lf-luna-local-secret-key}
       - REDIS_HOST=lunagpt-redis
       - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-lunagpt_secure_redis_pass_2026}
     command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "4"]
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -36,8 +37,9 @@ services:
     image: redis:7.4.11
     container_name: lunagpt-redis
     restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-lunagpt_secure_redis_pass_2026}"]
     ports:
-      - "6380:6379"
+      - "127.0.0.1:6380:6379"
     volumes:
       - redis-data:/data
 
@@ -56,6 +58,7 @@ services:
       - ENABLE_OLLAMA_API=False
       - WEBUI_NAME=LunaGPT
       - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY}
+      - ENABLE_FORWARD_USER_INFO_HEADERS=True
       - RAG_EMBEDDING_ENGINE=openai
       - RAG_OPENAI_API_BASE_URL=http://core:8010/v1
       - RAG_OPENAI_API_KEY=${LITELLM_MASTER_KEY}
@@ -64,7 +67,7 @@ services:
       - EXTERNAL_DOCUMENT_LOADER_URL=http://core:8010
       - EXTERNAL_DOCUMENT_LOADER_API_KEY=${LITELLM_MASTER_KEY}
       - VECTOR_DB=pgvector
-      - PGVECTOR_DB_URL=postgresql://postgres:${POSTGRES_PASSWORD:-lunagpt_secure_postgres_pass}@langfuse-db:5432/lunagpt
+      - PGVECTOR_DB_URL=postgresql://postgres:${POSTGRES_PASSWORD:-lunagpt_secure_postgres_pass}@langfuse-db:5432/openwebui
       - PGVECTOR_INITIALIZE_MAX_VECTOR_LENGTH=1024
       - BYPASS_MODEL_ACCESS_CONTROL=True
       - BYPASS_RETRIEVAL_ACCESS_CONTROL=True
@@ -92,7 +95,7 @@ services:
     container_name: lunagpt-langfuse
     restart: unless-stopped
     ports:
-      - "${LANGFUSE_PORT:-3001}:3000"
+      - "127.0.0.1:${LANGFUSE_PORT:-3001}:3000"
     environment:
       - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:lunagpt_secure_postgres_pass@langfuse-db:5432/langfuse}
       - NEXTAUTH_SECRET=${NEXTAUTH_SECRET:-lunagpt_nextauth_secret_random_string_32chars}
@@ -121,7 +124,7 @@ services:
     container_name: lunagpt-postgres
     restart: unless-stopped
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-postgres}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-lunagpt_secure_postgres_pass}
@@ -143,7 +146,7 @@ services:
     container_name: lunagpt-searxng
     restart: unless-stopped
     ports:
-      - "8082:8080"
+      - "127.0.0.1:8082:8080"
     volumes:
       - ./config/searxng/settings.yml:/etc/searxng/settings.yml:ro
     environment:
@@ -157,15 +160,18 @@ services:
     container_name: lunagpt-core
     restart: unless-stopped
     ports:
-      - "8010:8010"
+      - "127.0.0.1:8010:8010"
     volumes:
       - ./src:/app/src:ro
+      - ./migrations:/app/migrations:ro
+      - ./alembic.ini:/app/alembic.ini:ro
+    command: ["sh", "-c", "alembic upgrade head && python3 -m uvicorn lunagpt.api:app --host 0.0.0.0 --port 8010"]
     environment:
       - LITELLM_ENDPOINT=http://litellm:4000/v1/chat/completions
       - LITELLM_EMBEDDINGS_ENDPOINT=http://litellm:4000/v1/embeddings
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
       - LUNAGPT_DATABASE_URL=postgresql+psycopg://postgres:${POSTGRES_PASSWORD:-lunagpt_secure_postgres_pass}@langfuse-db:5432/lunagpt
-      - REDIS_URL=redis://lunagpt-redis:6379/0
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-lunagpt_secure_redis_pass_2026}@lunagpt-redis:6379/0
       - LANGFUSE_HOST=${LANGFUSE_HOST:-http://langfuse-server:3000}
       - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-pk-lf-luna-local-public-key}
       - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-sk-lf-luna-local-secret-key}

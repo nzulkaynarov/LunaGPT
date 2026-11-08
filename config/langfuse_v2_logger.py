@@ -22,6 +22,36 @@ from litellm.integrations.custom_logger import CustomLogger
 logger = logging.getLogger("langfuse_v2_logger")
 logger.setLevel(logging.INFO)
 
+SENSITIVE_METADATA_SUBSTRINGS = (
+    "auth",
+    "authorization",
+    "bearer",
+    "key",
+    "token",
+    "secret",
+    "password",
+    "proxy_server_request",
+    "headers",
+    "request_headers",
+)
+
+
+def _sanitize_metadata(meta: Any) -> Any:
+    """Filter out headers, proxy auth objects, and secrets from Langfuse metadata."""
+    if isinstance(meta, dict):
+        clean = {}
+        for k, v in meta.items():
+            k_lower = str(k).lower()
+            if any(sub in k_lower for sub in SENSITIVE_METADATA_SUBSTRINGS):
+                continue
+            if isinstance(v, str) and ("Bearer " in v or "sk-" in v):
+                continue
+            clean[str(k)] = _sanitize_metadata(v)
+        return clean
+    if isinstance(meta, (list, tuple, set)):
+        return [_sanitize_metadata(x) for x in meta]
+    return meta
+
 
 def _safe_serialize(val: Any) -> Any:
     """Recursively convert arbitrary objects to JSON-serializable primitives."""
@@ -86,7 +116,7 @@ class LangfuseV2Logger(CustomLogger):
 
             litellm_params = kwargs.get("litellm_params", {}) or {}
             raw_metadata = litellm_params.get("metadata", {}) or {}
-            metadata = _safe_serialize(raw_metadata)
+            metadata = _sanitize_metadata(_safe_serialize(raw_metadata))
 
             trace_id = metadata.get("trace_id") or str(uuid.uuid4())
             generation_id = str(uuid.uuid4())
@@ -150,6 +180,68 @@ class LangfuseV2Logger(CustomLogger):
             await asyncio.to_thread(self._send_batch, batch)
         except Exception as exc:
             logger.error(f"Error in LangfuseV2Logger async_log_success_event: {exc}")
+
+    async def async_log_failure_event(
+        self, kwargs: dict[str, Any], response_obj: Any, start_time: Any, end_time: Any
+    ) -> None:
+        """Log failed generations or fallbacks to Langfuse v2."""
+        try:
+            call_type = kwargs.get("call_type")
+            if call_type == "embedding":
+                return
+            model = kwargs.get("model") or "unknown-model"
+            if "bge-m3" in model or "embed" in model:
+                return
+
+            litellm_params = kwargs.get("litellm_params", {}) or {}
+            raw_metadata = litellm_params.get("metadata", {}) or {}
+            metadata = _sanitize_metadata(_safe_serialize(raw_metadata))
+
+            trace_id = metadata.get("trace_id") or str(uuid.uuid4())
+            generation_id = str(uuid.uuid4())
+            user_id = str(metadata.get("user_id") or "default-user")
+            session_id = str(metadata.get("session_id") or "default-session")
+
+            exception_msg = str(kwargs.get("exception") or "Upstream generation failure")
+
+            start_ts = start_time.timestamp() if hasattr(start_time, "timestamp") else time.time()
+            end_ts = end_time.timestamp() if hasattr(end_time, "timestamp") else time.time()
+            start_iso = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(start_ts))
+            end_iso = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(end_ts))
+
+            batch: list[dict[str, Any]] = [
+                {
+                    "id": str(uuid.uuid4()),
+                    "type": "trace-create",
+                    "timestamp": start_iso,
+                    "body": {
+                        "id": trace_id,
+                        "name": f"chat-{model}-failed",
+                        "userId": user_id,
+                        "sessionId": session_id,
+                        "metadata": metadata,
+                    },
+                },
+                {
+                    "id": str(uuid.uuid4()),
+                    "type": "generation-create",
+                    "timestamp": start_iso,
+                    "body": {
+                        "id": generation_id,
+                        "traceId": trace_id,
+                        "name": f"generation-{model}",
+                        "startTime": start_iso,
+                        "endTime": end_iso,
+                        "model": model,
+                        "level": "ERROR",
+                        "statusMessage": exception_msg,
+                        "metadata": metadata,
+                    },
+                },
+            ]
+            await asyncio.to_thread(self._send_batch, batch)
+        except Exception as exc:
+            logger.error(f"Error in LangfuseV2Logger async_log_failure_event: {exc}")
 
 
 langfuse_v2_logger = LangfuseV2Logger()

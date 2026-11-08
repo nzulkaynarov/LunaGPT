@@ -80,8 +80,8 @@ def extract_text(filename: str, content_bytes: bytes) -> str:
         pages_text = [page.extract_text() or "" for page in reader.pages]
         return "\n\n".join(pages_text)
 
-    # 3. DOCX extraction
-    if suffix in (".docx", ".doc"):
+    # 3. DOCX extraction (.docx only, python-docx does not support binary .doc)
+    if suffix == ".docx":
         try:
             doc = DocxDocument(io.BytesIO(content_bytes))
             paras = [p.text for p in doc.paragraphs if p.text.strip()]
@@ -92,11 +92,18 @@ def extract_text(filename: str, content_bytes: bytes) -> str:
         except Exception:
             pass
 
-    # 4. PPTX / XLSX / ODT (XML-in-ZIP archives)
+    # 4. PPTX / XLSX / ODT (XML-in-ZIP archives with zip-bomb safeguards)
     if suffix in (".pptx", ".xlsx", ".odt") or zipfile.is_zipfile(io.BytesIO(content_bytes)):
         try:
-            extracted_parts: list[str] = []
             with zipfile.ZipFile(io.BytesIO(content_bytes)) as zf:
+                infolist = zf.infolist()
+                if len(infolist) > 500:
+                    return ""
+                total_uncompressed = sum(info.file_size for info in infolist)
+                if total_uncompressed > 100 * 1024 * 1024:  # 100MB limit
+                    return ""
+
+                extracted_parts: list[str] = []
                 for name in sorted(zf.namelist()):
                     if name.endswith(".xml") and (
                         "slides/slide" in name
@@ -220,13 +227,19 @@ async def ingest_document(db: AsyncSession, filename: str, content_bytes: bytes)
 
 
 async def search_document_chunks(
-    db: AsyncSession, query: str, limit: int = 3, threshold: float = 0.65
+    db: AsyncSession,
+    query: str,
+    limit: int = 3,
+    threshold: float = 0.65,
+    query_emb: list[float] | None = None,
 ) -> list[DocumentChunk]:
     """
     Retrieve top-K most relevant chunks using cosine similarity.
     Only returns chunks where cosine similarity >= threshold (distance <= 1 - threshold).
+    Supports precomputed embedding to avoid redundant vectorization.
     """
-    query_emb = await get_embedding(query)
+    if query_emb is None:
+        query_emb = await get_embedding(query)
     dist_expr = DocumentChunk.embedding.cosine_distance(query_emb)
 
     max_distance = 1.0 - threshold

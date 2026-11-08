@@ -7,15 +7,44 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from lunagpt.api import app
+from lunagpt.config import settings
 from lunagpt.schemas import ChatCompletionRequest, ChatMessage
 from lunagpt.services.router import detect_criticism_and_model
+
+AUTH_HEADERS = {"Authorization": f"Bearer {settings.litellm_master_key}"}
+
+
+@pytest.mark.asyncio
+async def test_auth_enforcement() -> None:
+    """Ensure protected endpoints return 401 on missing auth and 403 on invalid key."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # Missing auth header -> 401
+        resp_unauth = await client.get("/v1/models")
+        assert resp_unauth.status_code == 401
+
+        # Invalid token -> 403
+        resp_forbidden = await client.get("/v1/models", headers={"Authorization": "Bearer bad-key-12345"})
+        assert resp_forbidden.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_ready_endpoint() -> None:
+    """Test GET /ready readiness probe works without auth."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/ready")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "database" in data
+        assert "gateway" in data
 
 
 @pytest.mark.asyncio
 async def test_v1_models_endpoint() -> None:
     """Test GET /v1/models returns curated 3-tier chat model list without internal models."""
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(transport=transport, base_url="http://test", headers=AUTH_HEADERS) as client:
         resp = await client.get("/v1/models")
         assert resp.status_code == 200
         data = resp.json()
@@ -46,7 +75,7 @@ async def test_health_endpoint() -> None:
 async def test_documents_list_endpoint() -> None:
     """Test GET /api/v1/documents returns document list structure."""
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(transport=transport, base_url="http://test", headers=AUTH_HEADERS) as client:
         resp = await client.get("/api/v1/documents")
         assert resp.status_code == 200
         data = resp.json()
@@ -59,7 +88,7 @@ async def test_documents_list_endpoint() -> None:
 async def test_feedback_export_dpo_endpoint() -> None:
     """Test GET /api/v1/feedback/export-dpo returns list."""
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(transport=transport, base_url="http://test", headers=AUTH_HEADERS) as client:
         resp = await client.get("/api/v1/feedback/export-dpo")
         assert resp.status_code == 200
         data = resp.json()
@@ -97,7 +126,7 @@ def test_chat_schema_flexible_formats() -> None:
 async def test_process_external_document_endpoint() -> None:
     """Test PUT /process for Open WebUI ExternalDocumentLoader compatibility."""
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(transport=transport, base_url="http://test", headers=AUTH_HEADERS) as client:
         # 1. Plain text / Markdown with URL-encoded filename
         resp = await client.put(
             "/process",
@@ -127,7 +156,7 @@ async def test_process_external_document_endpoint() -> None:
 async def test_audio_transcriptions_empty_file() -> None:
     """Test POST /v1/audio/transcriptions returns 400 on empty audio."""
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(transport=transport, base_url="http://test", headers=AUTH_HEADERS) as client:
         resp = await client.post(
             "/v1/audio/transcriptions",
             files={"file": ("empty.ogg", b"", "audio/ogg")},
@@ -143,7 +172,7 @@ async def test_audio_transcriptions_mocked(monkeypatch: pytest.MonkeyPatch) -> N
     orig_post = httpx.AsyncClient.post
 
     async def mock_post(self: Any, url: Any, *args: Any, **kwargs: Any) -> Any:
-        if "chat/completions" in str(url):
+        if ("4000" in str(url) or "litellm" in str(url)) and "chat/completions" in str(url):
             mock_resp = MagicMock()
             mock_resp.status_code = 200
             mock_resp.raise_for_status = MagicMock()
@@ -156,7 +185,7 @@ async def test_audio_transcriptions_mocked(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(transport=transport, base_url="http://test", headers=AUTH_HEADERS) as client:
         # Default json format
         resp = await client.post(
             "/v1/audio/transcriptions",
@@ -182,7 +211,7 @@ async def test_audio_transcriptions_mocked(monkeypatch: pytest.MonkeyPatch) -> N
 async def test_audio_transcriptions_oversized_file() -> None:
     """Test POST /v1/audio/transcriptions returns 413 when file exceeds 25MB."""
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(transport=transport, base_url="http://test", headers=AUTH_HEADERS) as client:
         large_bytes = b"0" * (26 * 1024 * 1024)
         resp = await client.post(
             "/v1/audio/transcriptions",
@@ -230,3 +259,57 @@ def test_chunk_text_oversized_paragraph() -> None:
     assert len(chunks) > 1
     for c in chunks:
         assert len(c) <= 650
+
+
+@pytest.mark.asyncio
+async def test_process_oversized_file() -> None:
+    """Test PUT /process returns 413 when file exceeds max_upload_size_bytes."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=AUTH_HEADERS) as client:
+        huge_bytes = b"0" * (51 * 1024 * 1024)
+        resp = await client.put(
+            "/process",
+            content=huge_bytes,
+            headers={"X-Filename": "huge.txt"},
+        )
+        assert resp.status_code == 413
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_trace_id_headers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test /v1/chat/completions returns X-Trace-Id header and trace_id in json payload."""
+    from unittest.mock import MagicMock
+
+    orig_post = httpx.AsyncClient.post
+
+    async def mock_post(self: Any, url: Any, *args: Any, **kwargs: Any) -> Any:
+        if ("4000" in str(url) or "litellm" in str(url)) and "chat/completions" in str(url):
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.raise_for_status = MagicMock()
+            mock_resp.json.return_value = {
+                "id": "chatcmpl-test",
+                "choices": [{"message": {"role": "assistant", "content": "Тестовый ответ"}}],
+            }
+            return mock_resp
+        return await orig_post(self, url, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=AUTH_HEADERS) as client:
+        req_payload = {
+            "model": "luna-smart",
+            "messages": [{"role": "user", "content": "Привет"}],
+        }
+        resp = await client.post(
+            "/v1/chat/completions",
+            json=req_payload,
+            headers={"X-OpenWebUI-User-Email": "testuser@lunagpt.local", "X-OpenWebUI-Chat-Id": "session-1234"},
+        )
+        assert resp.status_code == 200
+        assert "X-Trace-Id" in resp.headers
+        data = resp.json()
+        assert "x_lunagpt_trace_id" in data
+        assert "trace_id" in data
+        assert data["trace_id"] == resp.headers["X-Trace-Id"]
