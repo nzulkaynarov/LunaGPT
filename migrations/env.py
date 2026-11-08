@@ -1,5 +1,4 @@
 import asyncio
-from collections.abc import Sequence
 from logging.config import fileConfig
 from typing import Any
 

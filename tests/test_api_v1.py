@@ -313,3 +313,18 @@ async def test_chat_completions_trace_id_headers(monkeypatch: pytest.MonkeyPatch
         assert "x_lunagpt_trace_id" in data
         assert "trace_id" in data
         assert data["trace_id"] == resp.headers["X-Trace-Id"]
+
+
+@pytest.mark.asyncio
+async def test_feedback_sync_openwebui_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test POST /api/v1/feedback/sync-openwebui calls sync_openwebui_feedback safely."""
+    from unittest.mock import AsyncMock
+
+    mock_sync = AsyncMock(return_value={"synced_count": 0, "status": "success"})
+    monkeypatch.setattr("lunagpt.api.sync_openwebui_feedback", mock_sync)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=AUTH_HEADERS) as client:
+        resp = await client.post("/api/v1/feedback/sync-openwebui")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "success"

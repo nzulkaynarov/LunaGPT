@@ -22,7 +22,7 @@ services:
       - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-sk-lf-luna-local-secret-key}
       - REDIS_HOST=lunagpt-redis
       - REDIS_PORT=6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-lunagpt_secure_redis_pass_2026}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
     command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "4"]
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -37,7 +37,7 @@ services:
     image: redis:7.4.11
     container_name: lunagpt-redis
     restart: unless-stopped
-    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-lunagpt_secure_redis_pass_2026}"]
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
     ports:
       - "127.0.0.1:6380:6379"
     volumes:
@@ -58,7 +58,10 @@ services:
       - ENABLE_OLLAMA_API=False
       - WEBUI_NAME=LunaGPT
       - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY}
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@langfuse-db:5432/openwebui
       - ENABLE_FORWARD_USER_INFO_HEADERS=True
+      - FORWARD_USER_INFO_HEADERS=True
+      - FORWARD_SESSION_INFO_HEADERS=True
       - RAG_EMBEDDING_ENGINE=openai
       - RAG_OPENAI_API_BASE_URL=http://core:8010/v1
       - RAG_OPENAI_API_KEY=${LITELLM_MASTER_KEY}
@@ -67,7 +70,7 @@ services:
       - EXTERNAL_DOCUMENT_LOADER_URL=http://core:8010
       - EXTERNAL_DOCUMENT_LOADER_API_KEY=${LITELLM_MASTER_KEY}
       - VECTOR_DB=pgvector
-      - PGVECTOR_DB_URL=postgresql://postgres:${POSTGRES_PASSWORD:-lunagpt_secure_postgres_pass}@langfuse-db:5432/openwebui
+      - PGVECTOR_DB_URL=postgresql://postgres:${POSTGRES_PASSWORD}@langfuse-db:5432/openwebui
       - PGVECTOR_INITIALIZE_MAX_VECTOR_LENGTH=1024
       - BYPASS_MODEL_ACCESS_CONTROL=True
       - BYPASS_RETRIEVAL_ACCESS_CONTROL=True
@@ -97,10 +100,10 @@ services:
     ports:
       - "127.0.0.1:${LANGFUSE_PORT:-3001}:3000"
     environment:
-      - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:lunagpt_secure_postgres_pass@langfuse-db:5432/langfuse}
-      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET:-lunagpt_nextauth_secret_random_string_32chars}
-      - SALT=${SALT:-lunagpt_salt_random_string_value_32ch}
-      - NEXTAUTH_URL=${NEXTAUTH_URL:-http://100.65.202.127:3001}
+      - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:${POSTGRES_PASSWORD}@langfuse-db:5432/langfuse}
+      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET}
+      - SALT=${SALT}
+      - NEXTAUTH_URL=${NEXTAUTH_URL:-http://localhost:3001}
       - AUTH_TRUST_HOST=true
       - TELEMETRY_ENABLED=false
       - LANGFUSE_INIT_ORG_ID=lunagpt-org
@@ -111,7 +114,7 @@ services:
       - LANGFUSE_INIT_PROJECT_SECRET_KEY=sk-lf-luna-local-secret-key
       - LANGFUSE_INIT_USER_EMAIL=admin@lunagpt.local
       - LANGFUSE_INIT_USER_NAME=Administrator
-      - LANGFUSE_INIT_USER_PASSWORD=lunagpt_admin_password_2026
+      - LANGFUSE_INIT_USER_PASSWORD=${LANGFUSE_ADMIN_PASSWORD:-lunagpt_admin_password_2026}
     depends_on:
       langfuse-db:
         condition: service_healthy
@@ -127,7 +130,7 @@ services:
       - "127.0.0.1:5433:5432"
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-postgres}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-lunagpt_secure_postgres_pass}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=${POSTGRES_DB:-langfuse}
     volumes:
       - langfuse-db-data:/var/lib/postgresql/data
@@ -156,6 +159,9 @@ services:
   # 7. LunaGPT Core Service (FastAPI Active Learning, Memory & RAG)
   # ============================================================================
   core:
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: lunagpt-core:local
     container_name: lunagpt-core
     restart: unless-stopped
@@ -170,8 +176,9 @@ services:
       - LITELLM_ENDPOINT=http://litellm:4000/v1/chat/completions
       - LITELLM_EMBEDDINGS_ENDPOINT=http://litellm:4000/v1/embeddings
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
-      - LUNAGPT_DATABASE_URL=postgresql+psycopg://postgres:${POSTGRES_PASSWORD:-lunagpt_secure_postgres_pass}@langfuse-db:5432/lunagpt
-      - REDIS_URL=redis://:${REDIS_PASSWORD:-lunagpt_secure_redis_pass_2026}@lunagpt-redis:6379/0
+      - LUNAGPT_DATABASE_URL=postgresql+psycopg://postgres:${POSTGRES_PASSWORD}@langfuse-db:5432/lunagpt
+      - OPENWEBUI_DATABASE_URL=postgresql+psycopg://postgres:${POSTGRES_PASSWORD}@langfuse-db:5432/openwebui
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@lunagpt-redis:6379/0
       - LANGFUSE_HOST=${LANGFUSE_HOST:-http://langfuse-server:3000}
       - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-pk-lf-luna-local-public-key}
       - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-sk-lf-luna-local-secret-key}

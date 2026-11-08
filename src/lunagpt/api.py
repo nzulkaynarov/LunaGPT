@@ -3,6 +3,7 @@
 import base64
 import json
 import logging
+import secrets
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -31,6 +32,7 @@ from lunagpt.schemas import (
     PromptRequest,
     PromptResponse,
 )
+from lunagpt.services.feedback_sync import sync_openwebui_feedback
 from lunagpt.services.ingestion import delete_document, extract_text, ingest_document, list_documents
 from lunagpt.services.memory import export_dpo_dataset, save_feedback_memory
 from lunagpt.services.router import execute_openai_chat_completion, execute_smart_routing
@@ -53,11 +55,8 @@ async def verify_auth(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    valid_keys = {
-        settings.litellm_master_key,
-        settings.core_api_key or settings.litellm_master_key,
-    }
-    if credentials.credentials not in valid_keys:
+    valid_keys = [k for k in (settings.litellm_master_key, settings.core_api_key) if k]
+    if not any(secrets.compare_digest(credentials.credentials, key) for key in valid_keys):
         raise HTTPException(
             status_code=403,
             detail="Invalid API key provided",
@@ -317,6 +316,19 @@ async def feedback_endpoint(
             memory_id=str(mem_id),
             message="Feedback and correction successfully vectorized and stored in pgvector.",
         )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/feedback/sync-openwebui")
+async def sync_openwebui_feedback_endpoint(
+    db: AsyncSession = Depends(get_db_session),
+    _: None = Depends(verify_auth),
+) -> dict[str, Any]:
+    """Synchronize user ratings and evaluations from Open WebUI database to LunaGPT pgvector memory."""
+    try:
+        res = await sync_openwebui_feedback(db)
+        return dict(res)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

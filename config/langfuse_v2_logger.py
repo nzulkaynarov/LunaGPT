@@ -12,6 +12,7 @@ import base64
 import json
 import logging
 import os
+import re
 import time
 import urllib.request
 import uuid
@@ -35,6 +36,11 @@ SENSITIVE_METADATA_SUBSTRINGS = (
     "request_headers",
 )
 
+API_KEY_REGEX = re.compile(
+    r"\b(sk-[a-zA-Z0-9_\-]{8,}|pk-[a-zA-Z0-9_\-]{8,}|Bearer\s+[a-zA-Z0-9_\-\.]+)\b",
+    re.IGNORECASE,
+)
+
 
 def _sanitize_metadata(meta: Any) -> Any:
     """Filter out headers, proxy auth objects, and secrets from Langfuse metadata."""
@@ -44,8 +50,11 @@ def _sanitize_metadata(meta: Any) -> Any:
             k_lower = str(k).lower()
             if any(sub in k_lower for sub in SENSITIVE_METADATA_SUBSTRINGS):
                 continue
-            if isinstance(v, str) and ("Bearer " in v or "sk-" in v):
-                continue
+            if isinstance(v, str):
+                if v.startswith("Bearer "):
+                    continue
+                if API_KEY_REGEX.search(v):
+                    continue
             clean[str(k)] = _sanitize_metadata(v)
         return clean
     if isinstance(meta, (list, tuple, set)):

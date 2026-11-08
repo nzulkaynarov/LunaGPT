@@ -99,41 +99,41 @@ uv run uvicorn lunagpt.api:app --host 0.0.0.0 --port 8010
 ```
 
 ### 3. Доступные порты и интерфейсы
-* ⚡ **LiteLLM Gateway (API :4000/v1):** `http://localhost:4000` (Ключ: `sk-luna-master-key-2026`)
-* 📊 **Langfuse (Аналитика и трейсы):** [http://localhost:3001](http://localhost:3001) (`admin@lunagpt.local` / `admin12345`)
+* ⚡ **LiteLLM Gateway (API :4000/v1):** `http://localhost:4000` (Ключ: из переменной `LITELLM_MASTER_KEY` в `.env`)
+* 📊 **Langfuse (Аналитика и трейсы):** [http://localhost:3001](http://localhost:3001) (`admin@lunagpt.local`)
 * 📖 **LunaGPT Core API (Swagger UI):** [http://localhost:8010/docs](http://localhost:8010/docs)
-* 🗄 **PostgreSQL 17 + pgvector:** `localhost:5433` (Базы: `lunagpt` и `langfuse`)
+* 🗄 **PostgreSQL 17 + pgvector:** `localhost:5433` (Базы: `lunagpt`, `openwebui` и `langfuse`)
 * ⚡ **Redis 7.4:** `localhost:6380`
 
 ---
 
 ## 🔌 Подключение к VS Code (Continue)
 
-В `~/.continue/config.yaml` укажите:
+В `~/.continue/config.yaml` укажите (подставив ваш `LITELLM_MASTER_KEY` из `.env`):
 ```yaml
 name: LunaGPT Config
 version: 1.0.0
 schema: v1
 models:
-  - name: Luna Coder (RX 580 Local $0)
+  - name: Luna Coder (Local Ollama $0)
     provider: openai
     model: luna-coder
     apiBase: http://localhost:4000/v1
-    apiKey: sk-luna-master-key-2026
+    apiKey: YOUR_LITELLM_MASTER_KEY
     roles: [chat, autocomplete, edit]
 
   - name: Luna Smart (Claude Sonnet 4.6)
     provider: openai
     model: luna-smart
     apiBase: http://localhost:4000/v1
-    apiKey: sk-luna-master-key-2026
+    apiKey: YOUR_LITELLM_MASTER_KEY
     roles: [chat, edit]
 
   - name: Luna Auto (Smart Router)
     provider: openai
     model: luna-auto
     apiBase: http://localhost:4000/v1
-    apiKey: sk-luna-master-key-2026
+    apiKey: YOUR_LITELLM_MASTER_KEY
     roles: [chat]
 ```
 

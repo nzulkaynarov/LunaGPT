@@ -37,7 +37,7 @@ make logs
 ```
 
 ### 3. Model Routing & Ports
-- **LiteLLM Gateway**: `http://localhost:4000/v1` (API Key: `sk-luna-master-key-2026`)
+- **LiteLLM Gateway**: `http://localhost:4000/v1` (API Key: `LITELLM_MASTER_KEY` from `.env`)
   - `luna-coder` $\to$ Ollama AMD RX 580 (`qwen2.5-coder:7b`) [$0.00]
   - `luna-embed` $\to$ Ollama AMD RX 580 (`bge-m3:latest`) [1024-dim]
   - `luna-fast` $\to$ Google Gemini (`gemini-3.5-flash-lite`)

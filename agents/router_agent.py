@@ -21,7 +21,7 @@ if SRC_PATH not in sys.path:
 from lunagpt.services.router import detect_criticism_and_model  # noqa: E402
 
 LITELLM_ENDPOINT = os.getenv("LITELLM_ENDPOINT", "http://localhost:4000/v1/chat/completions")
-LITELLM_KEY = os.getenv("LITELLM_MASTER_KEY", "sk-luna-master-key-2026")
+LITELLM_KEY = os.getenv("LITELLM_MASTER_KEY", "")
 
 classify_task = detect_criticism_and_model
 

@@ -171,6 +171,73 @@ def detect_criticism_and_model(prompt: Any, has_history: bool = True) -> tuple[s
     )
 
 
+async def build_rag_and_memory_context(
+    db: AsyncSession,
+    query: str,
+    use_memory: bool = True,
+    use_rag: bool = True,
+) -> tuple[list[str], int, int]:
+    """
+    Compute single-pass embedding and query pgvector for past lessons and RAG chunks.
+    Returns: (extra_system_parts, lessons_count, rag_count)
+    """
+    extra_parts: list[str] = []
+    lessons_count = 0
+    rag_count = 0
+
+    if not query or not (use_memory or use_rag):
+        return extra_parts, lessons_count, rag_count
+
+    query_emb: list[float] | None = None
+    try:
+        query_emb = await get_embedding(query)
+    except Exception as exc:
+        logger.warning("Failed to compute embedding for query: %s", exc)
+
+    if query_emb is None:
+        return extra_parts, lessons_count, rag_count
+
+    if use_memory:
+        try:
+            memories = await search_relevant_feedback(db, query, limit=2, query_emb=query_emb)
+            if memories:
+                lessons_count = len(memories)
+                lessons_text = "\n".join(
+                    [
+                        f"- PREVIOUS MISTAKE: {m.user_prompt}\n  CORRECTED BEHAVIOR: {m.corrected_response}"
+                        for m in memories
+                    ]
+                )
+                extra_parts.append(
+                    f"### PAST LESSONS & PREVENTED MISTAKES:\n{lessons_text}\n"
+                    "Do NOT repeat the previous mistakes mentioned above."
+                )
+        except Exception as exc:
+            logger.warning("Failed to query feedback memories: %s", exc)
+
+    if use_rag:
+        try:
+            chunks = await search_document_chunks(db, query, limit=3, query_emb=query_emb)
+            if chunks:
+                selected_texts: list[str] = []
+                cur_len = 0
+                for c in chunks:
+                    chunk_text = f"[{c.chunk_index}] {c.content}"
+                    if cur_len + len(chunk_text) > MAX_RAG_CHARS and selected_texts:
+                        break
+                    selected_texts.append(chunk_text)
+                    cur_len += len(chunk_text)
+
+                if selected_texts:
+                    rag_count = len(selected_texts)
+                    rag_text = "\n\n".join(selected_texts)
+                    extra_parts.append(f"### RELEVANT KNOWLEDGE BASE CONTEXT (RAG):\n{rag_text}")
+        except Exception as exc:
+            logger.warning("Failed to query document chunks for RAG: %s", exc)
+
+    return extra_parts, lessons_count, rag_count
+
+
 async def execute_smart_routing(db: AsyncSession, req: PromptRequest) -> PromptResponse:
     """
     Main agent execution flow:
@@ -185,53 +252,10 @@ async def execute_smart_routing(db: AsyncSession, req: PromptRequest) -> PromptR
 
     system_instructions = ["You are LunaGPT, a premier intelligent sovereign AI coding assistant."]
 
-    # Single-pass embedding for both memory and RAG
-    query_emb: list[float] | None = None
-    if req.use_memory or req.use_rag:
-        try:
-            query_emb = await get_embedding(req.prompt)
-        except Exception as exc:
-            logger.warning("Failed to compute query embedding in smart routing: %s", exc)
-
-    lessons_count = 0
-    if req.use_memory and query_emb is not None:
-        try:
-            memories = await search_relevant_feedback(db, req.prompt, limit=2, query_emb=query_emb)
-            if memories:
-                lessons_count = len(memories)
-                lessons_text = "\n".join(
-                    [
-                        f"- ПРЕДЫДУЩАЯ ОШИБКА: {m.user_prompt}\n  ПРАВИЛЬНОЕ РЕШЕНИЕ: {m.corrected_response}"
-                        for m in memories
-                    ]
-                )
-                system_instructions.append(
-                    f"### PAST LESSONS & PREVENTED MISTAKES:\n{lessons_text}\n"
-                    "Do NOT repeat the previous mistakes mentioned above."
-                )
-        except Exception as exc:
-            logger.warning("Failed to query feedback memories: %s", exc)
-
-    rag_count = 0
-    if req.use_rag and query_emb is not None:
-        try:
-            chunks = await search_document_chunks(db, req.prompt, limit=3, query_emb=query_emb)
-            if chunks:
-                selected_texts: list[str] = []
-                cur_len = 0
-                for c in chunks:
-                    chunk_text = f"[{c.chunk_index}] {c.content}"
-                    if cur_len + len(chunk_text) > MAX_RAG_CHARS and selected_texts:
-                        break
-                    selected_texts.append(chunk_text)
-                    cur_len += len(chunk_text)
-
-                if selected_texts:
-                    rag_count = len(selected_texts)
-                    rag_text = "\n\n".join(selected_texts)
-                    system_instructions.append(f"### RELEVANT KNOWLEDGE BASE CONTEXT (RAG):\n{rag_text}")
-        except Exception as exc:
-            logger.warning("Failed to query document chunks for RAG: %s", exc)
+    extra_parts, lessons_count, rag_count = await build_rag_and_memory_context(
+        db, req.prompt, use_memory=req.use_memory, use_rag=req.use_rag
+    )
+    system_instructions.extend(extra_parts)
 
     if is_criticism:
         system_instructions.append(
@@ -350,48 +374,10 @@ async def execute_openai_chat_completion(
     extra_system_parts: list[str] = []
 
     if user_query and not is_background:
-        query_emb: list[float] | None = None
-        try:
-            query_emb = await get_embedding(user_query)
-        except Exception as exc:
-            logger.warning("Failed to compute embedding for user query: %s", exc)
-
-        if query_emb is not None:
-            try:
-                memories = await search_relevant_feedback(db, user_query, limit=2, query_emb=query_emb)
-                if memories:
-                    lessons_injected = len(memories)
-                    lessons_text = "\n".join(
-                        [
-                            f"- PREVIOUS MISTAKE: {m.user_prompt}\n  CORRECTED BEHAVIOR: {m.corrected_response}"
-                            for m in memories
-                        ]
-                    )
-                    extra_system_parts.append(
-                        f"### PAST LESSONS & PREVENTED MISTAKES:\n{lessons_text}\n"
-                        "Do NOT repeat the previous mistakes mentioned above."
-                    )
-            except Exception as exc:
-                logger.warning("Failed to query relevant feedback memory: %s", exc)
-
-            try:
-                chunks = await search_document_chunks(db, user_query, limit=3, query_emb=query_emb)
-                if chunks:
-                    selected_texts: list[str] = []
-                    cur_len = 0
-                    for c in chunks:
-                        chunk_text = f"[{c.chunk_index}] {c.content}"
-                        if cur_len + len(chunk_text) > MAX_RAG_CHARS and selected_texts:
-                            break
-                        selected_texts.append(chunk_text)
-                        cur_len += len(chunk_text)
-
-                    if selected_texts:
-                        rag_chunks_injected = len(selected_texts)
-                        rag_text = "\n\n".join(selected_texts)
-                        extra_system_parts.append(f"### RELEVANT KNOWLEDGE BASE CONTEXT (RAG):\n{rag_text}")
-            except Exception as exc:
-                logger.warning("Failed to query document chunks for RAG: %s", exc)
+        extra_parts, lessons_injected, rag_chunks_injected = await build_rag_and_memory_context(
+            db, user_query, use_memory=True, use_rag=True
+        )
+        extra_system_parts.extend(extra_parts)
 
     if is_criticism:
         extra_system_parts.append(
@@ -444,7 +430,12 @@ async def execute_openai_chat_completion(
             or request.headers.get("x-openwebui-user-id")
             or user_id
         )
-        session_id = request.headers.get("x-openwebui-chat-id") or request.headers.get("x-session-id") or session_id
+        session_id = (
+            request.headers.get("x-openwebui-chat-id")
+            or request.headers.get("x-chat-id")
+            or request.headers.get("x-session-id")
+            or session_id
+        )
 
     if user_id == "default-user":
         if isinstance(req.user, dict):

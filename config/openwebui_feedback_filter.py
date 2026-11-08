@@ -19,8 +19,8 @@ class Filter:
             description="LunaGPT Core API internal service URL",
         )
         api_key: str = Field(
-            default="sk-luna-master-key-2026",
-            description="LunaGPT Core Bearer Master Key for authentication",
+            default="",
+            description="LunaGPT Core Bearer Master Key for authentication (set in Open WebUI Valves)",
         )
 
     def __init__(self) -> None:
