@@ -157,3 +157,13 @@ uv run ruff format --check src/ tests/
 - [docs/roadmap.md](docs/roadmap.md) — дорожная карта и выполненные этапы
 - [MEMORY.md](MEMORY.md) — контекстная память проекта
 - [AGENTS.md](AGENTS.md) — регламент для автономных ИИ-агентов
+
+## Luna AI Assistant
+
+Семейный ассистент в Telegram работает на этом хосте как сервис `luna-assistant`. Вход только по приглашениям, первая ссылка создаётся командой:
+
+```bash
+docker exec luna-assistant python3 -m lunagpt.assistant.invite owner "Имя"
+```
+
+Архитектура: [docs/architecture.md](docs/architecture.md). Решения и источники: [docs/research](docs/research/2026-11-luna-assistant-decisions.md).

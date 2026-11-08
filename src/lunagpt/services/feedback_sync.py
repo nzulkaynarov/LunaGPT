@@ -1,141 +1,130 @@
 """
-Service to synchronize user evaluations and feedback from Open WebUI database
-into LunaGPT feedback memories (pgvector) and Langfuse traces (Level 2 & 3 Flywheel).
+Synchronize Open WebUI message ratings into Langfuse scores (Level 2 Flywheel).
+
+Ratings carry only a thumbs value and an optional complaint, never a corrected answer,
+so they are not written to feedback_memories: those records are injected into prompts
+as corrected behavior and exported as DPO "chosen" samples.
 """
 
 import json
 import logging
 from typing import Any
 
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, create_async_engine
 
 from lunagpt.config import settings
-from lunagpt.schemas import FeedbackRequest
-from lunagpt.services.memory import save_feedback_memory, send_langfuse_score
+from lunagpt.models import OpenWebUIFeedbackSync
+from lunagpt.services.memory import openwebui_turn_trace_id, send_langfuse_score
 
 logger = logging.getLogger("lunagpt.feedback_sync")
 
+SYNC_BATCH_SIZE = 100
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    """Decode a JSON column that may be returned as text or as a parsed object."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value:
+        decoded = json.loads(value)
+        return decoded if isinstance(decoded, dict) else {}
+    return {}
+
+
+def _history_from_chat(chat: dict[str, Any]) -> dict[str, Any]:
+    """Return the message tree keyed by message id from an Open WebUI chat document."""
+    messages = chat.get("history", {}).get("messages", {})
+    return messages if isinstance(messages, dict) else {}
+
+
+def count_user_turns(history: dict[str, Any], message_id: str) -> int | None:
+    """Count user messages on the branch ending at message_id, or None if it is unknown."""
+    current = history.get(message_id)
+    if current is None:
+        return None
+    turns = 0
+    seen: set[str] = set()
+    while current is not None and current.get("id") not in seen:
+        seen.add(str(current.get("id")))
+        if current.get("role") == "user":
+            turns += 1
+        current = history.get(current.get("parentId") or "")
+    return turns
+
+
+def build_rating_score(
+    data: dict[str, Any], meta: dict[str, Any], history: dict[str, Any]
+) -> tuple[str, float, str | None] | None:
+    """Map an Open WebUI rating to (trace_id, score, comment), or None if it cannot be linked."""
+    rating = data.get("rating")
+    if rating not in (1, -1):
+        return None
+    chat_id = meta.get("chat_id")
+    message_id = meta.get("message_id")
+    if not chat_id or not message_id:
+        return None
+    user_turn = count_user_turns(history, str(message_id))
+    if not user_turn:
+        return None
+    comment = data.get("comment") or data.get("reason") or None
+    return openwebui_turn_trace_id(str(chat_id), user_turn), 1.0 if rating == 1 else 0.0, comment
+
+
+async def _load_history(conn: AsyncConnection, snapshot: dict[str, Any], chat_id: str) -> dict[str, Any]:
+    """Read the rated chat from the feedback snapshot, falling back to the chat table."""
+    history = _history_from_chat(snapshot.get("chat", {}).get("chat", {}))
+    if history or not chat_id:
+        return history
+    result = await conn.execute(text("SELECT chat FROM chat WHERE id = :chat_id"), {"chat_id": chat_id})
+    row = result.fetchone()
+    return _history_from_chat(_as_dict(row[0])) if row else {}
+
 
 async def sync_openwebui_feedback(db: AsyncSession) -> dict[str, Any]:
-    """
-    Connect to Open WebUI PostgreSQL database, fetch feedback entries that have not yet
-    been vectorized into LunaGPT feedback memories, and ingest them.
-    """
-    ow_url = getattr(settings, "openwebui_database_url", None)
-    if not ow_url:
-        ow_url = settings.lunagpt_database_url.replace("/lunagpt", "/openwebui")
+    """Send unprocessed Open WebUI ratings to Langfuse and remember which ones were handled."""
+    processed = {str(fid) for fid in (await db.execute(select(OpenWebUIFeedbackSync.feedback_id))).scalars()}
 
-    synced_count = 0
     synced_ids: list[str] = []
-
-    ow_engine = create_async_engine(ow_url, echo=False)
+    skipped_ids: list[str] = []
+    engine = create_async_engine(settings.openwebui_database_url, echo=False)
     try:
-        async with ow_engine.connect() as ow_conn:
-            table_check = await ow_conn.execute(
-                text("SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='feedback'")
-            )
-            if not table_check.scalar():
-                logger.debug("Open WebUI feedback table does not exist yet.")
-                return {"synced_count": 0, "status": "no_feedback_table"}
-
-            existing_res = await db.execute(text("SELECT trace_id FROM feedback_memories"))
-            existing_traces = {r[0] for r in existing_res.fetchall() if r[0]}
-
-            fb_res = await ow_conn.execute(
+        async with engine.connect() as conn:
+            result = await conn.execute(
                 text(
-                    "SELECT id, user_id, type, data, meta, snapshot, created_at "
-                    "FROM feedback ORDER BY created_at DESC LIMIT 100"
-                )
+                    "SELECT id, data, meta, snapshot FROM feedback "
+                    "WHERE type = 'rating' AND NOT (id = ANY(:processed)) "
+                    "ORDER BY created_at LIMIT :limit"
+                ),
+                {"processed": list(processed), "limit": SYNC_BATCH_SIZE},
             )
-            rows = fb_res.fetchall()
+            for feedback_id, raw_data, raw_meta, raw_snapshot in result.fetchall():
+                meta = _as_dict(raw_meta)
+                history = await _load_history(conn, _as_dict(raw_snapshot), str(meta.get("chat_id") or ""))
+                score = build_rating_score(_as_dict(raw_data), meta, history)
 
-            for row in rows:
-                fb_id = str(row[0])
-                data = row[3] if isinstance(row[3], dict) else (json.loads(row[3]) if row[3] else {})
-                meta = row[4] if isinstance(row[4], dict) else (json.loads(row[4]) if row[4] else {})
-                snapshot = row[5] if isinstance(row[5], dict) else (json.loads(row[5]) if row[5] else {})
-
-                chat_id = meta.get("chat_id") or ""
-                message_id = meta.get("message_id") or fb_id
-                trace_id = meta.get("trace_id") or message_id
-
-                if trace_id in existing_traces or fb_id in existing_traces:
+                if score is None:
+                    db.add(OpenWebUIFeedbackSync(feedback_id=str(feedback_id), trace_id=""))
+                    await db.commit()
+                    skipped_ids.append(str(feedback_id))
                     continue
 
-                rating_val = data.get("rating")
-                is_positive = rating_val in (1, "1", "like", "positive")
-                score = 1.0 if is_positive else 0.0
-                comment = data.get("comment") or data.get("reason") or ""
-                model_used = data.get("model_id") or meta.get("model_id") or "luna-smart"
-
-                user_prompt = ""
-                rejected_response = None
-
-                if isinstance(snapshot, dict) and "messages" in snapshot:
-                    msgs = snapshot.get("messages", [])
-                    for i, m in enumerate(msgs):
-                        if m.get("id") == message_id:
-                            rejected_response = m.get("content")
-                            if i > 0 and msgs[i - 1].get("role") == "user":
-                                user_prompt = msgs[i - 1].get("content", "")
-                            break
-
-                if not user_prompt and chat_id:
-                    try:
-                        chat_res = await ow_conn.execute(
-                            text("SELECT chat FROM chat WHERE id = :chat_id"),
-                            {"chat_id": chat_id},
-                        )
-                        chat_row = chat_res.fetchone()
-                        if chat_row and chat_row[0]:
-                            chat_json = chat_row[0] if isinstance(chat_row[0], dict) else json.loads(chat_row[0])
-                            history = chat_json.get("messages", []) or chat_json.get("history", {}).get("messages", {})
-                            if isinstance(history, dict):
-                                msg_list = list(history.values())
-                            elif isinstance(history, list):
-                                msg_list = history
-                            else:
-                                msg_list = []
-
-                            for i, m in enumerate(msg_list):
-                                if m.get("id") == message_id:
-                                    rejected_response = m.get("content")
-                                    for j in range(i - 1, -1, -1):
-                                        if msg_list[j].get("role") == "user":
-                                            user_prompt = msg_list[j].get("content", "")
-                                            break
-                                    break
-                    except Exception as e:
-                        logger.debug("Failed querying chat table for feedback: %s", e)
-
-                if not user_prompt:
-                    user_prompt = f"Open WebUI conversation {chat_id}"
-
-                if score == 0.0:
-                    corrected_response = comment or "User flagged this response as incorrect or unsatisfactory."
-                    req = FeedbackRequest(
-                        trace_id=trace_id,
-                        session_id=chat_id,
-                        user_prompt=user_prompt,
-                        rejected_response=rejected_response,
-                        corrected_response=corrected_response,
-                        comment=comment,
-                        score=score,
-                        model_used=model_used,
-                    )
-                    await save_feedback_memory(db, req)
-                else:
-                    await send_langfuse_score(trace_id, 1.0, comment)
-
-                existing_traces.add(trace_id)
-                synced_ids.append(fb_id)
-                synced_count += 1
-
+                trace_id, value, comment = score
+                if not await send_langfuse_score(trace_id, value, comment):
+                    logger.warning("Langfuse rejected score for feedback %s; will retry", feedback_id)
+                    continue
+                db.add(OpenWebUIFeedbackSync(feedback_id=str(feedback_id), trace_id=trace_id))
+                await db.commit()
+                synced_ids.append(str(feedback_id))
     except Exception as exc:
-        logger.warning("Feedback sync encountered an issue: %s", exc)
-        return {"synced_count": synced_count, "error": str(exc)}
+        logger.warning("Open WebUI feedback sync failed: %s", exc)
+        return {"status": "error", "error": str(exc), "synced_count": len(synced_ids), "synced_ids": synced_ids}
     finally:
-        await ow_engine.dispose()
+        await engine.dispose()
 
-    return {"synced_count": synced_count, "synced_ids": synced_ids, "status": "success"}
+    return {
+        "status": "success",
+        "synced_count": len(synced_ids),
+        "synced_ids": synced_ids,
+        "skipped_count": len(skipped_ids),
+    }

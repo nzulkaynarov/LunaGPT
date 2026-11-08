@@ -1,0 +1,12 @@
+# Host-specific exposure, merged with the localhost bindings in docker-compose.yml.
+# LAN: the HomeSec Raspberry Pi, which is not in the tailnet.
+# Tailscale: published with `tailscale serve --bg --tcp <port> tcp://127.0.0.1:<port>`
+# for 4000 and 3001, so container start does not depend on the tailnet address.
+# Every port published here requires LITELLM_MASTER_KEY or its own login.
+services:
+  litellm:
+    ports:
+      - "192.168.88.241:${LITELLM_PORT:-4000}:4000"
+  core:
+    ports:
+      - "192.168.88.241:8010:8010"

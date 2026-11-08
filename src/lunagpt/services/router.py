@@ -15,7 +15,7 @@ from lunagpt.config import settings
 from lunagpt.schemas import ChatCompletionRequest, PromptRequest, PromptResponse
 from lunagpt.services.embeddings import get_embedding
 from lunagpt.services.ingestion import search_document_chunks
-from lunagpt.services.memory import search_relevant_feedback
+from lunagpt.services.memory import openwebui_turn_trace_id, search_relevant_feedback
 
 logger = logging.getLogger("lunagpt.router")
 
@@ -281,6 +281,7 @@ async def execute_smart_routing(db: AsyncSession, req: PromptRequest) -> PromptR
             "is_criticism": is_criticism,
             "lessons_injected": lessons_count,
             "rag_chunks_injected": rag_count,
+            "tags": ["client:api", "feature:chat"],
         },
     }
 
@@ -447,6 +448,12 @@ async def execute_openai_chat_completion(
     if session_id == "default-session":
         session_id = str(extra_fields.get("chat_id") or extra_fields.get("session_id") or "default-session")
 
+    openwebui_chat_id = request.headers.get("x-openwebui-chat-id") if request is not None else None
+    is_openwebui = bool(openwebui_chat_id) or (request is not None and "x-openwebui-user-id" in request.headers)
+    if openwebui_chat_id and not is_background:
+        user_turn = sum(1 for message in req.messages if message.role == "user")
+        trace_id = openwebui_turn_trace_id(openwebui_chat_id, user_turn)
+
     payload: dict[str, Any] = {
         "model": target_model,
         "messages": out_messages,
@@ -464,6 +471,10 @@ async def execute_openai_chat_completion(
             "rag_chunks_injected": rag_chunks_injected,
             "is_background_task": is_background,
             "source": "lunagpt_core_openai_compat",
+            "tags": [
+                "client:openwebui" if is_openwebui else "client:api",
+                "feature:background-task" if is_background else "feature:chat",
+            ],
         },
     }
 

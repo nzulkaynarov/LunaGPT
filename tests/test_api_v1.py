@@ -9,6 +9,7 @@ from httpx import ASGITransport, AsyncClient
 from lunagpt.api import app
 from lunagpt.config import settings
 from lunagpt.schemas import ChatCompletionRequest, ChatMessage
+from lunagpt.services.memory import openwebui_turn_trace_id
 from lunagpt.services.router import detect_criticism_and_model
 
 AUTH_HEADERS = {"Authorization": f"Bearer {settings.litellm_master_key}"}
@@ -309,6 +310,7 @@ async def test_chat_completions_trace_id_headers(monkeypatch: pytest.MonkeyPatch
         )
         assert resp.status_code == 200
         assert "X-Trace-Id" in resp.headers
+        assert resp.headers["X-Trace-Id"] == openwebui_turn_trace_id("session-1234", 1)
         data = resp.json()
         assert "x_lunagpt_trace_id" in data
         assert "trace_id" in data

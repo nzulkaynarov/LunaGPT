@@ -11,8 +11,22 @@ model_list:
     litellm_params:
       model: ollama/qwen2.5-coder:7b
       api_base: os.environ/OLLAMA_API_BASE
+      num_ctx: 8192
     model_info:
       description: "Локальная модель для автокомплита и кода на GPU RX 580 (бесплатно, офлайн)"
+      mode: chat
+      input_cost_per_token: 0.0
+      output_cost_per_token: 0.0
+
+  - model_name: luna-local
+    litellm_params:
+      model: ollama_chat/gemma4:e4b
+      api_base: os.environ/OLLAMA_API_BASE
+      num_ctx: 8192
+      think: false
+      keep_alive: 30m
+    model_info:
+      description: "Основная модель общего назначения на своей RX 580 (бесплатно)"
       mode: chat
       input_cost_per_token: 0.0
       output_cost_per_token: 0.0
@@ -37,8 +51,8 @@ model_list:
     model_info:
       description: "Сверхбыстрая облачная модель для длинных документов, переводов и суммаризации"
       mode: chat
-      input_cost_per_token: 0.000000075
-      output_cost_per_token: 0.000000300
+      input_cost_per_token: 0.000000300
+      output_cost_per_token: 0.000002500
 
   # ----------------------------------------------------------------------------
   # 3. Интеллектуальные архитектурные модели (Anthropic Claude 4.6 Sonnet & Opus)
@@ -60,8 +74,8 @@ model_list:
     model_info:
       description: "Максимальный интеллект Claude Opus 4.6 для комплексного аудита"
       mode: chat
-      input_cost_per_token: 0.000015000
-      output_cost_per_token: 0.000075000
+      input_cost_per_token: 0.000005000
+      output_cost_per_token: 0.000025000
 
   # ----------------------------------------------------------------------------
   # 4. Логический роутер с отказоустойчивостью (Failover / Routing Group)
@@ -70,6 +84,7 @@ model_list:
     litellm_params:
       model: ollama/qwen2.5-coder:7b
       api_base: os.environ/OLLAMA_API_BASE
+      num_ctx: 8192
     model_info:
       description: "Авто-выбор: код отдаётся локальной RX 580, при перегрузке — Claude Sonnet"
       mode: chat
@@ -84,6 +99,22 @@ model_list:
     model_info:
       description: "HomeSec Reasoning: маппинг на Claude Opus 4.6"
       mode: chat
+      input_cost_per_token: 0.000005000
+      output_cost_per_token: 0.000025000
+      cache_read_input_token_cost: 0.000000500
+      cache_creation_input_token_cost: 0.000006250
+
+  - model_name: claude-sonnet-4-6
+    litellm_params:
+      model: anthropic/claude-sonnet-4-6
+      api_key: os.environ/ANTHROPIC_API_KEY
+    model_info:
+      description: "HomeSec Tutor: Claude Sonnet 4.6 для детского репетитора"
+      mode: chat
+      input_cost_per_token: 0.000003000
+      output_cost_per_token: 0.000015000
+      cache_read_input_token_cost: 0.000000300
+      cache_creation_input_token_cost: 0.000003750
 
   - model_name: claude-haiku-4-5
     litellm_params:
@@ -92,6 +123,8 @@ model_list:
     model_info:
       description: "HomeSec Fast: маппинг на сверхбыстрый Gemini Flash Lite"
       mode: chat
+      input_cost_per_token: 0.000000300
+      output_cost_per_token: 0.000002500
 
 router_settings:
   routing_strategy: latency-based-routing
@@ -100,9 +133,11 @@ router_settings:
     - luna-pro: ["luna-smart", "luna-fast", "luna-coder"]
     - luna-fast: ["luna-coder"]
     - luna-coder: ["luna-fast"]
+    - luna-local: ["luna-fast"]
     - luna-auto: ["luna-coder", "luna-smart", "luna-fast"]
     - claude-opus-4-8: ["claude-haiku-4-5", "luna-coder"]
-    - claude-haiku-4-5: ["luna-coder"]
+    - claude-sonnet-4-6: ["claude-haiku-4-5"]
+    - claude-haiku-4-5: ["claude-sonnet-4-6"]
   allowed_fails: 2
   cooldown_time: 30
 

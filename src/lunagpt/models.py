@@ -1,11 +1,11 @@
 """SQLAlchemy 2.0 ORM models with pgvector support."""
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import BigInteger, Date, DateTime, Float, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -82,3 +82,50 @@ class FeedbackMemory(Base):
             postgresql_ops={"prompt_embedding": "vector_cosine_ops"},
         ),
     )
+
+
+class OpenWebUIFeedbackSync(Base):
+    """Open WebUI ratings already forwarded to Langfuse, so each one is sent exactly once."""
+
+    __tablename__ = "openwebui_feedback_sync"
+
+    feedback_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    trace_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class AssistantMember(Base):
+    """A person allowed to talk to Luna AI Assistant."""
+
+    __tablename__ = "assistant_members"
+
+    telegram_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False)  # owner | adult | kid | guest
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    usage_day: Mapped[date | None] = mapped_column(Date, nullable=True)
+    requests_today: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class AssistantInvite(Base):
+    """A single-use invitation; only the hash of its token is stored."""
+
+    __tablename__ = "assistant_invites"
+
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+    invite_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    access_hours: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AssistantTimeRequest(Base):
+    """A child's pending screen-time request, tracked so Luna can report the decision."""
+
+    __tablename__ = "assistant_time_requests"
+
+    request_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

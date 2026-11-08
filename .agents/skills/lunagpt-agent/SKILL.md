@@ -44,7 +44,7 @@ make logs
   - `luna-smart` $\to$ Anthropic Claude (`claude-sonnet-4-6`)
   - `luna-pro` $\to$ Anthropic Claude (`claude-opus-4-6`)
   - `luna-auto` $\to$ Intelligent failover router
-- **Langfuse UI**: `http://localhost:3001` or via Tailscale `http://100.65.202.127:3001` (`admin@lunagpt.local` / `lunagpt_admin_password_2026`)
+- **Langfuse UI**: `http://localhost:3001` or via Tailscale `http://100.65.202.127:3001` (`admin@lunagpt.local`, password: `LANGFUSE_ADMIN_PASSWORD` from `.env`)
   - Configured with `AUTH_TRUST_HOST=true` and `NEXTAUTH_URL` for multi-host (LAN/Tailscale/localhost) access.
   - Model pricing is maintained in both `config/litellm-config.yaml` (`input_cost_per_token` / `output_cost_per_token`) and Langfuse's `models` table with regex match patterns.
   - Retain `ghcr.io/langfuse/langfuse:2` (v2.95.x). Do NOT upgrade to v3 without adding ClickHouse, MinIO/S3, and `langfuse-worker` services.

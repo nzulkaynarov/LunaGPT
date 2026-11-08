@@ -14,6 +14,13 @@ from lunagpt.models import FeedbackMemory
 from lunagpt.schemas import FeedbackRequest
 from lunagpt.services.embeddings import get_embedding
 
+OPENWEBUI_TRACE_NAMESPACE = uuid.UUID("6f1d2c3a-8b4e-5f60-9a7b-1c2d3e4f5a6b")
+
+
+def openwebui_turn_trace_id(chat_id: str, user_turn: int) -> str:
+    """Derive a stable trace id for a chat turn, so a later rating can reference its trace."""
+    return str(uuid.uuid5(OPENWEBUI_TRACE_NAMESPACE, f"{chat_id}:{user_turn}"))
+
 
 async def send_langfuse_score(trace_id: str, score: float, comment: str | None = None) -> bool:
     """Send user feedback score (0.0 or 1.0) directly to Langfuse v2 Ingestion API."""

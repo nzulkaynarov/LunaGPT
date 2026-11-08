@@ -1,5 +1,6 @@
 """FastAPI Application exposing LunaGPT Core endpoints."""
 
+import asyncio
 import base64
 import json
 import logging
@@ -18,7 +19,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lunagpt.config import settings
-from lunagpt.db import get_db_session
+from lunagpt.db import async_session_factory, get_db_session
 from lunagpt.schemas import (
     ChatCompletionRequest,
     DeleteResponse,
@@ -64,11 +65,28 @@ async def verify_auth(
         )
 
 
+async def _feedback_sync_loop(interval_seconds: int) -> None:
+    """Periodically forward new Open WebUI ratings to Langfuse."""
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            async with async_session_factory() as db:
+                result = await sync_openwebui_feedback(db)
+            if result.get("synced_count"):
+                logger.info("Synced %s Open WebUI ratings", result["synced_count"])
+        except Exception:
+            logger.exception("Open WebUI feedback sync loop failed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Application lifespan manager."""
     logger.info("LunaGPT Core API starting up...")
+    interval = settings.openwebui_feedback_sync_interval_seconds
+    sync_task = asyncio.create_task(_feedback_sync_loop(interval)) if interval > 0 else None
     yield
+    if sync_task is not None:
+        sync_task.cancel()
     logger.info("LunaGPT Core API shutting down...")
 
 
@@ -180,6 +198,7 @@ MAX_AUDIO_SIZE_BYTES = 25 * 1024 * 1024  # 25 MB standard OpenAI limit
 
 @app.post("/v1/audio/transcriptions")
 async def audio_transcriptions(
+    request: Request,
     file: UploadFile = File(...),
     model: str = Form("luna-fast"),
     language: str | None = Form(None),
@@ -243,6 +262,13 @@ async def audio_transcriptions(
                 }
             ],
             "temperature": 0.0,
+            "metadata": {
+                "trace_id": str(uuid.uuid4()),
+                "user_id": request.headers.get("x-luna-user") or "default-user",
+                "session_id": request.headers.get("x-luna-session") or "default-session",
+                "source": "lunagpt_core_stt",
+                "tags": [f"client:{request.headers.get('x-luna-client') or 'api'}", "feature:stt"],
+            },
         }
         headers = {
             "Content-Type": "application/json",

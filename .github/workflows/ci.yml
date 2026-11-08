@@ -10,6 +10,8 @@ jobs:
   lint-test:
     name: Lint, Type Check & Test
     runs-on: ubuntu-latest
+    env:
+      LITELLM_MASTER_KEY: ci-test-master-key
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

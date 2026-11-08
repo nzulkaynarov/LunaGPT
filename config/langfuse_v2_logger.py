@@ -62,6 +62,42 @@ def _sanitize_metadata(meta: Any) -> Any:
     return meta
 
 
+REDACTED_TEXT = "[redacted: family conversation]"
+REDACTED_HOMESEC_FEATURES = {"feature:tutor", "feature:stt"}
+ATTRIBUTION_VALUE_REGEX = re.compile(r"[^\w.:@-]+")
+
+
+def _clean_attribution_value(value: Any) -> str:
+    """Keep caller-supplied attribution values short and safe for use as tags."""
+    return ATTRIBUTION_VALUE_REGEX.sub("-", str(value)).strip("-")[:64]
+
+
+def _resolve_attribution(raw_metadata: dict[str, Any]) -> tuple[str, str, list[str]]:
+    """Return (user_id, session_id, tags) from request metadata and X-Luna-* headers."""
+    raw_headers = raw_metadata.get("headers")
+    headers = {str(k).lower(): str(v) for k, v in raw_headers.items()} if isinstance(raw_headers, dict) else {}
+
+    user_id = headers.get("x-luna-user") or raw_metadata.get("user_id") or "default-user"
+    session_id = headers.get("x-luna-session") or raw_metadata.get("session_id") or "default-session"
+
+    raw_tags = raw_metadata.get("tags")
+    tags = [str(tag) for tag in raw_tags] if isinstance(raw_tags, (list, tuple)) else []
+    if not any(tag.startswith("client:") for tag in tags):
+        client = headers.get("x-luna-client") or headers.get("user-agent", "unknown").split("/")[0].lower()
+        tags.append(f"client:{_clean_attribution_value(client)}")
+    if headers.get("x-luna-feature"):
+        tags.append(f"feature:{_clean_attribution_value(headers['x-luna-feature'])}")
+
+    return _clean_attribution_value(user_id), _clean_attribution_value(session_id), list(dict.fromkeys(tags))
+
+
+def _should_redact_content(tags: list[str]) -> bool:
+    """Children's and personal assistant conversations keep their cost and attribution but never their text."""
+    if "client:luna-assistant" in tags:
+        return True
+    return "client:homesec" in tags and bool(REDACTED_HOMESEC_FEATURES.intersection(tags))
+
+
 def _safe_serialize(val: Any) -> Any:
     """Recursively convert arbitrary objects to JSON-serializable primitives."""
     if isinstance(val, (str, int, float, bool)) or val is None:
@@ -129,8 +165,7 @@ class LangfuseV2Logger(CustomLogger):
 
             trace_id = metadata.get("trace_id") or str(uuid.uuid4())
             generation_id = str(uuid.uuid4())
-            user_id = str(metadata.get("user_id") or "default-user")
-            session_id = str(metadata.get("session_id") or "default-session")
+            user_id, session_id, tags = _resolve_attribution(raw_metadata)
             model = kwargs.get("model") or "unknown-model"
 
             messages = _safe_serialize(kwargs.get("messages") or [])
@@ -141,14 +176,19 @@ class LangfuseV2Logger(CustomLogger):
                 output_text = response_obj.choices[0].message.content or ""
             if hasattr(response_obj, "usage") and response_obj.usage:
                 usage = {
-                    "promptTokens": getattr(response_obj.usage, "prompt_tokens", 0),
-                    "completionTokens": getattr(response_obj.usage, "completion_tokens", 0),
-                    "totalTokens": getattr(response_obj.usage, "total_tokens", 0),
+                    "input": getattr(response_obj.usage, "prompt_tokens", 0),
+                    "output": getattr(response_obj.usage, "completion_tokens", 0),
+                    "total": getattr(response_obj.usage, "total_tokens", 0),
                     "unit": "TOKENS",
                 }
-                response_cost = kwargs.get("response_cost")
+                standard_payload = kwargs.get("standard_logging_object") or {}
+                response_cost = kwargs.get("response_cost") or standard_payload.get("response_cost")
                 if response_cost is not None and float(response_cost) > 0:
                     usage["totalCost"] = float(response_cost)
+
+            if _should_redact_content(tags):
+                messages = REDACTED_TEXT
+                output_text = REDACTED_TEXT
 
             start_ts = start_time.timestamp() if hasattr(start_time, "timestamp") else time.time()
             end_ts = end_time.timestamp() if hasattr(end_time, "timestamp") else time.time()
@@ -165,6 +205,7 @@ class LangfuseV2Logger(CustomLogger):
                         "name": f"chat-{model}",
                         "userId": user_id,
                         "sessionId": session_id,
+                        "tags": tags,
                         "metadata": metadata,
                     },
                 },
@@ -208,8 +249,7 @@ class LangfuseV2Logger(CustomLogger):
 
             trace_id = metadata.get("trace_id") or str(uuid.uuid4())
             generation_id = str(uuid.uuid4())
-            user_id = str(metadata.get("user_id") or "default-user")
-            session_id = str(metadata.get("session_id") or "default-session")
+            user_id, session_id, tags = _resolve_attribution(raw_metadata)
 
             exception_msg = str(kwargs.get("exception") or "Upstream generation failure")
 
@@ -228,6 +268,7 @@ class LangfuseV2Logger(CustomLogger):
                         "name": f"chat-{model}-failed",
                         "userId": user_id,
                         "sessionId": session_id,
+                        "tags": tags,
                         "metadata": metadata,
                     },
                 },

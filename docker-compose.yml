@@ -16,6 +16,7 @@ services:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@langfuse-db:5432/litellm
       - OLLAMA_API_BASE=${OLLAMA_API_BASE:-http://host.docker.internal:11434}
       - LANGFUSE_HOST=${LANGFUSE_HOST:-http://langfuse-server:3000}
       - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-pk-lf-luna-local-public-key}
@@ -114,7 +115,7 @@ services:
       - LANGFUSE_INIT_PROJECT_SECRET_KEY=sk-lf-luna-local-secret-key
       - LANGFUSE_INIT_USER_EMAIL=admin@lunagpt.local
       - LANGFUSE_INIT_USER_NAME=Administrator
-      - LANGFUSE_INIT_USER_PASSWORD=${LANGFUSE_ADMIN_PASSWORD:-lunagpt_admin_password_2026}
+      - LANGFUSE_INIT_USER_PASSWORD=${LANGFUSE_ADMIN_PASSWORD}
     depends_on:
       langfuse-db:
         condition: service_healthy
@@ -173,6 +174,7 @@ services:
       - ./alembic.ini:/app/alembic.ini:ro
     command: ["sh", "-c", "alembic upgrade head && python3 -m uvicorn lunagpt.api:app --host 0.0.0.0 --port 8010"]
     environment:
+      - CORE_API_KEY=${CORE_API_KEY:-}
       - LITELLM_ENDPOINT=http://litellm:4000/v1/chat/completions
       - LITELLM_EMBEDDINGS_ENDPOINT=http://litellm:4000/v1/embeddings
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
@@ -188,6 +190,31 @@ services:
       langfuse-db:
         condition: service_healthy
       litellm:
+        condition: service_started
+
+  # ============================================================================
+  # 8. Luna AI Assistant (Telegram assistant for the family)
+  # ============================================================================
+  luna-assistant:
+    image: lunagpt-core:local
+    container_name: luna-assistant
+    restart: unless-stopped
+    volumes:
+      - ./src:/app/src:ro
+    command: ["python3", "-m", "lunagpt.assistant"]
+    healthcheck:
+      disable: true
+    environment:
+      - LITELLM_ENDPOINT=http://litellm:4000/v1/chat/completions
+      - LITELLM_ASSISTANT_KEY=${LITELLM_ASSISTANT_KEY}
+      - LUNA_TELEGRAM_BOT_TOKEN=${LUNA_TELEGRAM_BOT_TOKEN}
+      - LUNA_PI_API_TOKEN=${LUNA_PI_API_TOKEN}
+      - LUNAGPT_DATABASE_URL=postgresql+psycopg://postgres:${POSTGRES_PASSWORD}@langfuse-db:5432/lunagpt
+      - SEARXNG_URL=http://searxng:8080
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+      core:
         condition: service_started
 
 volumes:

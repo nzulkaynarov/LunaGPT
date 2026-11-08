@@ -28,3 +28,9 @@ LunaGPT — персональный суверенный ИИ-шлюз и ср�
    - Level 2: Фиксация Feedback Scores (0/1) в Langfuse Ingestion API по `trace_id`.
    - Level 3: Сохранение антипаттернов и уроков в `feedback_memories` (`pgvector`) с фильтрацией по порогу расстояния `distance <= 1 - threshold`.
    - Level 4: Экспорт DPO датасетов (`GET /api/v1/feedback/export-dpo`) для локального дообучения Ollama.
+
+## Luna AI Assistant (ноябрь 2026)
+- `@lunazua_bot` работает на ПК как сервис `luna-assistant`, код в `src/lunagpt/assistant/`, бот админа и сетевой API остаются на Pi.
+- Своя модель первая: `luna-local` (gemma4:e4b, `think: false`), поддержка Gemini и Sonnet. Детям те же возможности со строгим поиском.
+- Викторины только при просьбе о времени или по запросу ребёнка.
+- Каждый шаг основан на исследовании: `docs/research/2026-11-luna-assistant-decisions.md`.
