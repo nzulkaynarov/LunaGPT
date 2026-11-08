@@ -12,6 +12,20 @@ jobs:
     runs-on: ubuntu-latest
     env:
       LITELLM_MASTER_KEY: ci-test-master-key
+      LUNAGPT_DATABASE_URL: postgresql+psycopg://postgres:ci-test-password@localhost:5433/lunagpt
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.7-pg17
+        env:
+          POSTGRES_PASSWORD: ci-test-password
+          POSTGRES_DB: lunagpt
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d lunagpt"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 10
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -35,6 +49,9 @@ jobs:
 
       - name: Run Mypy Type Check
         run: uv run mypy src/ tests/ agents/ config/
+
+      - name: Apply database migrations
+        run: uv run alembic upgrade head
 
       - name: Run Unit Tests
         run: uv run pytest tests/ -v
