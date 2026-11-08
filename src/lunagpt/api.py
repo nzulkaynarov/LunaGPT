@@ -98,6 +98,9 @@ async def openai_embeddings(req: dict[str, Any] = Body(...)) -> Response:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+MAX_AUDIO_SIZE_BYTES = 25 * 1024 * 1024  # 25 MB standard OpenAI limit
+
+
 @app.post("/v1/audio/transcriptions")
 async def audio_transcriptions(
     file: UploadFile = File(...),
@@ -105,24 +108,31 @@ async def audio_transcriptions(
     language: str | None = Form(None),
     prompt: str | None = Form(None),
     response_format: str = Form("json"),
-) -> dict[str, Any]:
+) -> Response:
     """OpenAI-compatible speech-to-text audio transcription powered by multimodal luna-fast."""
     try:
         content = await file.read()
         if not content:
             raise HTTPException(status_code=400, detail="Empty audio file")
 
+        if len(content) > MAX_AUDIO_SIZE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Audio file size exceeds the 25MB limit (received {len(content) / (1024 * 1024):.1f}MB)",
+            )
+
         filename = file.filename or "audio.ogg"
-        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "ogg"
-        if ext in ("oga", "ogg"):
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        content_type = (file.content_type or "").lower()
+        if ext in ("oga", "ogg") or "ogg" in content_type:
             audio_format = "ogg"
-        elif ext in ("wav", "wave"):
+        elif ext in ("wav", "wave") or "wav" in content_type:
             audio_format = "wav"
-        elif ext in ("mp3", "mpeg"):
+        elif ext in ("mp3", "mpeg") or "mp3" in content_type or "mpeg" in content_type:
             audio_format = "mp3"
-        elif ext in ("m4a", "mp4"):
+        elif ext in ("m4a", "mp4") or "mp4" in content_type or "m4a" in content_type:
             audio_format = "mp4"
-        elif ext in ("webm",):
+        elif ext in ("webm",) or "webm" in content_type:
             audio_format = "webm"
         else:
             audio_format = "ogg"
@@ -165,7 +175,10 @@ async def audio_transcriptions(
             resp.raise_for_status()
             data = resp.json()
             transcription = data["choices"][0]["message"]["content"].strip()
-            return {"text": transcription}
+
+            if response_format.strip().lower() == "text":
+                return Response(content=transcription, media_type="text/plain; charset=utf-8")
+            return Response(content=json.dumps({"text": transcription}), media_type="application/json")
     except HTTPException:
         raise
     except Exception as exc:
@@ -253,10 +266,11 @@ async def remove_document(document_id: uuid.UUID, db: AsyncSession = Depends(get
 
 
 @app.get("/api/v1/feedback/export-dpo")
-async def export_dpo(db: AsyncSession = Depends(get_db_session)) -> list[dict[str, Any]]:
-    """Export feedback memory pairs as DPO training records (prompt, chosen, rejected)."""
+async def export_dpo(mode: str = "dpo", db: AsyncSession = Depends(get_db_session)) -> list[dict[str, Any]]:
+    """Export feedback memory pairs as training records (mode='dpo' for pairs with rejected, mode='sft' for all)."""
     try:
-        data: list[dict[str, Any]] = await export_dpo_dataset(db)
+        require_rejected = mode.lower() != "sft"
+        data: list[dict[str, Any]] = await export_dpo_dataset(db, require_rejected=require_rejected)
         return data
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc

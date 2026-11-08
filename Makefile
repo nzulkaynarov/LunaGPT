@@ -37,9 +37,9 @@ status: ## Проверить статус контейнеров и локал�
 	@curl -s http://127.0.0.1:11434/api/ps || echo "Ollama не отвечает"
 
 test-router: ## Протестировать логический роутер агентов
-	python3 agents/router_agent.py "Спроектируй схему шины событий для ERP"
-	python3 agents/router_agent.py "Напиши юнит-тест на Python для проверки авторизации"
-	python3 agents/router_agent.py "Этот код не работает и возвращает ошибку"
+	uv run python3 agents/router_agent.py "Спроектируй схему шины событий для ERP"
+	uv run python3 agents/router_agent.py "Напиши юнит-тест на Python для проверки авторизации"
+	uv run python3 agents/router_agent.py "Этот код не работает и возвращает ошибку"
 
 test: ## Запуск модульных тестов
 	uv run pytest tests/ -v

@@ -7,125 +7,26 @@ LunaGPT Intelligent Agent Router CLI
 
 import json
 import os
-import re
 import sys
 import time
+from pathlib import Path
+from typing import Any
 from urllib.request import Request, urlopen
+
+# Ensure src/ is on python path when run as standalone CLI script
+SRC_PATH = str(Path(__file__).resolve().parent.parent / "src")
+if SRC_PATH not in sys.path:
+    sys.path.insert(0, SRC_PATH)
+
+from lunagpt.services.router import detect_criticism_and_model  # noqa: E402
 
 LITELLM_ENDPOINT = os.getenv("LITELLM_ENDPOINT", "http://localhost:4000/v1/chat/completions")
 LITELLM_KEY = os.getenv("LITELLM_MASTER_KEY", "sk-luna-master-key-2026")
 
-BACKGROUND_TASK_PATTERNS = [
-    "### Task:",
-    "Generate a concise, 3-5 word title",
-    "Generate 1-3 broad tags",
-    "Generate 3 relevant follow-up",
-    "Provide a search query to find information",
-]
-
-CRITICISM_PHRASES = [
-    "не работает",
-    "неправильно",
-    "ты ошибся",
-    "вы ошиблись",
-    "переделай",
-    "исправь",
-    "сломал",
-    "ты сломал",
-    "не помогло",
-    "выдает ошибку",
-    "выдаёт ошибку",
-    "в коде ошибка",
-    "ошибка осталась",
-    "все еще ошибка",
-    "всё ещё ошибка",
-    "снова ошибка",
-    "fix this",
-    "redo",
-    "wrong",
-    "broken",
-    "did not work",
-    "still failing",
-    "still error",
-    "doesn't work",
-    "you are wrong",
-    "it failed",
-]
-
-SMART_KEYWORDS = [
-    "архитектур",
-    "спроектируй",
-    "refactor",
-    "security",
-    "уязвимост",
-    "system design",
-    "паттерн",
-    "trade-off",
-    "стратеги",
-    "orchestrat",
-]
-
-FAST_KEYWORDS = [
-    "переведи",
-    "кратко изложи",
-    "summary",
-    "документ",
-    "стать",
-    "html",
-    "таблиц",
-    "сравни текст",
-    "выжимк",
-    "объясни простыми словами",
-]
+classify_task = detect_criticism_and_model
 
 
-def classify_task(prompt: str, has_history: bool = True) -> tuple[str, str, bool]:
-    if any(p in prompt for p in BACKGROUND_TASK_PATTERNS):
-        return (
-            "luna-fast",
-            "Служебная фоновая задача Open WebUI (Gemini 3.5 Flash Lite)",
-            False,
-        )
-
-    prompt_lower = prompt.lower()
-    is_criticism = False
-    if has_history:
-        has_phrase = any(phrase in prompt_lower for phrase in CRITICISM_PHRASES)
-        has_word_match = bool(
-            re.search(r"\b(не то|это не то|ответ не то|код сломан)\b", prompt_lower)
-            or re.search(r"\b(баг|exception|failed|error|ошибка)\b", prompt_lower)
-        )
-        is_criticism = has_phrase or has_word_match
-
-    if is_criticism:
-        return (
-            "luna-pro",
-            "Детекция критики/ошибки: авто-эскалация на Claude Opus 4.6 с глубокой рефлексией",
-            True,
-        )
-
-    if any(k in prompt_lower for k in SMART_KEYWORDS):
-        return (
-            "luna-pro",
-            "Сложная архитектурная задача / глубокий системный анализ (Claude Opus 4.6)",
-            False,
-        )
-
-    if len(prompt) > 2000 or any(k in prompt_lower for k in FAST_KEYWORDS):
-        return (
-            "luna-fast",
-            "Объёмный текст / перевод / суммаризация (Gemini 3.5 Flash Lite)",
-            False,
-        )
-
-    return (
-        "luna-smart",
-        "Универсальный интеллект: аналитика, код, логика (Claude Sonnet 4.6)",
-        False,
-    )
-
-
-def execute_routed_query(prompt: str, user_id: str = "umarbek", session_id: str = "cli-session") -> dict:
+def execute_routed_query(prompt: str, user_id: str = "umarbek", session_id: str = "cli-session") -> dict[str, Any]:
     target_model, decision_reason, is_criticism = classify_task(prompt)
 
     system_content = "You are LunaGPT, a helpful intelligent AI assistant."

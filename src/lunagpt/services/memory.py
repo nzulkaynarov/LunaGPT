@@ -95,19 +95,27 @@ async def search_relevant_feedback(
     return list(memories)
 
 
-async def export_dpo_dataset(db: AsyncSession) -> list[dict[str, Any]]:
-    """Export feedback memory pairs as DPO training records (prompt, chosen, rejected)."""
+async def export_dpo_dataset(db: AsyncSession, require_rejected: bool = True) -> list[dict[str, Any]]:
+    """
+    Export feedback memory pairs as training records.
+    If require_rejected=True (DPO mode), only pairs with non-empty rejected are returned.
+    If require_rejected=False (SFT mode), all recorded prompts and corrections are returned.
+    """
     stmt = select(FeedbackMemory).order_by(FeedbackMemory.created_at.desc())
     result = await db.execute(stmt)
     records = result.scalars().all()
-    return [
-        {
-            "prompt": r.user_prompt,
-            "chosen": r.corrected_response,
-            "rejected": r.rejected_response or "",
-            "model": r.model_used,
-            "score": r.score,
-            "created_at": r.created_at.isoformat() if r.created_at else "",
-        }
-        for r in records
-    ]
+    dataset: list[dict[str, Any]] = []
+    for r in records:
+        if require_rejected and not r.rejected_response:
+            continue
+        dataset.append(
+            {
+                "prompt": r.user_prompt,
+                "chosen": r.corrected_response,
+                "rejected": r.rejected_response or "",
+                "model": r.model_used,
+                "score": r.score,
+                "created_at": r.created_at.isoformat() if r.created_at else "",
+            }
+        )
+    return dataset

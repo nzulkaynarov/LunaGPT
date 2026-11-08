@@ -79,6 +79,8 @@ FAST_KEYWORDS = [
     "объясни простыми словами",
 ]
 
+MAX_RAG_CHARS = 3500
+
 
 def _extract_text_from_content(content: Any) -> str:
     """Extract plain text string from str, list of content parts, or dict."""
@@ -202,9 +204,19 @@ async def execute_smart_routing(db: AsyncSession, req: PromptRequest) -> PromptR
         try:
             chunks = await search_document_chunks(db, req.prompt, limit=3)
             if chunks:
-                rag_count = len(chunks)
-                rag_text = "\n\n".join([f"[{c.chunk_index}] {c.content}" for c in chunks])
-                system_instructions.append(f"### RELEVANT KNOWLEDGE BASE CONTEXT (RAG):\n{rag_text}")
+                selected_texts: list[str] = []
+                cur_len = 0
+                for c in chunks:
+                    chunk_text = f"[{c.chunk_index}] {c.content}"
+                    if cur_len + len(chunk_text) > MAX_RAG_CHARS and selected_texts:
+                        break
+                    selected_texts.append(chunk_text)
+                    cur_len += len(chunk_text)
+
+                if selected_texts:
+                    rag_count = len(selected_texts)
+                    rag_text = "\n\n".join(selected_texts)
+                    system_instructions.append(f"### RELEVANT KNOWLEDGE BASE CONTEXT (RAG):\n{rag_text}")
         except Exception:
             pass
 
@@ -330,9 +342,19 @@ async def execute_openai_chat_completion(
         try:
             chunks = await search_document_chunks(db, user_query, limit=3)
             if chunks:
-                rag_chunks_injected = len(chunks)
-                rag_text = "\n\n".join([f"[{c.chunk_index}] {c.content}" for c in chunks])
-                extra_system_parts.append(f"### RELEVANT KNOWLEDGE BASE CONTEXT (RAG):\n{rag_text}")
+                selected_texts: list[str] = []
+                cur_len = 0
+                for c in chunks:
+                    chunk_text = f"[{c.chunk_index}] {c.content}"
+                    if cur_len + len(chunk_text) > MAX_RAG_CHARS and selected_texts:
+                        break
+                    selected_texts.append(chunk_text)
+                    cur_len += len(chunk_text)
+
+                if selected_texts:
+                    rag_chunks_injected = len(selected_texts)
+                    rag_text = "\n\n".join(selected_texts)
+                    extra_system_parts.append(f"### RELEVANT KNOWLEDGE BASE CONTEXT (RAG):\n{rag_text}")
         except Exception:
             pass
 

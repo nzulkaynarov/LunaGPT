@@ -7,6 +7,7 @@ Sends traces, generations, and token usage directly to Langfuse v2 REST API
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -146,7 +147,7 @@ class LangfuseV2Logger(CustomLogger):
                     },
                 },
             ]
-            self._send_batch(batch)
+            await asyncio.to_thread(self._send_batch, batch)
         except Exception as exc:
             logger.error(f"Error in LangfuseV2Logger async_log_success_event: {exc}")
 

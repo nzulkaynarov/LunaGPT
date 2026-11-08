@@ -16,7 +16,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lunagpt.models import Document, DocumentChunk
-from lunagpt.services.embeddings import get_embedding
+from lunagpt.services.embeddings import get_embedding, get_embeddings_batch
 
 
 class _HTMLTextExtractor(HTMLParser):
@@ -139,28 +139,47 @@ _extract_text = extract_text
 
 
 def _chunk_text(text: str, chunk_size: int = 1000, overlap: int = 150) -> list[str]:
-    """Split text into overlapping semantic chunks preserving structure."""
-    paragraphs = re.split(r"\n\s*\n", text)
+    """Split text into overlapping semantic chunks preserving structure and sentence boundaries."""
+    raw_paragraphs = re.split(r"\n\s*\n", text)
+    # Further split any oversized paragraphs by sentence boundaries
+    normalized_blocks: list[str] = []
+    for p in raw_paragraphs:
+        p_clean = p.strip()
+        if not p_clean:
+            continue
+        if len(p_clean) <= chunk_size:
+            normalized_blocks.append(p_clean)
+        else:
+            sentences = re.split(r"(?<=[.!?\n])\s+", p_clean)
+            sub_block = ""
+            for s in sentences:
+                s_clean = s.strip()
+                if not s_clean:
+                    continue
+                if len(sub_block) + len(s_clean) + 1 > chunk_size and sub_block:
+                    normalized_blocks.append(sub_block)
+                    sub_block = s_clean
+                else:
+                    sub_block = f"{sub_block} {s_clean}".strip()
+            if sub_block:
+                normalized_blocks.append(sub_block)
+
     chunks: list[str] = []
     current_chunk: list[str] = []
     current_len = 0
 
-    for para in paragraphs:
-        para_clean = para.strip()
-        if not para_clean:
-            continue
-
-        if current_len + len(para_clean) > chunk_size and current_chunk:
+    for block in normalized_blocks:
+        if current_len + len(block) > chunk_size and current_chunk:
             chunks.append("\n\n".join(current_chunk))
             if len(current_chunk) > 1:
-                current_chunk = [current_chunk[-1], para_clean]
-                current_len = len(current_chunk[0]) + len(para_clean)
+                current_chunk = [current_chunk[-1], block]
+                current_len = len(current_chunk[0]) + len(block)
             else:
-                current_chunk = [para_clean]
-                current_len = len(para_clean)
+                current_chunk = [block]
+                current_len = len(block)
         else:
-            current_chunk.append(para_clean)
-            current_len += len(para_clean)
+            current_chunk.append(block)
+            current_len += len(block)
 
     if current_chunk:
         chunks.append("\n\n".join(current_chunk))
@@ -169,7 +188,7 @@ def _chunk_text(text: str, chunk_size: int = 1000, overlap: int = 150) -> list[s
 
 
 async def ingest_document(db: AsyncSession, filename: str, content_bytes: bytes) -> tuple[uuid.UUID, int, float]:
-    """Ingest document, chunk it, compute embeddings, and store in pgvector."""
+    """Ingest document, chunk it, compute embeddings in batch, and store in pgvector."""
     start_time = time.time()
     raw_text = _extract_text(filename, content_bytes)
     chunks = _chunk_text(raw_text)
@@ -184,8 +203,8 @@ async def ingest_document(db: AsyncSession, filename: str, content_bytes: bytes)
     db.add(doc)
     await db.flush()
 
-    for idx, chunk_content in enumerate(chunks):
-        emb = await get_embedding(chunk_content)
+    embeddings = await get_embeddings_batch(chunks)
+    for idx, (chunk_content, emb) in enumerate(zip(chunks, embeddings, strict=True)):
         chunk_obj = DocumentChunk(
             id=uuid.uuid4(),
             document_id=doc_id,
