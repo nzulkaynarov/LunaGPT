@@ -4,9 +4,8 @@ import asyncio
 import logging
 
 from aiogram import Bot, Dispatcher
-from aiogram.types import BotCommand
 
-from lunagpt.assistant.bot import COMMANDS, LunaBot, build_router, watch_time_requests
+from lunagpt.assistant.bot import LunaBot, build_router, watch_time_requests
 from lunagpt.assistant.llm import generate_quiz, generate_reply
 from lunagpt.assistant.monitor import send_heartbeats, watch_family, watch_pi
 from lunagpt.assistant.pi_client import PiClient
@@ -21,7 +20,7 @@ async def main() -> None:
         raise SystemExit("LUNA_TELEGRAM_BOT_TOKEN and LITELLM_ASSISTANT_KEY are required")
     bot = Bot(settings.luna_telegram_bot_token)
     me = await bot.get_me()
-    await bot.set_my_commands([BotCommand(command=c, description=d) for c, d in COMMANDS])
+    await bot.delete_my_commands()  # navigation lives in the keyboards
     pi = PiClient()
     luna = LunaBot(bot, async_session_factory, generate_reply, generate_quiz, pi, str(me.username))
     dispatcher = Dispatcher()

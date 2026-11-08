@@ -168,4 +168,4 @@ docker exec luna-assistant python3 -m lunagpt.assistant.invite owner "Имя"
 
 Архитектура: [docs/architecture.md](docs/architecture.md). Решения и источники: [docs/research](docs/research/2026-11-luna-assistant-decisions.md).
 
-Семья подключается владельцем через команду `/family` в боте: людей и устройства Luna берёт из HomeSec.
+Семья подключается владельцем кнопкой «Семья» в боте: людей и устройства Luna берёт из HomeSec.

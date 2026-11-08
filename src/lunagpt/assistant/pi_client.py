@@ -67,6 +67,20 @@ class PiClient:
     async def link_telegram(self, person_id: int, telegram_id: int) -> None:
         await self._request("PUT", f"people/{person_id}/telegram", {"telegram_id": telegram_id})
 
+    async def shared_devices(self) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = await self._request("GET", "shared-devices")
+        return result
+
+    async def set_shared_state(self, device_id: int, choice: str) -> dict[str, Any]:
+        """Apply a menu choice: off, kid, m (adults until morning), or a number of hours for adults."""
+        body: dict[str, Any] = {"state": choice} if choice in ("off", "kid") else {"state": "adult"}
+        if choice == "m":
+            body["until_morning"] = True
+        elif choice not in ("off", "kid"):
+            body["hours"] = float(choice)
+        result: dict[str, Any] = await self._request("POST", f"shared-devices/{device_id}/state", body)
+        return result
+
     async def quota(self, name: str) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = await self._request("GET", f"{self._person(name)}/quota")
         return result

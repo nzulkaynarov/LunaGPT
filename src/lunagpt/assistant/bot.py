@@ -7,11 +7,15 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     CallbackQuery,
+    ForceReply,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -35,31 +39,32 @@ QuizFn = Callable[[int], Awaitable[QuizQuestion | None]]
 BTN_MY_TIME = "⏳ Моё время"
 BTN_ASK_TIME = "🙏 Попросить время"
 BTN_QUIZ = "🧠 Викторина +15 мин"
+BTN_FAMILY = "👨‍👩‍👧 Семья"
+BTN_SHARED = "📺 Общие устройства"
+BTN_GUEST = "➕ Гость"
+BTN_MEMBERS = "👥 Участники"
+BTN_HELP = "❓ Помощь"
+MENU_BUTTONS = {BTN_MY_TIME, BTN_ASK_TIME, BTN_QUIZ, BTN_FAMILY, BTN_SHARED, BTN_GUEST, BTN_MEMBERS, BTN_HELP}
+GUEST_HOURS = (3, 6, 24, 72)
+SHARED_LABELS = {"kid": "👶 Детский режим", "off": "⛔ Выключено", "adult": "🍿 Для взрослых"}
 TIME_POLL_SECONDS = 30
 TIME_REQUEST_TTL = timedelta(hours=24)
 PI_OFFLINE = "Сейчас домашняя сеть не отвечает, попробуй чуть позже."
 NO_DEVICE = "Я не нашла твоё устройство в домашней сети. Попроси родителей привязать его."
 
-COMMANDS = [("start", "Начать"), ("help", "Что умеет Luna")]
 HISTORY_MESSAGES = 8
 RATE_LIMIT = 10
 RATE_WINDOW_SECONDS = 60
 UNKNOWN_REPLY_INTERVAL_SECONDS = 3600
-INVITE_USAGE = "Формат для гостя: /invite guest Анна 6. Семья подключается через /family."
-FAMILY_HINT = "Семья уже есть в HomeSec. Открой /family и выбери человека."
-
 NOT_INVITED = "Luna работает только по приглашениям. Попроси ссылку у родителей."
 BAD_INVITE = "Приглашение недействительно или уже использовано. Попроси новое."
 LIMIT_REACHED = "На сегодня лимит запросов закончился. Приходи завтра 🌙"
 TOO_FAST = "Слишком много сообщений подряд. Подожди минуту 🙂"
 TEXT_ONLY = "Пока я понимаю только текст."
 HELP_TEXT = {
-    "owner": (
-        "Пиши мне любые вопросы. Найду свежее в интернете.\n"
-        "/family — подключить семью\n/invite guest <имя> <часы> — гость\n/members — участники\n/remove <id> — удалить"
-    ),
-    "adult": "Пиши мне любые вопросы. Найду свежее в интернете.\n/invite guest <имя> <часы> — пригласить гостя",
-    "kid": "Спрашивай что угодно: уроки, игры, код, идеи. Могу поискать в интернете.\nКнопки внизу покажут твоё время.",
+    "owner": "Пиши мне любые вопросы, найду свежее в интернете. Семья, устройства и гости — на кнопках внизу.",
+    "adult": "Пиши мне любые вопросы, найду свежее в интернете. Устройства и гости — на кнопках внизу.",
+    "kid": "Спрашивай что угодно: уроки, игры, код, идеи. Могу поискать в интернете. Твоё время — на кнопках внизу.",
     "guest": "Спрашивай что угодно. Могу поискать в интернете.",
 }
 SAFETY_PATTERN = re.compile(
@@ -77,14 +82,53 @@ def needs_adult_attention(text: str) -> bool:
     return bool(SAFETY_PATTERN.search(text))
 
 
-def kid_keyboard() -> ReplyKeyboardMarkup:
+class GuestInvite(StatesGroup):
+    name = State()
+
+
+def main_keyboard(role: str) -> ReplyKeyboardMarkup:
+    """The persistent menu; server-side checks still decide what each role may do."""
+    layouts = {
+        "owner": [[BTN_FAMILY, BTN_SHARED], [BTN_GUEST, BTN_MEMBERS], [BTN_HELP]],
+        "adult": [[BTN_SHARED, BTN_GUEST], [BTN_HELP]],
+        "kid": [[BTN_MY_TIME, BTN_ASK_TIME], [BTN_QUIZ, BTN_HELP]],
+        "guest": [[BTN_HELP]],
+    }
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text=BTN_MY_TIME), KeyboardButton(text=BTN_ASK_TIME)],
-            [KeyboardButton(text=BTN_QUIZ)],
-        ],
+        keyboard=[[KeyboardButton(text=text) for text in row] for row in layouts[role]],
         resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="Напиши Luna…",
     )
+
+
+def shared_actions_keyboard(device_id: int) -> InlineKeyboardMarkup:
+    action = f"shs:{device_id}"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="⛔ Выключить", callback_data=f"{action}:off", style="danger"),
+                InlineKeyboardButton(text="👶 Детский режим", callback_data=f"{action}:kid"),
+            ],
+            [
+                InlineKeyboardButton(text="🍿 Взрослым на 3 часа", callback_data=f"{action}:3", style="success"),
+                InlineKeyboardButton(text="🌙 Взрослым до утра", callback_data=f"{action}:m", style="success"),
+            ],
+            [InlineKeyboardButton(text="← Все устройства", callback_data="shl")],
+        ]
+    )
+
+
+def guest_hours_keyboard() -> InlineKeyboardMarkup:
+    labels = {3: "3 часа", 6: "6 часов", 24: "Сутки", 72: "3 дня"}
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=labels[h], callback_data=f"guest:{h}") for h in GUEST_HOURS]]
+    )
+
+
+def shared_status_text(device: dict[str, Any]) -> str:
+    until = f" до {device['until'][11:16]}" if device.get("until") else ""
+    return f"{device['name']}\nСейчас: {SHARED_LABELS[device['state']]}{until}"
 
 
 def quiz_keyboard(options: list[str]) -> InlineKeyboardMarkup:
@@ -118,11 +162,14 @@ class LunaBot:
         self._quizzes: dict[int, QuizQuestion] = {}
 
     async def _send(
-        self, chat_id: int, text: str, reply_markup: ReplyKeyboardMarkup | InlineKeyboardMarkup | None = None
+        self,
+        chat_id: int,
+        text: str,
+        reply_markup: ReplyKeyboardMarkup | InlineKeyboardMarkup | ForceReply | None = None,
     ) -> None:
         await send_long(self._bot, chat_id, text, reply_markup)
 
-    async def on_message(self, message: Message) -> None:
+    async def on_message(self, message: Message, state: FSMContext | None = None) -> None:
         if message.chat.type != "private" or message.from_user is None:
             return
         user_id = message.from_user.id
@@ -140,32 +187,191 @@ class LunaBot:
         if not text:
             await self._send(user_id, TEXT_ONLY)
             return
-        if member.role == "kid" and await self._kid_action(member, text):
+        if state is not None and await state.get_state() == GuestInvite.name.state:
+            await state.clear()
+            if text not in MENU_BUTTONS and not text.startswith("/"):
+                await self._ask_guest_hours(member, text[:100], state)
+                return
+        if await self._menu_action(member, text, state):
             return
         if text.startswith("/"):
-            await self._command(member, text)
+            await self._send(user_id, HELP_TEXT[member.role], main_keyboard(member.role))
             return
         await self._chat(member, text)
 
-    async def on_callback(self, callback: CallbackQuery) -> None:
+    async def _menu_action(self, member: AssistantMember, text: str, state: FSMContext | None) -> bool:
+        """Run the pressed menu button if this role is allowed to use it."""
+        adult = member.role in access.ADULT_ROLES
+        if text == BTN_HELP:
+            await self._send(member.telegram_id, HELP_TEXT[member.role], main_keyboard(member.role))
+        elif text == BTN_FAMILY and member.role == "owner":
+            await self._family(member)
+        elif text == BTN_MEMBERS and member.role == "owner":
+            await self._send_members(member)
+        elif text == BTN_SHARED and adult:
+            await self._send_shared_list(member)
+        elif text == BTN_GUEST and adult and state is not None:
+            await state.set_state(GuestInvite.name)
+            await self._send(
+                member.telegram_id,
+                "Как зовут гостя?",
+                ForceReply(input_field_placeholder="Имя гостя"),
+            )
+        elif member.role == "kid" and text == BTN_MY_TIME:
+            await self._my_time(member)
+        elif member.role == "kid" and text == BTN_ASK_TIME:
+            await self._ask_time(member, "")
+        elif member.role == "kid" and text == BTN_QUIZ:
+            await self._start_quiz(member)
+        else:
+            return False
+        return True
+
+    async def on_callback(self, callback: CallbackQuery, state: FSMContext | None = None) -> None:
         user_id = callback.from_user.id
         async with self._sessions() as db:
             member = await access.get_member(db, user_id)
         data = callback.data or ""
-        if member is not None and member.role == "owner" and data.startswith("link:"):
-            await callback.answer()
-            await self._send_family_link(member, int(data.split(":")[1]))
-            return
-        if member is None or not data.startswith("quiz:"):
+        prefix = data.split(":", 1)[0]
+        if member is None or not self._callback_allowed(member.role, prefix):
             await callback.answer("Нет доступа", show_alert=True)
             return
         await callback.answer()
-        quiz = self._quizzes.pop(user_id, None)
+        args = data.split(":")[1:]
+        if prefix == "quiz":
+            await self._answer_quiz(member, int(args[0]))
+        elif prefix == "link":
+            await self._send_family_link(member, int(args[0]))
+        elif prefix == "guest":
+            await self._finish_guest_invite(member, callback, int(args[0]), state)
+        elif prefix == "shl":
+            await self._edit_shared_list(callback)
+        elif prefix == "sh":
+            await self._show_shared_device(callback, int(args[0]))
+        elif prefix == "shs":
+            await self._change_shared_device(callback, int(args[0]), args[1])
+        elif prefix == "rml":
+            await self._edit(callback, *await self._members_view(member))
+        elif prefix == "rm":
+            await self._confirm_remove(callback, int(args[0]))
+        elif prefix == "rmy":
+            await self._remove_member(member, callback, int(args[0]))
+
+    @staticmethod
+    def _callback_allowed(role: str, prefix: str) -> bool:
+        if prefix == "quiz":
+            return role == "kid"
+        if prefix in ("link", "rm", "rmy", "rml"):
+            return role == "owner"
+        if prefix in ("guest", "sh", "shs", "shl"):
+            return role in access.ADULT_ROLES
+        return False
+
+    @staticmethod
+    async def _edit(callback: CallbackQuery, text: str, markup: InlineKeyboardMarkup | None) -> None:
+        if isinstance(callback.message, Message):
+            await callback.message.edit_text(text, reply_markup=markup)
+
+    async def _answer_quiz(self, member: AssistantMember, choice: int) -> None:
+        quiz = self._quizzes.pop(member.telegram_id, None)
         if quiz is None:
-            await self._send(user_id, "Этот вопрос уже закрыт.")
+            await self._send(member.telegram_id, "Этот вопрос уже закрыт.")
             return
-        correct = int((callback.data or "quiz:-1").split(":")[1]) == quiz.correct
-        await self._send(user_id, await self._quiz_outcome(member, quiz, correct))
+        await self._send(member.telegram_id, await self._quiz_outcome(member, quiz, choice == quiz.correct))
+
+    async def _ask_guest_hours(self, member: AssistantMember, name: str, state: FSMContext) -> None:
+        await state.update_data(guest_name=name)
+        await self._send(member.telegram_id, f"На сколько пустить: {name}?", guest_hours_keyboard())
+
+    async def _finish_guest_invite(
+        self, member: AssistantMember, callback: CallbackQuery, hours: int, state: FSMContext | None
+    ) -> None:
+        name = str((await state.get_data()).get("guest_name", "")) if state is not None else ""
+        if not name:
+            await self._edit(callback, "Приглашение устарело, начни заново.", None)
+            return
+        async with self._sessions() as db:
+            token = await access.create_invite(db, name, "guest", hours)
+        if state is not None:
+            await state.clear()
+        link = f"https://t.me/{self._username}?start={token}"
+        await self._edit(callback, f"Перешли ссылку гостю ({name}). Одноразовая, доступ на {hours} ч:\n{link}", None)
+
+    async def _shared_list_view(self) -> tuple[str, InlineKeyboardMarkup | None]:
+        try:
+            devices = await self._pi.shared_devices()
+        except (PiNotFoundError, PiUnavailableError):
+            return PI_OFFLINE, None
+        if not devices:
+            return "Общих устройств пока нет.", None
+        rows = [
+            [
+                InlineKeyboardButton(
+                    text=f"{SHARED_LABELS[d['state']].split()[0]} {d['name']}"[:60], callback_data=f"sh:{d['id']}"
+                )
+            ]
+            for d in devices
+        ]
+        return "Выбери устройство:", InlineKeyboardMarkup(inline_keyboard=rows)
+
+    async def _send_shared_list(self, member: AssistantMember) -> None:
+        text, markup = await self._shared_list_view()
+        await self._send(member.telegram_id, text, markup)
+
+    async def _edit_shared_list(self, callback: CallbackQuery) -> None:
+        text, markup = await self._shared_list_view()
+        await self._edit(callback, text, markup)
+
+    async def _show_shared_device(self, callback: CallbackQuery, device_id: int) -> None:
+        try:
+            device = next((d for d in await self._pi.shared_devices() if int(d["id"]) == device_id), None)
+        except (PiNotFoundError, PiUnavailableError):
+            await self._edit(callback, PI_OFFLINE, None)
+            return
+        if device is None:
+            await self._edit(callback, "Устройство не найдено.", None)
+            return
+        await self._edit(callback, shared_status_text(device), shared_actions_keyboard(device_id))
+
+    async def _change_shared_device(self, callback: CallbackQuery, device_id: int, choice: str) -> None:
+        try:
+            device = await self._pi.set_shared_state(device_id, choice)
+        except (PiNotFoundError, PiUnavailableError):
+            await self._edit(callback, PI_OFFLINE, None)
+            return
+        await self._edit(callback, shared_status_text(device), shared_actions_keyboard(device_id))
+
+    async def _members_view(self, member: AssistantMember) -> tuple[str, InlineKeyboardMarkup | None]:
+        async with self._sessions() as db:
+            members = await access.list_members(db)
+        rows = [
+            [InlineKeyboardButton(text=f"❌ {m.name} · {m.role}"[:60], callback_data=f"rm:{m.telegram_id}")]
+            for m in members
+            if m.telegram_id != member.telegram_id
+        ]
+        text = "Участники Luna. Нажми, чтобы отключить:" if rows else "Кроме тебя участников пока нет."
+        return text, InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+
+    async def _send_members(self, member: AssistantMember) -> None:
+        text, markup = await self._members_view(member)
+        await self._send(member.telegram_id, text, markup)
+
+    async def _confirm_remove(self, callback: CallbackQuery, telegram_id: int) -> None:
+        markup = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="Да, отключить", callback_data=f"rmy:{telegram_id}", style="danger"),
+                    InlineKeyboardButton(text="Отмена", callback_data="rml"),
+                ]
+            ]
+        )
+        await self._edit(callback, "Отключить этого участника от Luna?", markup)
+
+    async def _remove_member(self, member: AssistantMember, callback: CallbackQuery, telegram_id: int) -> None:
+        if telegram_id != member.telegram_id:
+            async with self._sessions() as db:
+                await access.remove_member(db, telegram_id)
+        await self._edit(callback, *await self._members_view(member))
 
     async def _quiz_outcome(self, member: AssistantMember, quiz: QuizQuestion, correct: bool) -> str:
         try:
@@ -177,18 +383,6 @@ class LunaBot:
         if correct:
             return f"🎉 Верно! Тебе начислено +{minutes} минут."
         return f"Не совсем. Правильный ответ: {quiz.options[quiz.correct]}. Завтра будет новый шанс!"
-
-    async def _kid_action(self, member: AssistantMember, text: str) -> bool:
-        parts = text.split(maxsplit=1)
-        if text == BTN_MY_TIME or parts[0] == "/quota":
-            await self._my_time(member)
-        elif text == BTN_ASK_TIME or parts[0] == "/time":
-            await self._ask_time(member, parts[1] if parts[0] == "/time" and len(parts) > 1 else "")
-        elif text == BTN_QUIZ or parts[0] == "/quiz":
-            await self._start_quiz(member)
-        else:
-            return False
-        return True
 
     async def _my_time(self, member: AssistantMember) -> None:
         try:
@@ -256,8 +450,9 @@ class LunaBot:
             return
         if member.homesec_person_id is not None:
             await self._link_on_pi(member)
-        keyboard = kid_keyboard() if member.role == "kid" else None
-        await self._send(user_id, f"Привет, {member.name}! Я Luna.\n{HELP_TEXT[member.role]}", keyboard)
+        await self._send(
+            user_id, f"Привет, {member.name}! Я Luna.\n{HELP_TEXT[member.role]}", main_keyboard(member.role)
+        )
 
     async def _link_on_pi(self, member: AssistantMember) -> None:
         """Store the Telegram account on the Pi; the periodic sync retries if it is offline."""
@@ -316,55 +511,6 @@ class LunaBot:
             return
         self._unknown_replied[user_id] = now
         await self._send(user_id, NOT_INVITED)
-
-    async def _command(self, member: AssistantMember, text: str) -> None:
-        parts = text.split()
-        command = parts[0][1:].split("@")[0].lower()
-        if command == "invite":
-            await self._invite(member, parts[1:])
-        elif command == "family" and member.role == "owner":
-            await self._family(member)
-        elif command == "members" and member.role == "owner":
-            await self._members(member)
-        elif command == "remove" and member.role == "owner":
-            await self._remove(member, parts[1:])
-        else:
-            keyboard = kid_keyboard() if member.role == "kid" else None
-            await self._send(member.telegram_id, HELP_TEXT[member.role], keyboard)
-
-    async def _invite(self, member: AssistantMember, args: list[str]) -> None:
-        if args and args[0] in ("adult", "kid"):
-            await self._send(member.telegram_id, FAMILY_HINT)
-            return
-        if len(args) < 2 or args[0] != "guest":
-            await self._send(member.telegram_id, INVITE_USAGE)
-            return
-        role = args[0]
-        if not access.can_invite(member.role, role):
-            await self._send(member.telegram_id, "Такое приглашение может создать только владелец.")
-            return
-        hours = int(args[-1]) if len(args) > 2 and args[-1].isdigit() else None
-        name = " ".join(args[1:-1] if hours is not None else args[1:])[:100]
-        async with self._sessions() as db:
-            token = await access.create_invite(db, name, role, hours)
-        await self._send(
-            member.telegram_id,
-            f"Ссылка для {name} ({role}), действует 72 часа, один раз:\nhttps://t.me/{self._username}?start={token}",
-        )
-
-    async def _members(self, member: AssistantMember) -> None:
-        async with self._sessions() as db:
-            members = await access.list_members(db)
-        lines = [f"{m.name} — {m.role}, id {m.telegram_id}, запросов сегодня {m.requests_today}" for m in members]
-        await self._send(member.telegram_id, "\n".join(lines))
-
-    async def _remove(self, member: AssistantMember, args: list[str]) -> None:
-        if len(args) != 1 or not args[0].isdigit() or int(args[0]) == member.telegram_id:
-            await self._send(member.telegram_id, "Формат: /remove <id>, себя удалить нельзя.")
-            return
-        async with self._sessions() as db:
-            removed = await access.remove_member(db, int(args[0]))
-        await self._send(member.telegram_id, "Удалено." if removed else "Такого участника нет.")
 
     def _allow_request(self, user_id: int) -> bool:
         now = time.monotonic()
