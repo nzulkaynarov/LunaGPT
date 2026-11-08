@@ -14,6 +14,8 @@ model_list:
     model_info:
       description: "Локальная модель для автокомплита и кода на GPU RX 580 (бесплатно, офлайн)"
       mode: chat
+      input_cost_per_token: 0.0
+      output_cost_per_token: 0.0
 
   - model_name: luna-embed
     litellm_params:
@@ -22,6 +24,8 @@ model_list:
     model_info:
       description: "Мультиязычные локальные эмбеддинги для RAG и поиска по коду"
       mode: embedding
+      input_cost_per_token: 0.0
+      output_cost_per_token: 0.0
 
   # ----------------------------------------------------------------------------
   # 2. Быстрые облачные модели (Google Gemini 3.5 Flash Lite)
@@ -33,6 +37,8 @@ model_list:
     model_info:
       description: "Сверхбыстрая облачная модель для длинных документов, переводов и суммаризации"
       mode: chat
+      input_cost_per_token: 0.000000075
+      output_cost_per_token: 0.000000300
 
   # ----------------------------------------------------------------------------
   # 3. Интеллектуальные архитектурные модели (Anthropic Claude 4.6 Sonnet & Opus)
@@ -44,6 +50,8 @@ model_list:
     model_info:
       description: "Флагманский Claude Sonnet 4.6 для сложной архитектуры, рефакторинга и логики"
       mode: chat
+      input_cost_per_token: 0.000003000
+      output_cost_per_token: 0.000015000
 
   - model_name: luna-pro
     litellm_params:
@@ -52,6 +60,8 @@ model_list:
     model_info:
       description: "Максимальный интеллект Claude Opus 4.6 для комплексного аудита"
       mode: chat
+      input_cost_per_token: 0.000015000
+      output_cost_per_token: 0.000075000
 
   # ----------------------------------------------------------------------------
   # 4. Логический роутер с отказоустойчивостью (Failover / Routing Group)

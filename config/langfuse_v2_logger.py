@@ -104,7 +104,11 @@ class LangfuseV2Logger(CustomLogger):
                     "promptTokens": getattr(response_obj.usage, "prompt_tokens", 0),
                     "completionTokens": getattr(response_obj.usage, "completion_tokens", 0),
                     "totalTokens": getattr(response_obj.usage, "total_tokens", 0),
+                    "unit": "TOKENS",
                 }
+                response_cost = kwargs.get("response_cost")
+                if response_cost is not None and float(response_cost) > 0:
+                    usage["totalCost"] = float(response_cost)
 
             start_ts = start_time.timestamp() if hasattr(start_time, "timestamp") else time.time()
             end_ts = end_time.timestamp() if hasattr(end_time, "timestamp") else time.time()

@@ -97,7 +97,8 @@ services:
       - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:lunagpt_secure_postgres_pass@langfuse-db:5432/langfuse}
       - NEXTAUTH_SECRET=${NEXTAUTH_SECRET:-lunagpt_nextauth_secret_random_string_32chars}
       - SALT=${SALT:-lunagpt_salt_random_string_value_32ch}
-      - NEXTAUTH_URL=http://localhost:${LANGFUSE_PORT:-3001}
+      - NEXTAUTH_URL=${NEXTAUTH_URL:-http://100.65.202.127:3001}
+      - AUTH_TRUST_HOST=true
       - TELEMETRY_ENABLED=false
       - LANGFUSE_INIT_ORG_ID=lunagpt-org
       - LANGFUSE_INIT_ORG_NAME=LunaGPT
