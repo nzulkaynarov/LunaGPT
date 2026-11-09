@@ -630,7 +630,7 @@ async def test_guest_over_money_limit_stays_on_the_free_model(harness: Any, monk
 async def test_guest_spending_is_recorded(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     instance, _, answer = harness
     _guest_ready(monkeypatch)
-    record = AsyncMock()
+    record: Any = AsyncMock()
     monkeypatch.setattr(access, "record_spend", record)
 
     async def priced(*args: Any) -> str:
