@@ -31,6 +31,7 @@ from lunagpt.assistant.memories import FAMILY_DUPLICATE, FAMILY_FAILED, FAMILY_F
 from lunagpt.assistant.people import PEOPLE_PREFIXES, PeopleDesk
 from lunagpt.assistant.pi_client import PiClient, PiConflictError, PiNotFoundError, PiUnavailableError
 from lunagpt.assistant.telegram import is_reply_to_prompt, send_long, send_model_reply
+from lunagpt.assistant.waiting import cat_is_thinking
 from lunagpt.config import settings
 from lunagpt.models import AssistantMember
 
@@ -488,7 +489,10 @@ class LunaBot:
         today = self._today()
         costs: list[float] = []
         async with self._locks[user_id]:
-            async with ChatActionSender.typing(chat_id=user_id, bot=self._bot):  # repeats while the model works
+            async with (
+                ChatActionSender.typing(chat_id=user_id, bot=self._bot),  # repeats while the model works
+                cat_is_thinking(self._bot, user_id),
+            ):
                 history = await self._conversation(member)
                 facts = await self._memory.recall(user_id, member.role, text) if self._memory else []
                 options = ReplyOptions(
