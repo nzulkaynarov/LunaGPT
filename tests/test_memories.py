@@ -1,27 +1,18 @@
 """Long-term memory against a real Postgres database created for this run."""
 
 import json
-import os
-import uuid
-from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
-from sqlalchemy.engine import make_url
-from sqlalchemy.exc import OperationalError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import llm, memories
 from lunagpt.assistant.memories import Memory
-from lunagpt.config import settings
-from lunagpt.db import Base
-from lunagpt.models import AssistantMember, AssistantMemory, AssistantMessage
+from lunagpt.models import AssistantMember, AssistantMemory
 
 OWNER, KID = 101, 102
-TABLES = [t.__table__ for t in (AssistantMember, AssistantMemory, AssistantMessage)]
 
 
 def vector_for(fact: str) -> list[float]:
@@ -38,24 +29,8 @@ def vector_for(fact: str) -> list[float]:
 
 
 @pytest_asyncio.fixture
-async def sessions() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    url = make_url(settings.lunagpt_database_url)
-    name = f"luna_test_{uuid.uuid4().hex[:10]}"
-    admin = create_async_engine(url.set(database="postgres"), isolation_level="AUTOCOMMIT")
-    try:
-        async with admin.connect() as connection:
-            await connection.execute(text(f'CREATE DATABASE "{name}"'))
-    except OperationalError:
-        await admin.dispose()
-        if os.environ.get("CI"):
-            raise
-        pytest.skip("Postgres is not reachable")
-    engine = create_async_engine(url.set(database=name))
-    async with engine.begin() as connection:
-        await connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-        await connection.run_sync(Base.metadata.create_all, tables=TABLES)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with factory() as db:
+async def sessions(db_sessions: async_sessionmaker[AsyncSession]) -> async_sessionmaker[AsyncSession]:
+    async with db_sessions() as db:
         db.add_all(
             [
                 AssistantMember(telegram_id=OWNER, name="Владелец", role="owner"),
@@ -63,11 +38,7 @@ async def sessions() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
             ]
         )
         await db.commit()
-    yield factory
-    await engine.dispose()
-    async with admin.connect() as connection:
-        await connection.execute(text(f'DROP DATABASE "{name}"'))
-    await admin.dispose()
+    return db_sessions
 
 
 def _memory(sessions: async_sessionmaker[AsyncSession], *replies: Any) -> tuple[Memory, AsyncMock]:
@@ -134,11 +105,10 @@ async def test_unclear_consolidation_keeps_both_facts(sessions: Any, decision: s
 
 
 @pytest.mark.asyncio
-async def test_guests_are_never_remembered(sessions: Any) -> None:
-    memory, complete = _memory(sessions, _facts("Пользователь гость"))
-    await memory.remember(OWNER, "guest", "Я гость и приехал надолго")
-    complete.assert_not_awaited()
-    assert await memory.recall(OWNER, "guest", "кто я") == []
+async def test_guest_has_personal_memory(sessions: Any) -> None:
+    memory, _ = _memory(sessions, _facts("Пользователь любит игры"))
+    await memory.remember(OWNER, "guest", "Я гость и люблю игры")
+    assert await memory.recall(OWNER, "guest", "кто я") == ["Пользователь любит игры"]
 
 
 @pytest.mark.asyncio

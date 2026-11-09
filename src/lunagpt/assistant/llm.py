@@ -18,7 +18,7 @@ MODELS_BY_ROLE = {
     "owner": ["luna-local", "luna-fast", "luna-smart"],
     "adult": ["luna-local", "luna-fast", "luna-smart"],
     "kid": ["luna-local", "luna-fast", "luna-smart"],
-    "guest": ["luna-fast"],
+    "guest": ["luna-local", "luna-fast", "luna-smart"],
 }
 # The local model invented a fact in the quiz benchmark, and a quiz both teaches and awards minutes.
 QUIZ_MODELS = ["luna-fast", "luna-smart"]

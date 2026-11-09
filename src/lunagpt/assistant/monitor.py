@@ -75,6 +75,8 @@ async def sync_family_once(pi: PiClient, session_factory: async_sessionmaker[Asy
 
 async def watch_family(pi: PiClient, session_factory: async_sessionmaker[AsyncSession]) -> None:
     while True:
+        async with session_factory() as db:
+            await access.expire_applications(db)  # does not depend on the Pi being up
         try:
             await sync_family_once(pi, session_factory)
         except (PiUnavailableError, PiNotFoundError) as exc:

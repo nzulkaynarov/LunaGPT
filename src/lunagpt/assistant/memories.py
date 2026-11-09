@@ -19,7 +19,6 @@ from lunagpt.models import AssistantMemory, AssistantMessage
 
 logger = logging.getLogger("lunagpt.assistant.memories")
 
-MEMORY_ROLES = ("owner", "adult", "kid")
 MAX_FACTS_IN_PROMPT = 30
 MAX_FACTS_PER_MEMBER = 200
 MAX_FACTS_PER_MESSAGE = 5
@@ -83,8 +82,6 @@ class Memory:
 
     async def recall(self, member_id: int, role: str, query: str) -> list[str]:
         """A failed recall must cost the person nothing but the personal touch."""
-        if role not in MEMORY_ROLES:
-            return []
         try:
             return await self._recall(member_id, query)
         except Exception:
@@ -108,7 +105,7 @@ class Memory:
 
     async def remember(self, member_id: int, role: str, text: str) -> None:
         """Only the person's own words are read, so search results can never become memories."""
-        if role not in MEMORY_ROLES or len(text) < MIN_MESSAGE_CHARS:
+        if len(text) < MIN_MESSAGE_CHARS:
             return
         try:
             async with self._locks[member_id]:

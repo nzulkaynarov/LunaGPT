@@ -3,7 +3,6 @@
 import asyncio
 import json
 import uuid
-from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
@@ -20,7 +19,7 @@ from lunagpt.models import AssistantMember
 
 
 def _member(role: str = "adult", telegram_id: int = 1) -> AssistantMember:
-    return AssistantMember(telegram_id=telegram_id, name="Тест", role=role, expires_at=None, requests_today=0)
+    return AssistantMember(telegram_id=telegram_id, name="Тест", role=role, requests_today=0)
 
 
 def _message(text: str, user_id: int = 1, chat_type: str = "private") -> Any:
@@ -52,16 +51,6 @@ def _sent(send: AsyncMock) -> str:
 
 
 QUIZ = llm.QuizQuestion(q="Сколько планет?", options=["7", "8", "9", "10"], correct=1, topic="Космос")
-
-
-@pytest.mark.asyncio
-async def test_stranger_is_rejected_once(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    instance, send, answer = harness
-    _as_member(monkeypatch, None)
-    await instance.on_message(_message("привет"))
-    await instance.on_message(_message("привет"))
-    answer.assert_not_awaited()
-    assert send.await_count == 1 and _sent(send) == bot.NOT_INVITED
 
 
 @pytest.mark.asyncio
@@ -102,7 +91,7 @@ async def test_guest_cannot_use_owner_commands(harness: Any, monkeypatch: pytest
     _as_member(monkeypatch, _member("guest"))
     list_members = AsyncMock()
     monkeypatch.setattr(access, "list_members", list_members)
-    await instance.on_message(_message(bot.BTN_MEMBERS))
+    await instance.on_message(_message(bot.BTN_PEOPLE))
     list_members.assert_not_awaited()
     answer.assert_awaited_once()  # the text is treated as an ordinary question
 
@@ -125,47 +114,11 @@ def _callback(data: str, user_id: int = 1) -> MagicMock:
     return callback
 
 
-@pytest.mark.asyncio
-async def test_guest_button_asks_name_then_duration(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    instance, send, _ = harness
-    _as_member(monkeypatch, _member("adult"))
-    state = _state()
-    await instance.on_message(_message(bot.BTN_GUEST), state)
-    state.set_state.assert_awaited_once_with(bot.GuestInvite.name)
-    assert send.call_args.kwargs["reply_markup"].force_reply is True
-    naming = _state(bot.GuestInvite.name.state)
-    await instance.on_message(_message("Анна Ли"), naming)
-    naming.update_data.assert_awaited_once_with(guest_name="Анна Ли")
-    assert send.call_args.kwargs["reply_markup"].inline_keyboard[0][1].callback_data == "guest:6"
-
-
-@pytest.mark.asyncio
-async def test_pressing_a_menu_button_cancels_guest_naming(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    instance, _, answer = harness
-    _as_member(monkeypatch, _member("adult"))
-    naming = _state(bot.GuestInvite.name.state)
-    await instance.on_message(_message(bot.BTN_HELP), naming)
-    naming.update_data.assert_not_awaited()
-    answer.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_guest_duration_creates_link_in_same_message(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    instance, _, _ = harness
-    _as_member(monkeypatch, _member("adult"))
-    create = AsyncMock(return_value="TOKEN")
-    monkeypatch.setattr(access, "create_invite", create)
-    callback = _callback("guest:6")
-    await instance.on_callback(callback, _state(data={"guest_name": "Анна"}))
-    assert create.call_args.args[1:] == ("Анна", "guest", 6)
-    assert "https://t.me/lunabot?start=TOKEN" in callback.message.edit_text.call_args.args[0]
-
-
 @pytest.mark.parametrize(
     ("role", "expected", "hidden"),
     [
-        ("owner", bot.BTN_FAMILY, None),
-        ("adult", bot.BTN_SHARED, bot.BTN_FAMILY),
+        ("owner", bot.BTN_PEOPLE, None),
+        ("adult", bot.BTN_INVITE, bot.BTN_QUIZ),
         ("kid", bot.BTN_ASK_TIME, bot.BTN_SHARED),
         ("guest", bot.BTN_HELP, bot.BTN_SHARED),
     ],
@@ -180,15 +133,13 @@ def test_menu_matches_role(role: str, expected: str, hidden: str | None) -> None
 @pytest.mark.parametrize(
     ("role", "prefix", "allowed"),
     [
-        ("owner", "link", True),
-        ("owner", "rmy", True),
-        ("adult", "link", False),
-        ("adult", "rmy", False),
+        ("owner", "pxy", True),
         ("adult", "shs", True),
-        ("adult", "guest", True),
+        ("adult", "pxy", True),
+        ("owner", "link", False),
         ("kid", "shs", False),
         ("kid", "quiz", True),
-        ("guest", "guest", False),
+        ("guest", "pl", False),
         ("guest", "sh", False),
         ("owner", "unknown", False),
     ],
@@ -235,19 +186,6 @@ async def test_kid_is_denied_shared_button_press(harness: Any, monkeypatch: pyte
 
 
 @pytest.mark.asyncio
-async def test_member_removal_needs_confirmation(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    instance, _, _ = harness
-    _as_member(monkeypatch, _member("owner"))
-    remove = AsyncMock(return_value=True)
-    monkeypatch.setattr(access, "remove_member", remove)
-    monkeypatch.setattr(access, "list_members", AsyncMock(return_value=[]))
-    await instance.on_callback(_callback("rm:9"))
-    remove.assert_not_awaited()
-    await instance.on_callback(_callback("rmy:9"))
-    remove.assert_awaited_once()
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("choice", "body"),
     [
@@ -266,20 +204,6 @@ async def test_pi_client_maps_shared_choices(choice: str, body: dict[str, Any]) 
 
     await _pi_client(handler).set_shared_state(7, choice)
     assert seen["body"] == body
-
-
-@pytest.mark.parametrize(
-    ("inviter", "role", "allowed"),
-    [
-        ("owner", "kid", True),
-        ("adult", "guest", True),
-        ("adult", "kid", False),
-        ("kid", "guest", False),
-        ("guest", "guest", False),
-    ],
-)
-def test_invite_permissions(inviter: str, role: str, allowed: bool) -> None:
-    assert access.can_invite(inviter, role) is allowed
 
 
 def test_kids_use_the_same_models_as_adults_with_strict_search() -> None:
@@ -392,64 +316,6 @@ PEOPLE = [
 ]
 
 
-@pytest.mark.asyncio
-async def test_family_lists_people_from_pi(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    instance, send, _ = harness
-    _as_member(monkeypatch, _member("owner"))
-    instance._pi.people = AsyncMock(return_value=PEOPLE)
-    await instance.on_message(_message(bot.BTN_FAMILY))
-    rows = send.call_args.kwargs["reply_markup"].inline_keyboard
-    assert rows[0][0].callback_data == "link:3" and rows[0][0].text.startswith("➕ Миша")
-    assert rows[1][0].text.startswith("✅ Мама")
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("role", ["adult", "kid", "guest"])
-async def test_only_owner_opens_family(harness: Any, monkeypatch: pytest.MonkeyPatch, role: str) -> None:
-    instance, _, _ = harness
-    _as_member(monkeypatch, _member(role))
-    instance._pi.people = AsyncMock(return_value=PEOPLE)
-    await instance.on_message(_message(bot.BTN_FAMILY))
-    instance._pi.people.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_owner_gets_link_with_role_from_pi(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    instance, send, _ = harness
-    _as_member(monkeypatch, _member("owner"))
-    instance._pi.people = AsyncMock(return_value=PEOPLE)
-    create = AsyncMock(return_value="TOKEN")
-    monkeypatch.setattr(access, "create_invite", create)
-    callback = _callback("link:3")
-    await instance.on_callback(callback)
-    assert create.call_args.args[1:] == ("Миша", "kid") and create.call_args.kwargs == {"person_id": 3}
-    assert "start=TOKEN" in _sent(send)
-
-
-@pytest.mark.asyncio
-async def test_non_owner_cannot_create_family_link(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    instance, _, _ = harness
-    _as_member(monkeypatch, _member("adult"))
-    create = AsyncMock()
-    monkeypatch.setattr(access, "create_invite", create)
-    callback = MagicMock(data="link:3", answer=AsyncMock())
-    callback.from_user.id = 1
-    await instance.on_callback(callback)
-    create.assert_not_awaited()
-    callback.answer.assert_awaited_once_with("Нет доступа", show_alert=True)
-
-
-@pytest.mark.asyncio
-async def test_redeeming_family_link_writes_telegram_to_pi(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    instance, _, _ = harness
-    member = _member("kid", 5)
-    member.homesec_person_id = 3
-    monkeypatch.setattr(access, "redeem_invite", AsyncMock(return_value=member))
-    instance._pi.link_telegram = AsyncMock()
-    await instance.on_message(_message("/start TOKEN", 5))
-    instance._pi.link_telegram.assert_awaited_once_with(3, 5)
-
-
 def _db_with_members(members: list[AssistantMember]) -> MagicMock:
     db = MagicMock(commit=AsyncMock(), delete=AsyncMock())
     return db
@@ -530,18 +396,6 @@ async def test_pi_without_api_is_up_but_api_calls_fail(response: httpx.Response)
 
 
 @pytest.mark.asyncio
-async def test_owner_keeps_role_when_linking_own_profile(monkeypatch: pytest.MonkeyPatch) -> None:
-    invite = MagicMock(used_at=None, access_hours=None, role="adult", homesec_person_id=4)
-    invite.name = "Нурбек"
-    invite.invite_expires_at = datetime.now(UTC) + timedelta(hours=1)
-    owner = _member("owner", 7)
-    db = MagicMock(commit=AsyncMock(), rollback=AsyncMock(), execute=AsyncMock(), get=AsyncMock(return_value=owner))
-    db.execute.return_value.scalar_one_or_none = MagicMock(return_value=invite)
-    member = await access.redeem_invite(db, "token", 7)
-    assert member is owner and owner.role == "owner" and owner.homesec_person_id == 4
-
-
-@pytest.mark.asyncio
 async def test_pi_server_error_is_unhealthy() -> None:
     assert await _pi_client(lambda request: httpx.Response(503, json={})).is_healthy() is False
 
@@ -585,36 +439,6 @@ async def test_quiz_uses_a_varied_topic_on_cloud_models(monkeypatch: pytest.Monk
     assert "космос" in payloads[0]["messages"][1]["content"]
 
 
-@pytest.mark.asyncio
-async def test_real_dispatcher_runs_guest_flow(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    """aiogram itself must inject FSM state into the handlers."""
-    instance, send, _ = harness
-    _as_member(monkeypatch, _member("adult"))
-    dispatcher = Dispatcher()
-    dispatcher.include_router(bot.build_router(instance))
-    telegram = Bot("123456:" + "a" * 35)
-
-    def update(update_id: int, text: str) -> Update:
-        return Update.model_validate(
-            {
-                "update_id": update_id,
-                "message": {
-                    "message_id": update_id,
-                    "date": 1,
-                    "chat": {"id": 1, "type": "private"},
-                    "from": {"id": 1, "is_bot": False, "first_name": "A"},
-                    "text": text,
-                },
-            }
-        )
-
-    await dispatcher.feed_update(telegram, update(1, bot.BTN_GUEST))
-    assert send.call_args.args[1] == "Как зовут гостя?"
-    await dispatcher.feed_update(telegram, update(2, "Анна"))
-    assert send.call_args.args[1] == "На сколько пустить: Анна?"
-    await telegram.session.close()
-
-
 def _memory_fact(index: int) -> Any:
     return MagicMock(id=uuid.UUID(int=index), content=f"факт {index}")
 
@@ -635,12 +459,6 @@ def _with_memory(harness: Any, monkeypatch: pytest.MonkeyPatch, role: str, count
     return instance, memory
 
 
-@pytest.mark.parametrize(("role", "expected"), [("owner", True), ("adult", True), ("kid", True), ("guest", False)])
-def test_memory_button_excludes_guests(role: str, expected: bool) -> None:
-    assert (bot.BTN_MEMORY in str(bot.main_keyboard(role).keyboard)) is expected
-    assert bot.LunaBot._callback_allowed(role, "memy") is expected
-
-
 @pytest.mark.asyncio
 async def test_reply_uses_facts_and_restored_history(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     instance, memory = _with_memory(harness, monkeypatch, "owner")
@@ -659,14 +477,6 @@ async def test_history_loads_from_database_only_once(harness: Any, monkeypatch: 
     await instance.on_message(_message("первый"))
     await instance.on_message(_message("второй"))
     memory.load_history.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_guest_history_is_not_saved(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    instance, memory = _with_memory(harness, monkeypatch, "guest")
-    await instance.on_message(_message("вопрос гостя"))
-    memory.save_exchange.assert_not_awaited()
-    memory.load_history.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -707,8 +517,57 @@ async def test_clear_all_asks_first(harness: Any, monkeypatch: pytest.MonkeyPatc
     memory.forget_all.assert_awaited_once_with(1)
 
 
+@pytest.mark.parametrize("role", ["owner", "adult", "kid", "guest"])
+def test_memory_button_is_for_every_member(role: str) -> None:
+    assert bot.BTN_MEMORY in str(bot.main_keyboard(role).keyboard)
+    assert bot.LunaBot._callback_allowed(role, "memy") is True
+
+
 @pytest.mark.asyncio
-async def test_guest_is_denied_memory_press(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_guest_conversation_is_remembered_like_anyone_elses(
+    harness: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
     instance, memory = _with_memory(harness, monkeypatch, "guest")
-    await instance.on_callback(_callback("memy"))
-    memory.forget_all.assert_not_awaited()
+    await instance.on_message(_message("расскажи про горы"))
+    memory.save_exchange.assert_awaited_once()
+    await asyncio.sleep(0)
+    memory.remember.assert_awaited_once_with(1, "guest", "расскажи про горы")
+
+
+def test_guests_start_on_the_local_model() -> None:
+    assert llm.MODELS_BY_ROLE["guest"][0] == "luna-local"
+
+
+@pytest.mark.parametrize("role", ["kid", "guest"])
+@pytest.mark.parametrize("prefix", ["pl", "pls", "pc", "apf", "apg", "apr", "pxy", "prb"])
+def test_people_buttons_are_for_adults(role: str, prefix: str) -> None:
+    assert bot.LunaBot._callback_allowed(role, prefix) is False
+    assert bot.LunaBot._callback_allowed("adult", prefix) is True
+
+
+@pytest.mark.asyncio
+async def test_real_dispatcher_turns_a_stranger_into_an_applicant(
+    harness: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance, _, _ = harness
+    _as_member(monkeypatch, None)
+    on_stranger = AsyncMock()
+    instance._people.on_stranger = on_stranger
+    dispatcher = Dispatcher()
+    dispatcher.include_router(bot.build_router(instance))
+    telegram = Bot("123:abc")
+    update = Update.model_validate(
+        {
+            "update_id": 1,
+            "message": {
+                "message_id": 1,
+                "date": 1,
+                "chat": {"id": 1, "type": "private"},
+                "from": {"id": 1, "is_bot": False, "first_name": "A"},
+                "contact": {"phone_number": "+998", "first_name": "A", "user_id": 1},
+            },
+        }
+    )
+    await dispatcher.feed_update(telegram, update)
+    on_stranger.assert_awaited_once()
+    await telegram.session.close()

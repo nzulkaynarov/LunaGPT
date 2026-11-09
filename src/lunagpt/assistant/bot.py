@@ -12,11 +12,8 @@ from typing import Any
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     CallbackQuery,
-    ForceReply,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -27,7 +24,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import access
 from lunagpt.assistant.llm import QuizQuestion
-from lunagpt.assistant.memories import MEMORY_ROLES, Memory
+from lunagpt.assistant.memories import Memory
+from lunagpt.assistant.people import PEOPLE_PREFIXES, PeopleDesk
 from lunagpt.assistant.pi_client import PiClient, PiConflictError, PiNotFoundError, PiUnavailableError
 from lunagpt.assistant.telegram import send_long
 from lunagpt.config import settings
@@ -41,25 +39,22 @@ QuizFn = Callable[[int], Awaitable[QuizQuestion | None]]
 BTN_MY_TIME = "⏳ Моё время"
 BTN_ASK_TIME = "🙏 Попросить время"
 BTN_QUIZ = "🧠 Викторина +15 мин"
-BTN_FAMILY = "👨‍👩‍👧 Семья"
 BTN_SHARED = "📺 Общие устройства"
-BTN_GUEST = "➕ Гость"
-BTN_MEMBERS = "👥 Участники"
+BTN_INVITE = "➕ Пригласить"
+BTN_PEOPLE = "👥 Люди"
 BTN_MEMORY = "🧠 Что ты помнишь"
 BTN_HELP = "❓ Помощь"
 MENU_BUTTONS = {
     BTN_MY_TIME,
     BTN_ASK_TIME,
     BTN_QUIZ,
-    BTN_FAMILY,
     BTN_SHARED,
-    BTN_GUEST,
-    BTN_MEMBERS,
+    BTN_INVITE,
+    BTN_PEOPLE,
     BTN_MEMORY,
     BTN_HELP,
 }
 MEMORY_PAGE_SIZE = 8
-GUEST_HOURS = (3, 6, 24, 72)
 SHARED_LABELS = {"kid": "👶 Детский режим", "off": "⛔ Выключено", "adult": "🍿 Для взрослых"}
 TIME_POLL_SECONDS = 30
 TIME_REQUEST_TTL = timedelta(hours=24)
@@ -69,23 +64,18 @@ NO_DEVICE = "Я не нашла твоё устройство в домашне�
 HISTORY_MESSAGES = 8
 RATE_LIMIT = 10
 RATE_WINDOW_SECONDS = 60
-UNKNOWN_REPLY_INTERVAL_SECONDS = 3600
-NOT_INVITED = "Luna работает только по приглашениям. Попроси ссылку у родителей."
-BAD_INVITE = "Приглашение недействительно или уже использовано. Попроси новое."
 LIMIT_REACHED = "На сегодня лимит запросов закончился. Приходи завтра 🌙"
 TOO_FAST = "Слишком много сообщений подряд. Подожди минуту 🙂"
 TEXT_ONLY = "Пока я понимаю только текст."
 MEMORY_NOTICE = (
-    " Запоминаю важное о тебе, посмотреть и удалить можно на кнопке «Что ты помнишь». "
-    "Другие члены семьи этого не видят."
+    " Запоминаю важное о тебе, посмотреть и удалить можно на кнопке «Что ты помнишь». Другие люди этого не видят."
 )
 HELP_TEXT = {
-    "owner": "Пиши мне любые вопросы, найду свежее в интернете. Семья, устройства и гости — на кнопках внизу."
-    + MEMORY_NOTICE,
-    "adult": "Пиши мне любые вопросы, найду свежее в интернете. Устройства и гости — на кнопках внизу." + MEMORY_NOTICE,
+    "owner": "Пиши мне любые вопросы, найду свежее в интернете. Устройства и люди — на кнопках внизу." + MEMORY_NOTICE,
+    "adult": "Пиши мне любые вопросы, найду свежее в интернете. Устройства и люди — на кнопках внизу." + MEMORY_NOTICE,
     "kid": "Спрашивай что угодно: уроки, игры, код, идеи. Могу поискать в интернете. Твоё время — на кнопках внизу."
     + MEMORY_NOTICE,
-    "guest": "Спрашивай что угодно. Могу поискать в интернете.",
+    "guest": "Спрашивай что угодно. Могу поискать в интернете." + MEMORY_NOTICE,
 }
 SAFETY_PATTERN = re.compile(
     r"суицид|покончить с собой|убить себя|не хочу жить|порезать себя|"
@@ -102,17 +92,14 @@ def needs_adult_attention(text: str) -> bool:
     return bool(SAFETY_PATTERN.search(text))
 
 
-class GuestInvite(StatesGroup):
-    name = State()
-
-
 def main_keyboard(role: str) -> ReplyKeyboardMarkup:
     """The persistent menu; server-side checks still decide what each role may do."""
+    adults = [[BTN_SHARED, BTN_PEOPLE], [BTN_INVITE, BTN_MEMORY], [BTN_HELP]]
     layouts = {
-        "owner": [[BTN_FAMILY, BTN_SHARED], [BTN_GUEST, BTN_MEMBERS], [BTN_MEMORY, BTN_HELP]],
-        "adult": [[BTN_SHARED, BTN_GUEST], [BTN_MEMORY, BTN_HELP]],
+        "owner": adults,
+        "adult": adults,
         "kid": [[BTN_MY_TIME, BTN_ASK_TIME], [BTN_QUIZ, BTN_MEMORY], [BTN_HELP]],
-        "guest": [[BTN_HELP]],
+        "guest": [[BTN_MEMORY, BTN_HELP]],
     }
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text=text) for text in row] for row in layouts[role]],
@@ -136,13 +123,6 @@ def shared_actions_keyboard(device_id: int) -> InlineKeyboardMarkup:
             ],
             [InlineKeyboardButton(text="← Все устройства", callback_data="shl")],
         ]
-    )
-
-
-def guest_hours_keyboard() -> InlineKeyboardMarkup:
-    labels = {3: "3 часа", 6: "6 часов", 24: "Сутки", 72: "3 дня"}
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=labels[h], callback_data=f"guest:{h}") for h in GUEST_HOURS]]
     )
 
 
@@ -177,72 +157,62 @@ class LunaBot:
         self._pi = pi
         self._username = bot_username
         self._memory = memory
+        self._people = PeopleDesk(bot, session_factory, pi, bot_username, self._welcome)
         self._history_loaded: set[int] = set()
         self._background: set[asyncio.Task[None]] = set()
         self._history: dict[int, deque[dict[str, str]]] = defaultdict(lambda: deque(maxlen=HISTORY_MESSAGES))
         self._locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._request_times: dict[int, deque[float]] = defaultdict(lambda: deque(maxlen=RATE_LIMIT))
-        self._unknown_replied: dict[int, float] = {}
         self._quizzes: dict[int, QuizQuestion] = {}
 
     async def _send(
         self,
         chat_id: int,
         text: str,
-        reply_markup: ReplyKeyboardMarkup | InlineKeyboardMarkup | ForceReply | None = None,
+        reply_markup: ReplyKeyboardMarkup | InlineKeyboardMarkup | None = None,
     ) -> None:
         await send_long(self._bot, chat_id, text, reply_markup)
 
-    async def on_message(self, message: Message, state: FSMContext | None = None) -> None:
+    async def _welcome(self, telegram_id: int, name: str, role: str) -> None:
+        try:
+            await self._send(telegram_id, f"Привет, {name}! Я Luna.\n{HELP_TEXT[role]}", main_keyboard(role))
+        except TelegramAPIError as exc:
+            logger.warning("could not welcome a new member: %s", type(exc).__name__)
+
+    async def on_message(self, message: Message) -> None:
         if message.chat.type != "private" or message.from_user is None:
             return
         user_id = message.from_user.id
         text = (message.text or "").strip()
 
-        if text.startswith("/start") and len(text.split()) == 2:
-            await self._redeem(user_id, text.split()[1])
-            return
-
         async with self._sessions() as db:
             member = await access.get_member(db, user_id)
         if member is None:
-            await self._reject_unknown(user_id)
+            await self._people.on_stranger(message)
             return
         if not text:
             await self._send(user_id, TEXT_ONLY)
             return
-        if state is not None and await state.get_state() == GuestInvite.name.state:
-            await state.clear()
-            if text not in MENU_BUTTONS and not text.startswith("/"):
-                await self._ask_guest_hours(member, text[:100], state)
-                return
-        if await self._menu_action(member, text, state):
+        if await self._menu_action(member, text):
             return
         if text.startswith("/"):
             await self._send(user_id, HELP_TEXT[member.role], main_keyboard(member.role))
             return
         await self._chat(member, text)
 
-    async def _menu_action(self, member: AssistantMember, text: str, state: FSMContext | None) -> bool:
+    async def _menu_action(self, member: AssistantMember, text: str) -> bool:
         """Run the pressed menu button if this role is allowed to use it."""
         adult = member.role in access.ADULT_ROLES
         if text == BTN_HELP:
             await self._send(member.telegram_id, HELP_TEXT[member.role], main_keyboard(member.role))
-        elif text == BTN_FAMILY and member.role == "owner":
-            await self._family(member)
-        elif text == BTN_MEMBERS and member.role == "owner":
-            await self._send_members(member)
+        elif text == BTN_PEOPLE and adult:
+            await self._people.send_summary(member.telegram_id)
+        elif text == BTN_INVITE and adult:
+            await self._people.send_invite(member.telegram_id)
         elif text == BTN_SHARED and adult:
             await self._send_shared_list(member)
-        elif text == BTN_MEMORY and member.role in MEMORY_ROLES:
+        elif text == BTN_MEMORY:
             await self._send(member.telegram_id, *await self._memory_view(member.telegram_id, 0))
-        elif text == BTN_GUEST and adult and state is not None:
-            await state.set_state(GuestInvite.name)
-            await self._send(
-                member.telegram_id,
-                "Как зовут гостя?",
-                ForceReply(input_field_placeholder="Имя гостя"),
-            )
         elif member.role == "kid" and text == BTN_MY_TIME:
             await self._my_time(member)
         elif member.role == "kid" and text == BTN_ASK_TIME:
@@ -253,7 +223,7 @@ class LunaBot:
             return False
         return True
 
-    async def on_callback(self, callback: CallbackQuery, state: FSMContext | None = None) -> None:
+    async def on_callback(self, callback: CallbackQuery) -> None:
         user_id = callback.from_user.id
         async with self._sessions() as db:
             member = await access.get_member(db, user_id)
@@ -266,10 +236,6 @@ class LunaBot:
         args = data.split(":")[1:]
         if prefix == "quiz":
             await self._answer_quiz(member, int(args[0]))
-        elif prefix == "link":
-            await self._send_family_link(member, int(args[0]))
-        elif prefix == "guest":
-            await self._finish_guest_invite(member, callback, int(args[0]), state)
         elif prefix == "shl":
             await self._edit_shared_list(callback)
         elif prefix == "sh":
@@ -284,22 +250,16 @@ class LunaBot:
             await self._edit(callback, *self._confirm_forget_all())
         elif prefix == "memy":
             await self._forget_everything(callback, user_id)
-        elif prefix == "rml":
-            await self._edit(callback, *await self._members_view(member))
-        elif prefix == "rm":
-            await self._confirm_remove(callback, int(args[0]))
-        elif prefix == "rmy":
-            await self._remove_member(member, callback, int(args[0]))
+        elif prefix in PEOPLE_PREFIXES:
+            await self._people.handle(callback, member, prefix, args)
 
     @staticmethod
     def _callback_allowed(role: str, prefix: str) -> bool:
         if prefix == "quiz":
             return role == "kid"
         if prefix in ("mem", "memd", "memc", "memy"):
-            return role in MEMORY_ROLES
-        if prefix in ("link", "rm", "rmy", "rml"):
-            return role == "owner"
-        if prefix in ("guest", "sh", "shs", "shl"):
+            return role in access.ROLES
+        if prefix in PEOPLE_PREFIXES or prefix in ("sh", "shs", "shl"):
             return role in access.ADULT_ROLES
         return False
 
@@ -314,24 +274,6 @@ class LunaBot:
             await self._send(member.telegram_id, "Этот вопрос уже закрыт.")
             return
         await self._send(member.telegram_id, await self._quiz_outcome(member, quiz, choice == quiz.correct))
-
-    async def _ask_guest_hours(self, member: AssistantMember, name: str, state: FSMContext) -> None:
-        await state.update_data(guest_name=name)
-        await self._send(member.telegram_id, f"На сколько пустить: {name}?", guest_hours_keyboard())
-
-    async def _finish_guest_invite(
-        self, member: AssistantMember, callback: CallbackQuery, hours: int, state: FSMContext | None
-    ) -> None:
-        name = str((await state.get_data()).get("guest_name", "")) if state is not None else ""
-        if not name:
-            await self._edit(callback, "Приглашение устарело, начни заново.", None)
-            return
-        async with self._sessions() as db:
-            token = await access.create_invite(db, name, "guest", hours)
-        if state is not None:
-            await state.clear()
-        link = f"https://t.me/{self._username}?start={token}"
-        await self._edit(callback, f"Перешли ссылку гостю ({name}). Одноразовая, доступ на {hours} ч:\n{link}", None)
 
     async def _shared_list_view(self) -> tuple[str, InlineKeyboardMarkup | None]:
         try:
@@ -376,38 +318,6 @@ class LunaBot:
             await self._edit(callback, PI_OFFLINE, None)
             return
         await self._edit(callback, shared_status_text(device), shared_actions_keyboard(device_id))
-
-    async def _members_view(self, member: AssistantMember) -> tuple[str, InlineKeyboardMarkup | None]:
-        async with self._sessions() as db:
-            members = await access.list_members(db)
-        rows = [
-            [InlineKeyboardButton(text=f"❌ {m.name} · {m.role}"[:60], callback_data=f"rm:{m.telegram_id}")]
-            for m in members
-            if m.telegram_id != member.telegram_id
-        ]
-        text = "Участники Luna. Нажми, чтобы отключить:" if rows else "Кроме тебя участников пока нет."
-        return text, InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
-
-    async def _send_members(self, member: AssistantMember) -> None:
-        text, markup = await self._members_view(member)
-        await self._send(member.telegram_id, text, markup)
-
-    async def _confirm_remove(self, callback: CallbackQuery, telegram_id: int) -> None:
-        markup = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="Да, отключить", callback_data=f"rmy:{telegram_id}", style="danger"),
-                    InlineKeyboardButton(text="Отмена", callback_data="rml"),
-                ]
-            ]
-        )
-        await self._edit(callback, "Отключить этого участника от Luna?", markup)
-
-    async def _remove_member(self, member: AssistantMember, callback: CallbackQuery, telegram_id: int) -> None:
-        if telegram_id != member.telegram_id:
-            async with self._sessions() as db:
-                await access.remove_member(db, telegram_id)
-        await self._edit(callback, *await self._members_view(member))
 
     async def _quiz_outcome(self, member: AssistantMember, quiz: QuizQuestion, correct: bool) -> str:
         try:
@@ -478,76 +388,6 @@ class LunaBot:
         self._quizzes[user_id] = quiz
         await self._send(user_id, f"🧠 {quiz.topic}\n\n{quiz.q}", quiz_keyboard(quiz.options))
 
-    async def _redeem(self, user_id: int, token: str) -> None:
-        async with self._sessions() as db:
-            member = await access.redeem_invite(db, token, user_id)
-        if member is None:
-            await self._send(user_id, BAD_INVITE)
-            return
-        if member.homesec_person_id is not None:
-            await self._link_on_pi(member)
-        await self._send(
-            user_id, f"Привет, {member.name}! Я Luna.\n{HELP_TEXT[member.role]}", main_keyboard(member.role)
-        )
-
-    async def _link_on_pi(self, member: AssistantMember) -> None:
-        """Store the Telegram account on the Pi; the periodic sync retries if it is offline."""
-        try:
-            await self._pi.link_telegram(int(member.homesec_person_id or 0), member.telegram_id)
-        except PiConflictError:
-            await self._send(member.telegram_id, "Этот Telegram уже привязан к другому человеку в HomeSec.")
-        except (PiNotFoundError, PiUnavailableError) as exc:
-            logger.warning("could not link telegram on the pi: %s", type(exc).__name__)
-
-    async def _family(self, member: AssistantMember) -> None:
-        try:
-            people = await self._pi.people()
-        except (PiNotFoundError, PiUnavailableError):
-            await self._send(member.telegram_id, PI_OFFLINE)
-            return
-        rows = [
-            [
-                InlineKeyboardButton(
-                    text=f"{'✅' if p['telegram_id'] else '➕'} {p['name']} · {p['role']} · устройств {p['devices']}"[
-                        :60
-                    ],
-                    callback_data=f"link:{p['id']}",
-                )
-            ]
-            for p in people
-        ]
-        await self._send(
-            member.telegram_id,
-            "Семья из HomeSec. Выбери человека, чтобы получить его личную ссылку:",
-            InlineKeyboardMarkup(inline_keyboard=rows),
-        )
-
-    async def _send_family_link(self, member: AssistantMember, person_id: int) -> None:
-        try:
-            person = next((p for p in await self._pi.people() if int(p["id"]) == person_id), None)
-        except (PiNotFoundError, PiUnavailableError):
-            await self._send(member.telegram_id, PI_OFFLINE)
-            return
-        if person is None:
-            await self._send(member.telegram_id, "Такого человека больше нет в HomeSec.")
-            return
-        role = access.PERSON_ROLE_TO_MEMBER_ROLE.get(person["role"], "guest")
-        async with self._sessions() as db:
-            token = await access.create_invite(db, person["name"], role, person_id=person_id)
-        await self._send(
-            member.telegram_id,
-            f"Перешли эту ссылку: {person['name']}. Одноразовая, действует 72 часа:\n"
-            f"https://t.me/{self._username}?start={token}",
-        )
-
-    async def _reject_unknown(self, user_id: int) -> None:
-        now = time.monotonic()
-        last = self._unknown_replied.get(user_id)
-        if last is not None and now - last < UNKNOWN_REPLY_INTERVAL_SECONDS:
-            return
-        self._unknown_replied[user_id] = now
-        await self._send(user_id, NOT_INVITED)
-
     def _allow_request(self, user_id: int) -> bool:
         now = time.monotonic()
         times = self._request_times[user_id]
@@ -581,7 +421,7 @@ class LunaBot:
             reply = await self._answer(member.role, user_id, history, text, facts)
             self._history[user_id].append({"role": "user", "content": text})
             self._history[user_id].append({"role": "assistant", "content": reply})
-            if self._memory and member.role in MEMORY_ROLES:
+            if self._memory:
                 await self._memory.save_exchange(user_id, text, reply, HISTORY_MESSAGES)
         await self._send(user_id, reply)
         if self._memory:
@@ -592,7 +432,7 @@ class LunaBot:
     async def _conversation(self, member: AssistantMember) -> list[dict[str, str]]:
         """After a restart the last turns come back from the database once."""
         user_id = member.telegram_id
-        if self._memory and member.role in MEMORY_ROLES and user_id not in self._history_loaded:
+        if self._memory and user_id not in self._history_loaded:
             self._history_loaded.add(user_id)
             try:
                 self._history[user_id].extend(await self._memory.load_history(user_id, HISTORY_MESSAGES))

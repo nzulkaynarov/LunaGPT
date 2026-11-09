@@ -163,9 +163,9 @@ uv run ruff format --check src/ tests/
 Семейный ассистент в Telegram работает на этом хосте как сервис `luna-assistant`. Вход только по приглашениям, первая ссылка создаётся командой:
 
 ```bash
-docker exec luna-assistant python3 -m lunagpt.assistant.invite owner "Имя"
+docker exec luna-assistant python3 -m lunagpt.assistant.add_owner TELEGRAM_ID "Имя"
 ```
 
 Архитектура: [docs/architecture.md](docs/architecture.md). Решения и источники: [docs/research](docs/research/2026-11-luna-assistant-decisions.md).
 
-Семья подключается владельцем кнопкой «Семья» в боте: людей и устройства Luna берёт из HomeSec.
+Остальные просто находят бота, нажимают «Старт» и отправляют контакт. Взрослый выбирает на карточке человека из HomeSec, делает его гостем или отклоняет заявку. Все состояния видны в разделе «Люди».

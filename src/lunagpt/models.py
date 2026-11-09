@@ -102,7 +102,6 @@ class AssistantMember(Base):
     telegram_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     role: Mapped[str] = mapped_column(String(20), nullable=False)  # owner | adult | kid | guest
-    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     usage_day: Mapped[date | None] = mapped_column(Date, nullable=True)
     requests_today: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     homesec_person_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -148,18 +147,19 @@ class AssistantMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
-class AssistantInvite(Base):
-    """A single-use invitation; only the hash of its token is stored."""
+class AssistantApplication(Base):
+    """Somebody who asked to join: waiting for an adult, or turned away."""
 
-    __tablename__ = "assistant_invites"
+    __tablename__ = "assistant_applications"
 
-    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    telegram_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
-    role: Mapped[str] = mapped_column(String(20), nullable=False)
-    invite_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    access_hours: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    homesec_person_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    username: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    phone: Mapped[str | None] = mapped_column(String(32), nullable=True)  # erased once an adult decides
+    status: Mapped[str] = mapped_column(String(20), nullable=False, index=True)  # pending | rejected
+    decided_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class AssistantTimeRequest(Base):
