@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,6 +17,7 @@ DAILY_REQUEST_LIMITS = {"guest": 20}
 PERSON_ROLE_TO_MEMBER_ROLE = {"adult": "adult", "kid": "kid", "guest": "guest"}
 PENDING = "pending"
 REJECTED = "rejected"
+EXPIRED = "expired"
 PENDING_TTL = timedelta(days=30)
 MAX_PENDING_APPLICATIONS = 100
 
@@ -30,20 +31,42 @@ async def get_application(db: AsyncSession, telegram_id: int) -> AssistantApplic
 
 
 async def submit_application(db: AsyncSession, telegram_id: int, name: str, username: str | None, phone: str) -> bool:
-    """Record a new application; False when one exists or the waiting list is full."""
+    """Record a new application; False when one is open or the waiting list is full."""
     pending = await db.scalar(
         select(func.count()).select_from(AssistantApplication).where(AssistantApplication.status == PENDING)
     )
     if (pending or 0) >= MAX_PENDING_APPLICATIONS:
         return False
-    statement = (
-        insert(AssistantApplication)
-        .values(telegram_id=telegram_id, name=name[:100], username=username, phone=phone[:32], status=PENDING)
-        .on_conflict_do_nothing(index_elements=["telegram_id"])
-    )
-    result = await db.execute(statement)
+    result = await db.execute(_replace_expired(telegram_id, name, username, phone, PENDING))
     await db.commit()
     return bool(result.rowcount)  # type: ignore[attr-defined]
+
+
+def _replace_expired(telegram_id: int, name: str, username: str | None, phone: str, status: str) -> Any:
+    """Insert an application; only one that nobody ever answered may be overwritten."""
+    values = {"name": name[:100], "username": username, "phone": phone[:32], "status": status}
+    statement = insert(AssistantApplication).values(telegram_id=telegram_id, **values)
+    return statement.on_conflict_do_update(
+        index_elements=["telegram_id"],
+        set_={**values, "created_at": func.now()},
+        where=AssistantApplication.status == EXPIRED,
+    )
+
+
+async def refuse_rejected_number(
+    db: AsyncSession, telegram_id: int, name: str, username: str | None, phone: str
+) -> bool:
+    """A rejected number stays rejected under a new account, and that account joins the rejected list."""
+    rejected = await db.scalar(
+        select(AssistantApplication.telegram_id)
+        .where(AssistantApplication.phone == phone, AssistantApplication.status == REJECTED)
+        .limit(1)
+    )
+    if rejected is None:
+        return False
+    await db.execute(_replace_expired(telegram_id, name, username, phone, REJECTED))
+    await db.commit()
+    return True
 
 
 async def lock_pending(db: AsyncSession, telegram_id: int) -> AssistantApplication | None:
@@ -59,11 +82,16 @@ async def lock_pending(db: AsyncSession, telegram_id: int) -> AssistantApplicati
 async def admit(
     db: AsyncSession, application: AssistantApplication, name: str, role: str, person_id: int | None
 ) -> AssistantMember:
-    """Turn a locked application into membership; the phone number goes with the application."""
+    """Turn a locked application into membership; the phone number moves with the person."""
     if role not in ROLES:
         raise ValueError(f"Unknown role: {role}")
     member = AssistantMember(
-        telegram_id=application.telegram_id, name=name[:100], role=role, requests_today=0, homesec_person_id=person_id
+        telegram_id=application.telegram_id,
+        name=name[:100],
+        role=role,
+        phone=application.phone,
+        requests_today=0,
+        homesec_person_id=person_id,
     )
     db.add(member)
     await db.delete(application)
@@ -73,18 +101,25 @@ async def admit(
 
 async def reject(db: AsyncSession, application: AssistantApplication, decided_by: int) -> None:
     application.status = REJECTED
-    application.phone = None
     application.decided_by = decided_by
     application.decided_at = datetime.now(UTC)
     await db.commit()
 
 
 async def reopen(db: AsyncSession, telegram_id: int) -> AssistantApplication | None:
-    """Give a rejected person another chance; only an adult's button leads here."""
+    """Give a person another chance; the number is forgiven on every account it was refused under."""
     application = await db.get(AssistantApplication, telegram_id, with_for_update=True)
-    if application is None or application.status != REJECTED:
+    if application is None or application.status not in (REJECTED, EXPIRED):
         await db.rollback()
         return None
+    if application.phone is not None:
+        await db.execute(
+            delete(AssistantApplication).where(
+                AssistantApplication.phone == application.phone,
+                AssistantApplication.status == REJECTED,
+                AssistantApplication.telegram_id != telegram_id,
+            )
+        )
     application.status = PENDING
     application.decided_by = None
     application.decided_at = None
@@ -99,6 +134,7 @@ async def exclude(db: AsyncSession, member: AssistantMember, decided_by: int) ->
         AssistantApplication(
             telegram_id=member.telegram_id,
             name=member.name,
+            phone=member.phone,
             status=REJECTED,
             decided_by=decided_by,
             decided_at=datetime.now(UTC),
@@ -117,10 +153,26 @@ async def list_applications(db: AsyncSession, status: str) -> Sequence[Assistant
     return (await db.scalars(statement)).all()
 
 
+async def find_by_phone(
+    db: AsyncSession, phone: str
+) -> tuple[Sequence[AssistantMember], Sequence[AssistantApplication]]:
+    members = await db.scalars(select(AssistantMember).where(AssistantMember.phone == phone))
+    applications = await db.scalars(
+        select(AssistantApplication)
+        .where(AssistantApplication.phone == phone)
+        .order_by(AssistantApplication.created_at.desc())
+    )
+    return members.all(), applications.all()
+
+
 async def expire_applications(db: AsyncSession) -> int:
-    """Nobody decided within the window, so the request and its phone number are dropped."""
-    statement = delete(AssistantApplication).where(
-        AssistantApplication.status == PENDING, AssistantApplication.created_at < datetime.now(UTC) - PENDING_TTL
+    """Nobody decided within the window: the request closes, the person may apply again, the number stays."""
+    statement = (
+        update(AssistantApplication)
+        .where(
+            AssistantApplication.status == PENDING, AssistantApplication.created_at < datetime.now(UTC) - PENDING_TTL
+        )
+        .values(status=EXPIRED)
     )
     result = await db.execute(statement)
     await db.commit()

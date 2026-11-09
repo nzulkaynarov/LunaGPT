@@ -11,6 +11,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import (
     CallbackQuery,
+    ForceReply,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -20,7 +21,7 @@ from aiogram.types import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from lunagpt.assistant import access
+from lunagpt.assistant import access, phones
 from lunagpt.assistant.pi_client import PiClient, PiConflictError, PiNotFoundError, PiUnavailableError
 from lunagpt.models import AssistantApplication, AssistantMember
 
@@ -29,14 +30,14 @@ logger = logging.getLogger("lunagpt.assistant.people")
 WelcomeFn = Callable[[int, str, str], Awaitable[None]]
 View = tuple[str, InlineKeyboardMarkup | None]
 
-PEOPLE_PREFIXES = frozenset({"app", "apf", "apg", "apr", "pl", "pls", "pc", "pgf", "pgp", "px", "pxy", "prb"})
+PEOPLE_PREFIXES = frozenset({"app", "apf", "apg", "apr", "pl", "pls", "pc", "pgf", "pgp", "px", "pxy", "prb", "pf"})
 REPLY_INTERVAL_SECONDS = 3600
 NOTIFICATIONS_PER_HOUR = 10
 MAX_LISTED = 30
 BTN_SHARE_CONTACT = "📱 Отправить мой контакт"
 ASK_CONTACT = (
     "Привет! Я Luna, семейный ИИ-ассистент. Чтобы получить доступ, отправь свой контакт кнопкой ниже. "
-    "Заявку рассмотрит взрослый из семьи."
+    "Заявку рассмотрит взрослый из семьи. Номер сохранится, его видят только взрослые семьи."
 )
 NOT_YOUR_CONTACT = "Нужен твой собственный контакт. Нажми кнопку ниже."
 APPLIED = "Заявка отправлена. Напишу, когда взрослый примет решение."
@@ -48,6 +49,9 @@ ALREADY_DECIDED = "По этой заявке уже приняли решени
 NETWORK_DOWN = "Домашняя сеть не отвечает, семью выбрать пока нельзя."
 ROLE_LABELS = {"owner": "глава семьи", "adult": "взрослый", "kid": "ребёнок", "guest": "гость"}
 SECTION_TITLES = {"f": "Семья", "g": "Гости", "p": "В ожидании", "r": "Отказано"}
+APPLICATION_LABELS = {"pending": "в ожидании", "rejected": "отказано", "expired": "не рассмотрена"}
+SEARCH_PROMPT = "Пришли номер телефона или контакт человека ответом на это сообщение."
+NOT_A_NUMBER = "Не похоже на номер телефона."
 INVITE_TEXT = "Присоединяйся к Luna: нажми «Старт» и отправь свой контакт."
 
 
@@ -104,7 +108,7 @@ class PeopleDesk:
         user_id = message.from_user.id
         async with self._sessions() as db:
             application = await access.get_application(db, user_id)
-        if application is not None:
+        if application is not None and application.status != access.EXPIRED:
             await self._reply_rarely(user_id, CLOSED if application.status == access.REJECTED else STILL_WAITING)
             return
         contact = message.contact
@@ -117,8 +121,12 @@ class PeopleDesk:
             return
         name = message.from_user.full_name or contact.first_name
         username = message.from_user.username
+        phone = phones.from_telegram(contact.phone_number)
         async with self._sessions() as db:
-            created = await access.submit_application(db, user_id, name, username, contact.phone_number)
+            if await access.refuse_rejected_number(db, user_id, name, username, phone):
+                await self._bot.send_message(user_id, TURNED_DOWN, reply_markup=ReplyKeyboardRemove())
+                return
+            created = await access.submit_application(db, user_id, name, username, phone)
         await self._bot.send_message(user_id, APPLIED if created else FULL, reply_markup=ReplyKeyboardRemove())
         if created:
             await self._notify_adults(user_id)
@@ -327,6 +335,7 @@ class PeopleDesk:
             "r": len(rejected),
         }
         rows = [[_button(f"{title}: {counts[key]}", f"pls:{key}")] for key, title in SECTION_TITLES.items()]
+        rows.append([_button("🔎 Найти по номеру", "pf")])
         return "👥 Люди", InlineKeyboardMarkup(inline_keyboard=rows)
 
     async def _section(self, key: str) -> View:
@@ -344,7 +353,7 @@ class PeopleDesk:
             entries = [(m.name, f"pc:{m.telegram_id}") for m in members if m.role == "guest"]
         else:
             action = "app" if key == "p" else "prb"
-            entries = [(a.name, f"{action}:{a.telegram_id}") for a in applications]
+            entries = [(f"{a.name} · {a.phone or 'без номера'}", f"{action}:{a.telegram_id}") for a in applications]
         rows = [[_button(label, data)] for label, data in entries[:MAX_LISTED]]
         rows.append([_button("← Назад", "pl")])
         title = SECTION_TITLES[key]
@@ -372,7 +381,8 @@ class PeopleDesk:
             rows.append([_button("⛔ Снять доступ", f"px:{telegram_id}", "danger")])
         section = "g" if member.role == "guest" else "f"
         rows.append([_button("← Назад", f"pls:{section}")])
-        return f"{member.name}\nСтатус: {ROLE_LABELS[member.role]}", InlineKeyboardMarkup(inline_keyboard=rows)
+        phone = f"\nТелефон: {member.phone}" if member.phone else ""
+        return f"{member.name}\nСтатус: {ROLE_LABELS[member.role]}{phone}", InlineKeyboardMarkup(inline_keyboard=rows)
 
     async def _family_choice(self, telegram_id: int) -> View:
         try:
@@ -391,6 +401,42 @@ class PeopleDesk:
             ]
         )
         return "Снять доступ? Память этого человека будет удалена, новую заявку он подать не сможет.", markup
+
+    # ---- search by number ----
+
+    @staticmethod
+    def is_search_reply(message: Message) -> bool:
+        """Only the bot can author the prompt, so a reply to it is a search and never a chat turn."""
+        reply = message.reply_to_message
+        return bool(reply and reply.from_user and reply.from_user.is_bot and SEARCH_PROMPT in (reply.text or ""))
+
+    async def _ask_number(self, chat_id: int, prefix: str = "") -> None:
+        markup = ForceReply(input_field_placeholder="+998 90 123 45 67")
+        await self._bot.send_message(chat_id, f"{prefix}{SEARCH_PROMPT}", reply_markup=markup)
+
+    async def search(self, chat_id: int, message: Message) -> None:
+        phone = phones.from_telegram(message.contact.phone_number) if message.contact else None
+        phone = phone or phones.from_adult(message.text or "")
+        if phone is None:
+            await self._ask_number(chat_id, f"{NOT_A_NUMBER}\n")
+            return
+        text, markup = await self._search_result(phone)
+        await self._bot.send_message(chat_id, text, reply_markup=markup)
+
+    async def _search_result(self, phone: str) -> View:
+        async with self._sessions() as db:
+            members, applications = await access.find_by_phone(db, phone)
+        rows = [[_button(f"{m.name} · {ROLE_LABELS[m.role]}", f"pc:{m.telegram_id}")] for m in members]
+        for application in applications[:MAX_LISTED]:
+            username = f" @{application.username}" if application.username else ""
+            label = f"{application.name}{username} · {APPLICATION_LABELS[application.status]}"
+            action = "app" if application.status == access.PENDING else "prb"
+            rows.append([_button(label, f"{action}:{application.telegram_id}")])
+        rows.append([_button("🔎 Искать ещё", "pf"), _button("← К людям", "pl")])
+        if len(rows) == 1:
+            return f"С номером {phone} никого нет.", InlineKeyboardMarkup(inline_keyboard=rows)
+        hint = "Нажми на человека: откроется карточка, а заявка с отказом вернётся на решение."
+        return f"📞 {phone}\n{hint}", InlineKeyboardMarkup(inline_keyboard=rows)
 
     async def send_summary(self, chat_id: int) -> None:
         text, markup = await self._summary()
@@ -412,6 +458,8 @@ class PeopleDesk:
         """Every action here is open to adults only; LunaBot checks that before calling."""
         if prefix == "pl":
             await self._edit(callback, *await self._summary())
+        elif prefix == "pf":
+            await self._ask_number(actor.telegram_id)
         elif prefix == "pls":
             await self._edit(callback, *await self._section(args[0]))
         elif prefix == "pc":

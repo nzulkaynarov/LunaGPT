@@ -190,6 +190,9 @@ class LunaBot:
         if member is None:
             await self._people.on_stranger(message)
             return
+        if member.role in access.ADULT_ROLES and self._people.is_search_reply(message):
+            await self._people.search(user_id, message)
+            return
         if not text:
             await self._send(user_id, TEXT_ONLY)
             return

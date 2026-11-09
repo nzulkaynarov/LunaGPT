@@ -102,6 +102,7 @@ class AssistantMember(Base):
     telegram_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     role: Mapped[str] = mapped_column(String(20), nullable=False)  # owner | adult | kid | guest
+    phone: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)  # E.164, adults only
     usage_day: Mapped[date | None] = mapped_column(Date, nullable=True)
     requests_today: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     homesec_person_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -148,15 +149,15 @@ class AssistantMessage(Base):
 
 
 class AssistantApplication(Base):
-    """Somebody who asked to join: waiting for an adult, or turned away."""
+    """Somebody who asked to join: waiting, turned away, or never answered."""
 
     __tablename__ = "assistant_applications"
 
     telegram_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     username: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    phone: Mapped[str | None] = mapped_column(String(32), nullable=True)  # erased once an adult decides
-    status: Mapped[str] = mapped_column(String(20), nullable=False, index=True)  # pending | rejected
+    phone: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)  # E.164, kept for good
+    status: Mapped[str] = mapped_column(String(20), nullable=False, index=True)  # pending | rejected | expired
     decided_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

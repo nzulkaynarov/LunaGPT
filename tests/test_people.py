@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
-from aiogram.types import Message, ReplyKeyboardRemove
+from aiogram.types import ForceReply, InlineKeyboardMarkup, Message, ReplyKeyboardRemove
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -46,11 +46,16 @@ def desk(sessions: Any) -> PeopleDesk:
     return PeopleDesk(telegram, sessions, pi, "lunabot", AsyncMock())
 
 
-def _message(user_id: int = NEW, text: str = "/start", contact_user: int | None = None) -> MagicMock:
+PHONE = "+998901234567"
+
+
+def _message(
+    user_id: int = NEW, text: str = "/start", contact_user: int | None = None, phone: str = PHONE
+) -> MagicMock:
     message = MagicMock(spec=Message, text=text)
     message.from_user = MagicMock(id=user_id, full_name="Новый", username="newbie")
     message.contact = (
-        None if contact_user is None else MagicMock(user_id=contact_user, phone_number="+998901", first_name="Н")
+        None if contact_user is None else MagicMock(user_id=contact_user, phone_number=phone, first_name="Н")
     )
     return message
 
@@ -116,7 +121,7 @@ async def test_someone_elses_contact_is_refused(desk: Any, sessions: Any) -> Non
 async def test_contact_creates_one_application_and_tells_every_adult(desk: Any, sessions: Any) -> None:
     await _apply(desk)
     application = await _application(sessions)
-    assert application is not None and application.status == "pending" and application.phone == "+998901"
+    assert application is not None and application.status == "pending" and application.phone == PHONE
     assert set(_sent_to(desk)) == {NEW, OWNER, ADULT}
     text = next(c.args[1] for c in desk._bot.send_message.await_args_list if c.args[0] == OWNER)
     assert "Новый" in text and "@newbie" in text and "+998901" in text
@@ -163,7 +168,7 @@ async def test_person_already_linked_in_luna_is_not_offered(desk: Any, sessions:
 
 
 @pytest.mark.asyncio
-async def test_family_choice_takes_role_from_pi_and_erases_phone(desk: Any, sessions: Any) -> None:
+async def test_family_choice_takes_role_from_pi_and_keeps_phone(desk: Any, sessions: Any) -> None:
     await _apply(desk)
     callback = await _press_as(desk, f"apf:{NEW}:4", _actor("adult", ADULT))
     member = await _member(sessions)
@@ -205,11 +210,11 @@ async def test_two_adults_cannot_both_decide(desk: Any, sessions: Any) -> None:
 
 
 @pytest.mark.asyncio
-async def test_rejection_erases_phone_and_tells_the_person(desk: Any, sessions: Any) -> None:
+async def test_rejection_keeps_phone_and_tells_the_person(desk: Any, sessions: Any) -> None:
     await _apply(desk)
     await _press_as(desk, f"apr:{NEW}")
     application = await _application(sessions)
-    assert application is not None and application.status == "rejected" and application.phone is None
+    assert application is not None and application.status == "rejected" and application.phone == PHONE
     assert desk._bot.send_message.await_args.args[:2] == (NEW, people.TURNED_DOWN)
 
 
@@ -298,18 +303,22 @@ async def test_summary_counts_every_state(desk: Any, sessions: Any) -> None:
     text, markup = await desk._summary()
     labels = [row[0].text for row in markup.inline_keyboard]
     assert text == "👥 Люди"
-    assert labels == ["Семья: 2", "Гости: 1", "В ожидании: 1", "Отказано: 1"]
+    assert labels == ["Семья: 2", "Гости: 1", "В ожидании: 1", "Отказано: 1", "🔎 Найти по номеру"]
 
 
 @pytest.mark.asyncio
-async def test_old_pending_applications_expire_with_their_phone(desk: Any, sessions: Any) -> None:
+async def test_old_application_expires_keeps_phone_and_person_may_reapply(desk: Any, sessions: Any) -> None:
     await _apply(desk)
     async with sessions() as db:
         application = await db.get(AssistantApplication, NEW)
         application.created_at = datetime.now(UTC) - timedelta(days=31)
         await db.commit()
         assert await access.expire_applications(db) == 1
-    assert await _application(sessions) is None
+    application = await _application(sessions)
+    assert application is not None and application.status == "expired" and application.phone == PHONE
+    await desk.on_stranger(_message(contact_user=NEW))
+    application = await _application(sessions)
+    assert application is not None and application.status == "pending"
 
 
 @pytest.mark.asyncio
@@ -351,3 +360,133 @@ async def test_invite_shares_only_the_bot_link(desk: Any) -> None:
 def test_callback_data_fits_telegram_limit() -> None:
     longest = f"apf:{10**15}:{10**9}"
     assert len(longest.encode()) <= 64
+
+
+OTHER_ACCOUNT = 501
+
+
+async def _reject_and_retry_from_new_account(desk: Any, phone: str = "998901234567") -> None:
+    await _apply(desk)
+    await _press_as(desk, f"apr:{NEW}")
+    desk._bot.send_message.reset_mock()
+    await desk.on_stranger(_message(OTHER_ACCOUNT, contact_user=OTHER_ACCOUNT, phone=phone))
+
+
+def _search_message(text: str = "", phone: str | None = None) -> MagicMock:
+    message = MagicMock(spec=Message, text=text)
+    message.contact = None if phone is None else MagicMock(phone_number=phone)
+    return message
+
+
+async def _search(desk: Any, text: str = "", phone: str | None = None) -> tuple[str, list[str], list[str]]:
+    desk._bot.send_message.reset_mock()
+    await desk.search(OWNER, _search_message(text, phone))
+    call = desk._bot.send_message.await_args
+    buttons = [b for row in call.kwargs["reply_markup"].inline_keyboard for b in row] if _is_inline(call) else []
+    return call.args[1], [b.text for b in buttons], [b.callback_data for b in buttons]
+
+
+def _is_inline(call: Any) -> bool:
+    return isinstance(call.kwargs["reply_markup"], InlineKeyboardMarkup)
+
+
+@pytest.mark.asyncio
+async def test_new_account_with_rejected_number_stays_out_and_notifies_nobody(desk: Any, sessions: Any) -> None:
+    await _reject_and_retry_from_new_account(desk)
+    application = await _application(sessions, OTHER_ACCOUNT)
+    assert application is not None and application.status == "rejected" and application.phone == PHONE
+    desk._bot.send_message.assert_awaited_once()
+    assert desk._bot.send_message.await_args.args[:2] == (OTHER_ACCOUNT, people.TURNED_DOWN)
+
+
+@pytest.mark.asyncio
+async def test_removed_member_keeps_number_and_new_account_is_refused(desk: Any, sessions: Any) -> None:
+    await _apply(desk)
+    await _press_as(desk, f"apg:{NEW}")
+    member = await _member(sessions)
+    assert member is not None and member.phone == PHONE
+    await _press_as(desk, f"pxy:{NEW}")
+    application = await _application(sessions)
+    assert application is not None and application.status == "rejected" and application.phone == PHONE
+    await desk.on_stranger(_message(OTHER_ACCOUNT, contact_user=OTHER_ACCOUNT))
+    refused = await _application(sessions, OTHER_ACCOUNT)
+    assert refused is not None and refused.status == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_member_card_shows_phone(desk: Any) -> None:
+    await _apply(desk)
+    await _press_as(desk, f"apg:{NEW}")
+    assert PHONE in _shown(await _press_as(desk, f"pc:{NEW}"))[0]
+
+
+@pytest.mark.asyncio
+async def test_search_finds_every_account_of_a_rejected_number(desk: Any) -> None:
+    await _reject_and_retry_from_new_account(desk)
+    text, labels, actions = await _search(desk, "90 123 45 67")
+    assert PHONE in text
+    assert f"prb:{NEW}" in actions and f"prb:{OTHER_ACCOUNT}" in actions
+    assert any("отказано" in label for label in labels)
+
+
+@pytest.mark.asyncio
+async def test_search_accepts_a_shared_contact_and_finds_members(desk: Any) -> None:
+    await _apply(desk)
+    await _press_as(desk, f"apg:{NEW}")
+    _, _, actions = await _search(desk, phone="998901234567")
+    assert f"pc:{NEW}" in actions
+
+
+@pytest.mark.asyncio
+async def test_search_reports_an_unknown_number(desk: Any) -> None:
+    text, _, actions = await _search(desk, "+998 91 000 00 00")
+    assert "никого нет" in text and actions == ["pf", "pl"]
+
+
+@pytest.mark.asyncio
+async def test_search_asks_again_when_text_is_not_a_number(desk: Any) -> None:
+    desk._bot.send_message.reset_mock()
+    await desk.search(OWNER, _search_message("Миша"))
+    call = desk._bot.send_message.await_args
+    assert people.NOT_A_NUMBER in call.args[1] and isinstance(call.kwargs["reply_markup"], ForceReply)
+
+
+@pytest.mark.asyncio
+async def test_returning_a_number_forgives_it_on_every_account(desk: Any, sessions: Any) -> None:
+    await _reject_and_retry_from_new_account(desk)
+    await _press_as(desk, f"prb:{OTHER_ACCOUNT}")
+    await _press_as(desk, f"apg:{OTHER_ACCOUNT}")
+    member = await _member(sessions, OTHER_ACCOUNT)
+    assert member is not None and member.role == "guest" and member.phone == PHONE
+    assert await _application(sessions) is None
+
+
+@pytest.mark.asyncio
+async def test_expired_application_can_be_returned_from_search(desk: Any, sessions: Any) -> None:
+    await _apply(desk)
+    async with sessions() as db:
+        application = await db.get(AssistantApplication, NEW)
+        application.created_at = datetime.now(UTC) - timedelta(days=31)
+        await db.commit()
+        await access.expire_applications(db)
+    _, labels, actions = await _search(desk, PHONE)
+    assert f"prb:{NEW}" in actions and any("не рассмотрена" in label for label in labels)
+    await _press_as(desk, f"prb:{NEW}")
+    application = await _application(sessions)
+    assert application is not None and application.status == "pending"
+
+
+def test_only_a_reply_to_the_bot_prompt_is_a_search() -> None:
+    reply = MagicMock(text=people.SEARCH_PROMPT, from_user=MagicMock(is_bot=True))
+    assert PeopleDesk.is_search_reply(MagicMock(spec=Message, reply_to_message=reply))
+    assert not PeopleDesk.is_search_reply(MagicMock(spec=Message, reply_to_message=None))
+    forged = MagicMock(text=people.SEARCH_PROMPT, from_user=MagicMock(is_bot=False))
+    assert not PeopleDesk.is_search_reply(MagicMock(spec=Message, reply_to_message=forged))
+
+
+@pytest.mark.asyncio
+async def test_search_button_opens_a_forced_reply(desk: Any) -> None:
+    desk._bot.send_message.reset_mock()
+    await _press_as(desk, "pf")
+    call = desk._bot.send_message.await_args
+    assert call.args == (OWNER, people.SEARCH_PROMPT) and isinstance(call.kwargs["reply_markup"], ForceReply)
