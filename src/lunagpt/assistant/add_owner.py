@@ -9,7 +9,7 @@ from lunagpt.models import AssistantMember
 
 async def main(telegram_id: int, name: str) -> None:
     async with async_session_factory() as db:
-        db.add(AssistantMember(telegram_id=telegram_id, name=name, role="owner", requests_today=0))
+        db.add(AssistantMember(telegram_id=telegram_id, name=name, role="owner"))
         await db.commit()
 
 

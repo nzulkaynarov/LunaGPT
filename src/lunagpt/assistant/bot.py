@@ -23,7 +23,7 @@ from aiogram.types import (
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import access
-from lunagpt.assistant.llm import QuizQuestion
+from lunagpt.assistant.llm import QuizQuestion, ReplyOptions
 from lunagpt.assistant.memories import Memory
 from lunagpt.assistant.people import PEOPLE_PREFIXES, PeopleDesk
 from lunagpt.assistant.pi_client import PiClient, PiConflictError, PiNotFoundError, PiUnavailableError
@@ -33,8 +33,8 @@ from lunagpt.models import AssistantMember
 
 logger = logging.getLogger("lunagpt.assistant.bot")
 
-AnswerFn = Callable[[str, int, list[dict[str, str]], str, list[str]], Awaitable[str]]
-QuizFn = Callable[[int], Awaitable[QuizQuestion | None]]
+AnswerFn = Callable[[str, int, list[dict[str, str]], str, list[str], ReplyOptions], Awaitable[str]]
+QuizFn = Callable[[int, int | None], Awaitable[QuizQuestion | None]]
 
 BTN_MY_TIME = "⏳ Моё время"
 BTN_ASK_TIME = "🙏 Попросить время"
@@ -64,7 +64,7 @@ NO_DEVICE = "Я не нашла твоё устройство в домашне�
 HISTORY_MESSAGES = 8
 RATE_LIMIT = 10
 RATE_WINDOW_SECONDS = 60
-LIMIT_REACHED = "На сегодня лимит запросов закончился. Приходи завтра 🌙"
+ACCESS_ENDED = "Срок доступа закончился. Попроси взрослого из семьи его продлить."
 TOO_FAST = "Слишком много сообщений подряд. Подожди минуту 🙂"
 TEXT_ONLY = "Пока я понимаю только текст."
 MEMORY_NOTICE = (
@@ -384,7 +384,7 @@ class LunaBot:
         if not available:
             await self._send(user_id, "Сегодня викторина уже пройдена. Приходи завтра!")
             return
-        quiz = self._quizzes.get(user_id) or await self._make_quiz(user_id)
+        quiz = self._quizzes.get(user_id) or await self._make_quiz(user_id, access.age_of(member, self._today()))
         if quiz is None:
             await self._send(user_id, "Не получилось придумать вопрос, попробуй чуть позже.")
             return
@@ -414,18 +414,30 @@ class LunaBot:
             return
         async with self._sessions() as db:
             current = await access.get_member(db, user_id)
-            if current is None or not await access.consume_daily_request(db, current, self._today()):
-                await self._send(user_id, LIMIT_REACHED)
-                return
+        if current is None:
+            return
+        if access.access_ended(current):
+            await self._send(user_id, ACCESS_ENDED)
+            return
+        today = self._today()
+        costs: list[float] = []
+        options = ReplyOptions(
+            age=access.age_of(current, today),
+            local_only=access.money_limit_reached(current, today),
+            on_cost=costs.append if current.role == "guest" else None,
+        )
         async with self._locks[user_id]:
             await self._bot.send_chat_action(user_id, "typing")
             history = await self._conversation(member)
             facts = await self._memory.recall(user_id, member.role, text) if self._memory else []
-            reply = await self._answer(member.role, user_id, history, text, facts)
+            reply = await self._answer(member.role, user_id, history, text, facts, options)
             self._history[user_id].append({"role": "user", "content": text})
             self._history[user_id].append({"role": "assistant", "content": reply})
             if self._memory:
                 await self._memory.save_exchange(user_id, text, reply, HISTORY_MESSAGES)
+        if any(costs):
+            async with self._sessions() as db:
+                await access.record_spend(db, user_id, sum(costs), today)
         await self._send(user_id, reply)
         if self._memory:
             task = asyncio.create_task(self._memory.remember(user_id, member.role, text))

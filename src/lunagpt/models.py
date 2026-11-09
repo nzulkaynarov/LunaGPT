@@ -2,10 +2,24 @@
 
 import uuid
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import BigInteger, Date, DateTime, Float, ForeignKey, Identity, Index, Integer, String, Text, func
+from sqlalchemy import (
+    BigInteger,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Identity,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -103,8 +117,11 @@ class AssistantMember(Base):
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     role: Mapped[str] = mapped_column(String(20), nullable=False)  # owner | adult | kid | guest
     phone: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)  # E.164, adults only
-    usage_day: Mapped[date | None] = mapped_column(Date, nullable=True)
-    requests_today: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    birth_year: Mapped[int | None] = mapped_column(Integer, nullable=True)  # children: sets the tone of replies
+    access_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # guests only
+    money_limit_usd: Mapped[Decimal | None] = mapped_column(Numeric(8, 2), nullable=True)  # guests, per month
+    spend_month: Mapped[date | None] = mapped_column(Date, nullable=True)
+    spent_usd: Mapped[Decimal] = mapped_column(Numeric(10, 6), server_default="0", default=Decimal(0), nullable=False)
     homesec_person_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 

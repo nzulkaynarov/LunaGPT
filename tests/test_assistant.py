@@ -3,6 +3,8 @@
 import asyncio
 import json
 import uuid
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
@@ -19,7 +21,7 @@ from lunagpt.models import AssistantMember
 
 
 def _member(role: str = "adult", telegram_id: int = 1) -> AssistantMember:
-    return AssistantMember(telegram_id=telegram_id, name="Тест", role=role, requests_today=0)
+    return AssistantMember(telegram_id=telegram_id, name="Тест", role=role)
 
 
 def _message(text: str, user_id: int = 1, chat_type: str = "private") -> Any:
@@ -38,7 +40,6 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> tuple[bot.LunaBot, AsyncMock, As
     session.__aenter__ = AsyncMock(return_value=MagicMock())
     session.__aexit__ = AsyncMock(return_value=None)
     instance = bot.LunaBot(telegram, MagicMock(return_value=session), answer, AsyncMock(), MagicMock(), "lunabot")
-    monkeypatch.setattr(access, "consume_daily_request", AsyncMock(return_value=True))
     return instance, cast(AsyncMock, telegram.send_message), answer
 
 
@@ -209,7 +210,6 @@ async def test_pi_client_maps_shared_choices(choice: str, body: dict[str, Any]) 
 def test_kids_use_the_same_models_as_adults_with_strict_search() -> None:
     assert llm.MODELS_BY_ROLE["kid"] == llm.MODELS_BY_ROLE["adult"]
     assert "kid" in llm.SEARCH_ROLES
-    assert "kid" not in access.DAILY_REQUEST_LIMITS
 
 
 def test_monitor_ignores_short_outage_and_reports_once() -> None:
@@ -571,3 +571,124 @@ async def test_real_dispatcher_turns_a_stranger_into_an_applicant(
     await dispatcher.feed_update(telegram, update)
     on_stranger.assert_awaited_once()
     await telegram.session.close()
+
+
+def test_age_bands_and_their_borders() -> None:
+    assert [llm.age_band(age) for age in (None, 5, 9, 10, 12, 13, 17)] == [
+        "middle",
+        "young",
+        "young",
+        "middle",
+        "middle",
+        "teen",
+        "teen",
+    ]
+
+
+def test_teen_is_spoken_to_as_an_equal_under_the_same_safety_rules() -> None:
+    teen, young = llm.system_prompt("kid", 15), llm.system_prompt("kid", 7)
+    assert "на равных" in teen and "короткими фразами" not in teen
+    assert "короткими фразами" in young and "на равных" not in young
+    assert llm.KID_SAFETY in teen and llm.KID_SAFETY in young and llm.KID_SAFETY in llm.system_prompt("kid", None)
+
+
+def _guest_ready(monkeypatch: pytest.MonkeyPatch, **values: Any) -> AssistantMember:
+    member = AssistantMember(telegram_id=1, name="Гость", role="guest", **values)
+    _as_member(monkeypatch, member)
+    return member
+
+
+@pytest.mark.asyncio
+async def test_guest_has_no_daily_request_limit(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, _, answer = harness
+    _guest_ready(monkeypatch)
+    for number in range(25):
+        instance._request_times[1].clear()
+        await instance.on_message(_message(f"вопрос {number}"))
+    assert answer.await_count == 25
+
+
+@pytest.mark.asyncio
+async def test_guest_whose_time_ended_is_told_and_costs_nothing(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, send, answer = harness
+    _guest_ready(monkeypatch, access_until=datetime.now(UTC) - timedelta(minutes=1))
+    await instance.on_message(_message("вопрос"))
+    answer.assert_not_awaited()
+    assert _sent(send) == bot.ACCESS_ENDED
+
+
+@pytest.mark.asyncio
+async def test_guest_over_money_limit_stays_on_the_free_model(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, _, answer = harness
+    month = instance._today().replace(day=1)
+    _guest_ready(monkeypatch, money_limit_usd=Decimal(1), spent_usd=Decimal("1.5"), spend_month=month)
+    await instance.on_message(_message("вопрос"))
+    assert answer.await_args.args[5].local_only is True
+
+
+@pytest.mark.asyncio
+async def test_guest_spending_is_recorded(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, _, answer = harness
+    _guest_ready(monkeypatch)
+    record = AsyncMock()
+    monkeypatch.setattr(access, "record_spend", record)
+
+    async def priced(*args: Any) -> str:
+        args[5].on_cost(0.25)
+        args[5].on_cost(0.5)
+        return "ответ"
+
+    answer.side_effect = priced
+    await instance.on_message(_message("вопрос"))
+    assert record.await_args.args[1:3] == (1, 0.75)
+
+
+@pytest.mark.asyncio
+async def test_family_spending_is_not_metered_and_child_age_reaches_the_model(
+    harness: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance, _, answer = harness
+    kid = _member("kid")
+    kid.birth_year = instance._today().year - 14
+    _as_member(monkeypatch, kid)
+    await instance.on_message(_message("вопрос"))
+    options = answer.await_args.args[5]
+    assert options.age == 14 and options.on_cost is None and options.local_only is False
+
+
+@pytest.mark.asyncio
+async def test_local_only_never_reaches_a_paid_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    payloads: list[dict[str, Any]] = []
+
+    async def fake_chat(client: Any, payload: dict[str, Any], on_cost: Any = None) -> dict[str, Any]:
+        payloads.append(payload)
+        raise httpx.ConnectError("local model is down")
+
+    monkeypatch.setattr(llm, "_chat", fake_chat)
+    await llm.generate_reply("guest", 1, [], "вопрос", options=llm.ReplyOptions(local_only=True))
+    assert [p["model"] for p in payloads] == ["luna-local"] and payloads[0]["disable_fallbacks"] is True
+
+
+@pytest.mark.asyncio
+async def test_cost_comes_from_the_gateway_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = {"choices": [{"message": {"content": "ок"}}]}
+        return httpx.Response(200, json=body, headers={"x-litellm-response-cost": "0.002"})
+
+    costs: list[float] = []
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await llm._chat(client, {"model": "luna-fast"}, costs.append)
+    assert costs == [0.002]
+
+
+@pytest.mark.asyncio
+async def test_quiz_level_follows_age(monkeypatch: pytest.MonkeyPatch) -> None:
+    payloads: list[dict[str, Any]] = []
+
+    async def fake_chat(client: Any, payload: dict[str, Any]) -> dict[str, Any]:
+        payloads.append(payload)
+        return {"content": '{"q": "Вопрос?", "options": ["a", "b", "c", "d"], "correct": 0}'}
+
+    monkeypatch.setattr(llm, "_chat", fake_chat)
+    await llm.generate_quiz(1, 16)
+    assert "старшеклассника" in payloads[0]["messages"][0]["content"]

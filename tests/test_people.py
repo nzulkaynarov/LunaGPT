@@ -1,7 +1,8 @@
 """The single way in and the adults' decisions, against a real database."""
 
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -30,8 +31,8 @@ async def sessions(db_sessions: async_sessionmaker[AsyncSession]) -> async_sessi
     async with db_sessions() as db:
         db.add_all(
             [
-                AssistantMember(telegram_id=OWNER, name="Глава", role="owner", requests_today=0),
-                AssistantMember(telegram_id=ADULT, name="Аня", role="adult", requests_today=0),
+                AssistantMember(telegram_id=OWNER, name="Глава", role="owner"),
+                AssistantMember(telegram_id=ADULT, name="Аня", role="adult"),
             ]
         )
         await db.commit()
@@ -162,7 +163,7 @@ async def test_card_offers_only_free_family_people(desk: Any, sessions: Any) -> 
 @pytest.mark.asyncio
 async def test_person_already_linked_in_luna_is_not_offered(desk: Any, sessions: Any) -> None:
     async with sessions() as db:
-        db.add(AssistantMember(telegram_id=9, name="Марат", role="adult", requests_today=0, homesec_person_id=3))
+        db.add(AssistantMember(telegram_id=9, name="Марат", role="adult", homesec_person_id=3))
         await db.commit()
     assert [p["id"] for p in await desk._free_people(NEW)] == [4]
 
@@ -267,7 +268,7 @@ async def test_adult_can_remove_guest_who_then_cannot_reapply(desk: Any, session
 @pytest.mark.asyncio
 async def test_adult_cannot_remove_family(desk: Any, sessions: Any) -> None:
     async with sessions() as db:
-        db.add(AssistantMember(telegram_id=NEW, name="Миша", role="kid", requests_today=0))
+        db.add(AssistantMember(telegram_id=NEW, name="Миша", role="kid"))
         await db.commit()
     await _press_as(desk, f"pxy:{NEW}", _actor("adult", ADULT))
     assert await _member(sessions) is not None
@@ -298,7 +299,7 @@ async def test_summary_counts_every_state(desk: Any, sessions: Any) -> None:
     await _apply(desk, 501)
     await _press_as(desk, "apr:501")
     async with sessions() as db:
-        db.add(AssistantMember(telegram_id=600, name="Гость", role="guest", requests_today=0))
+        db.add(AssistantMember(telegram_id=600, name="Гость", role="guest"))
         await db.commit()
     text, markup = await desk._summary()
     labels = [row[0].text for row in markup.inline_keyboard]
@@ -490,3 +491,98 @@ async def test_search_button_opens_a_forced_reply(desk: Any) -> None:
     await _press_as(desk, "pf")
     call = desk._bot.send_message.await_args
     assert call.args == (OWNER, people.SEARCH_PROMPT) and isinstance(call.kwargs["reply_markup"], ForceReply)
+
+
+async def _guest(desk: Any) -> None:
+    await _apply(desk)
+    await _press_as(desk, f"apg:{NEW}")
+
+
+@pytest.mark.asyncio
+async def test_guest_card_offers_limits_and_shows_none_by_default(desk: Any) -> None:
+    await _guest(desk)
+    text, labels = _shown(await _press_as(desk, f"pc:{NEW}"))
+    assert "без срока" in text and "без лимита" in text
+    assert f"pt:{NEW}" in labels and f"pm:{NEW}" in labels
+
+
+@pytest.mark.asyncio
+async def test_access_period_can_be_set_and_removed(desk: Any, sessions: Any) -> None:
+    await _guest(desk)
+    await _press_as(desk, f"pty:{NEW}:7")
+    member = await _member(sessions)
+    assert member is not None and member.access_until is not None
+    assert timedelta(days=6) < member.access_until - datetime.now(UTC) <= timedelta(days=7)
+    assert not access.access_ended(member)
+    await _press_as(desk, f"pty:{NEW}:0")
+    member = await _member(sessions)
+    assert member is not None and member.access_until is None
+
+
+@pytest.mark.asyncio
+async def test_money_limit_counts_one_calendar_month(desk: Any, sessions: Any) -> None:
+    await _guest(desk)
+    await _press_as(desk, f"pmy:{NEW}:1")
+    today = date(2026, 11, 20)
+    async with sessions() as db:
+        await access.record_spend(db, NEW, 0.6, today)
+        await access.record_spend(db, NEW, 0.5, today)
+    member = await _member(sessions)
+    assert member is not None and member.money_limit_usd == Decimal(1)
+    assert access.spent_this_month(member, today) == Decimal("1.1") and access.money_limit_reached(member, today)
+    december = date(2026, 12, 1)
+    assert access.spent_this_month(member, december) == 0 and not access.money_limit_reached(member, december)
+    async with sessions() as db:
+        await access.record_spend(db, NEW, 0.2, december)
+    member = await _member(sessions)
+    assert member is not None and access.spent_this_month(member, december) == Decimal("0.2")
+
+
+@pytest.mark.asyncio
+async def test_guest_settings_do_not_touch_family(desk: Any, sessions: Any) -> None:
+    await _apply(desk)
+    await _press_as(desk, f"apf:{NEW}:4")
+    await _press_as(desk, f"pty:{NEW}:1")
+    await _press_as(desk, f"pmy:{NEW}:1")
+    member = await _member(sessions)
+    assert member is not None and member.access_until is None and member.money_limit_usd is None
+
+
+@pytest.mark.asyncio
+async def test_moving_guest_to_family_clears_limits(desk: Any, sessions: Any) -> None:
+    await _guest(desk)
+    await _press_as(desk, f"pty:{NEW}:1")
+    await _press_as(desk, f"pmy:{NEW}:1")
+    await _press_as(desk, f"pgp:{NEW}:3")
+    member = await _member(sessions)
+    assert member is not None and member.role == "adult"
+    assert member.access_until is None and member.money_limit_usd is None
+
+
+@pytest.mark.asyncio
+async def test_admitting_a_child_asks_the_adult_for_age(desk: Any, sessions: Any) -> None:
+    await _apply(desk)
+    desk._bot.send_message.reset_mock()
+    await _press_as(desk, f"apf:{NEW}:4", _actor("adult", ADULT))
+    call = desk._bot.send_message.await_args
+    assert call.args[0] == ADULT and "Сколько лет" in call.args[1]
+    data = [b.callback_data for row in call.kwargs["reply_markup"].inline_keyboard for b in row]
+    assert f"pay:{NEW}:13" in data
+    text, _ = _shown(await _press_as(desk, f"pay:{NEW}:13"))
+    assert "Возраст: 13" in text
+    member = await _member(sessions)
+    assert member is not None and access.age_of(member, datetime.now(UTC).date()) == 13
+
+
+@pytest.mark.asyncio
+async def test_admitting_an_adult_does_not_ask_for_age(desk: Any) -> None:
+    await _apply(desk)
+    desk._bot.send_message.reset_mock()
+    await _press_as(desk, f"apf:{NEW}:3")
+    assert all("Сколько лет" not in str(call.args) for call in desk._bot.send_message.await_args_list)
+
+
+def test_setting_callbacks_fit_telegram_limit() -> None:
+    biggest = 9_999_999_999
+    for data in (f"pay:{biggest}:17", f"pty:{biggest}:30", f"pmy:{biggest}:10"):
+        assert len(data.encode()) <= 64

@@ -4,6 +4,8 @@ import logging
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 from urllib.parse import quote
 
@@ -23,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import access, phones
 from lunagpt.assistant.pi_client import PiClient, PiConflictError, PiNotFoundError, PiUnavailableError
+from lunagpt.config import settings
 from lunagpt.models import AssistantApplication, AssistantMember
 
 logger = logging.getLogger("lunagpt.assistant.people")
@@ -30,7 +33,29 @@ logger = logging.getLogger("lunagpt.assistant.people")
 WelcomeFn = Callable[[int, str, str], Awaitable[None]]
 View = tuple[str, InlineKeyboardMarkup | None]
 
-PEOPLE_PREFIXES = frozenset({"app", "apf", "apg", "apr", "pl", "pls", "pc", "pgf", "pgp", "px", "pxy", "prb", "pf"})
+PEOPLE_PREFIXES = frozenset(
+    {
+        "app",
+        "apf",
+        "apg",
+        "apr",
+        "pl",
+        "pls",
+        "pc",
+        "pgf",
+        "pgp",
+        "px",
+        "pxy",
+        "prb",
+        "pf",
+        "pa",
+        "pay",
+        "pt",
+        "pty",
+        "pm",
+        "pmy",
+    }
+)
 REPLY_INTERVAL_SECONDS = 3600
 NOTIFICATIONS_PER_HOUR = 10
 MAX_LISTED = 30
@@ -51,6 +76,9 @@ ROLE_LABELS = {"owner": "глава семьи", "adult": "взрослый", "k
 SECTION_TITLES = {"f": "Семья", "g": "Гости", "p": "В ожидании", "r": "Отказано"}
 APPLICATION_LABELS = {"pending": "в ожидании", "rejected": "отказано", "expired": "не рассмотрена"}
 SEARCH_PROMPT = "Пришли номер телефона или контакт человека ответом на это сообщение."
+AGES = range(5, 18)
+ACCESS_DAYS = (1, 7, 30)
+MONEY_LIMITS = (1, 3, 10)
 NOT_A_NUMBER = "Не похоже на номер телефона."
 INVITE_TEXT = "Присоединяйся к Luna: нажми «Старт» и отправь свой контакт."
 
@@ -246,6 +274,7 @@ class PeopleDesk:
             await access.admit(db, application, name, role, person_id)
         await self._finish(callback, actor, applicant_id, f"✅ {name}: {ROLE_LABELS[role]}")
         await self._welcome(applicant_id, name, role)
+        await self._ask_age_if_child(actor.telegram_id, applicant_id, role)
 
     async def _admit_guest(self, callback: CallbackQuery, actor: AssistantMember, applicant_id: int) -> None:
         async with self._sessions() as db:
@@ -284,10 +313,13 @@ class PeopleDesk:
             member.name = str(person["name"])
             member.role = access.PERSON_ROLE_TO_MEMBER_ROLE[person["role"]]
             member.homesec_person_id = person_id
+            member.access_until = None
+            member.money_limit_usd = None
             name, role = member.name, member.role
             await db.commit()
         await self._edit(callback, f"✅ {name}: {ROLE_LABELS[role]}", self._back("pls:f"))
         await self._welcome(telegram_id, name, role)
+        await self._ask_age_if_child(actor.telegram_id, telegram_id, role)
 
     @staticmethod
     def _may_exclude(actor: AssistantMember, target: AssistantMember) -> bool:
@@ -315,7 +347,9 @@ class PeopleDesk:
             return
         await self._edit(callback, *await self._application_view(application))
 
-    async def _tell(self, chat_id: int, text: str, markup: ReplyKeyboardRemove | None = None) -> None:
+    async def _tell(
+        self, chat_id: int, text: str, markup: ReplyKeyboardRemove | InlineKeyboardMarkup | None = None
+    ) -> None:
         try:
             await self._bot.send_message(chat_id, text, reply_markup=markup)
         except TelegramAPIError as exc:
@@ -376,13 +410,77 @@ class PeopleDesk:
             return "Этого человека уже нет в Luna.", self._back("pl")
         rows = []
         if member.role == "guest":
+            rows.append(
+                [_button("⏳ Срок доступа", f"pt:{telegram_id}"), _button("💵 Лимит денег", f"pm:{telegram_id}")]
+            )
             rows.append([_button("👨‍👩‍👧 Перевести в семью", f"pgf:{telegram_id}")])
+        if member.role == "kid":
+            rows.append([_button("🎂 Возраст", f"pa:{telegram_id}")])
         if self._may_exclude(actor, member):
             rows.append([_button("⛔ Снять доступ", f"px:{telegram_id}", "danger")])
         section = "g" if member.role == "guest" else "f"
         rows.append([_button("← Назад", f"pls:{section}")])
-        phone = f"\nТелефон: {member.phone}" if member.phone else ""
-        return f"{member.name}\nСтатус: {ROLE_LABELS[member.role]}{phone}", InlineKeyboardMarkup(inline_keyboard=rows)
+        lines = [member.name, f"Статус: {ROLE_LABELS[member.role]}"]
+        if member.phone:
+            lines.append(f"Телефон: {member.phone}")
+        lines.extend(self._limits_lines(member))
+        return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+    @staticmethod
+    def _local_today() -> date:
+        return (datetime.now(UTC) + timedelta(hours=settings.luna_utc_offset_hours)).date()
+
+    def _limits_lines(self, member: AssistantMember) -> list[str]:
+        today = self._local_today()
+        if member.role == "kid":
+            age = access.age_of(member, today)
+            return [f"Возраст: {age if age is not None else 'не указан'}"]
+        if member.role != "guest":
+            return []
+        until = "без срока"
+        if member.access_until is not None:
+            local = member.access_until + timedelta(hours=settings.luna_utc_offset_hours)
+            until = f"до {local:%d.%m.%Y %H:%M}" + (" (закончился)" if access.access_ended(member) else "")
+        spent = access.spent_this_month(member, today)
+        limit = f" из ${member.money_limit_usd:.2f}" if member.money_limit_usd is not None else ", без лимита"
+        return [f"Доступ: {until}", f"Платные модели за месяц: ${spent:.2f}{limit}"]
+
+    # ---- settings of one person ----
+
+    def _age_view(self, telegram_id: int) -> View:
+        buttons = [_button(str(age), f"pay:{telegram_id}:{age}") for age in AGES]
+        rows = [buttons[i : i + 4] for i in range(0, len(buttons), 4)]
+        rows.append([_button("← Назад", f"pc:{telegram_id}")])
+        text = "Сколько лет? От этого зависит, как Luna разговаривает. Защита одинакова для всех детей."
+        return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+    async def _ask_age_if_child(self, chat_id: int, telegram_id: int, role: str) -> None:
+        if role == "kid":
+            text, markup = self._age_view(telegram_id)
+            await self._tell(chat_id, text, markup)
+
+    def _access_view(self, telegram_id: int) -> View:
+        buttons = [_button(f"{days} дн.", f"pty:{telegram_id}:{days}") for days in ACCESS_DAYS]
+        rows = [buttons, [_button("Без срока", f"pty:{telegram_id}:0")], [_button("← Назад", f"pc:{telegram_id}")]]
+        return "На какой срок открыть доступ, считая с этого момента?", InlineKeyboardMarkup(inline_keyboard=rows)
+
+    def _money_view(self, telegram_id: int) -> View:
+        buttons = [_button(f"${usd}", f"pmy:{telegram_id}:{usd}") for usd in MONEY_LIMITS]
+        rows = [buttons, [_button("Без лимита", f"pmy:{telegram_id}:0")], [_button("← Назад", f"pc:{telegram_id}")]]
+        text = "Сколько можно тратить на платные модели в месяц? После лимита гость продолжит на своей модели."
+        return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+    async def _update_member(
+        self, callback: CallbackQuery, actor: AssistantMember, telegram_id: int, role: str, **values: Any
+    ) -> None:
+        """Apply a setting only while the person still has the role it belongs to."""
+        async with self._sessions() as db:
+            member = await db.get(AssistantMember, telegram_id, with_for_update=True)
+            if member is not None and member.role == role:
+                for field, value in values.items():
+                    setattr(member, field, value)
+                await db.commit()
+        await self._edit(callback, *await self._member_card(actor, telegram_id))
 
     async def _family_choice(self, telegram_id: int) -> View:
         try:
@@ -458,6 +556,24 @@ class PeopleDesk:
         """Every action here is open to adults only; LunaBot checks that before calling."""
         if prefix == "pl":
             await self._edit(callback, *await self._summary())
+        elif prefix == "pa":
+            await self._edit(callback, *self._age_view(int(args[0])))
+        elif prefix == "pay":
+            year = self._local_today().year - int(args[1])
+            await self._update_member(callback, actor, int(args[0]), "kid", birth_year=year)
+        elif prefix == "pt":
+            await self._edit(callback, *self._access_view(int(args[0])))
+        elif prefix == "pty":
+            days = int(args[1])
+            until = datetime.now(UTC) + timedelta(days=days) if days else None
+            await self._update_member(callback, actor, int(args[0]), "guest", access_until=until)
+        elif prefix == "pm":
+            await self._edit(callback, *self._money_view(int(args[0])))
+        elif prefix == "pmy":
+            usd = int(args[1])
+            await self._update_member(
+                callback, actor, int(args[0]), "guest", money_limit_usd=Decimal(usd) if usd else None
+            )
         elif prefix == "pf":
             await self._ask_number(actor.telegram_id)
         elif prefix == "pls":

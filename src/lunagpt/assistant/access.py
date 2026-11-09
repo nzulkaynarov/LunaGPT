@@ -2,6 +2,7 @@
 
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import delete, func, select, update
@@ -13,7 +14,6 @@ from lunagpt.models import AssistantApplication, AssistantMember, AssistantTimeR
 ROLES = ("owner", "adult", "kid", "guest")
 ADULT_ROLES = ("owner", "adult")
 FAMILY_ROLES = ("owner", "adult", "kid")
-DAILY_REQUEST_LIMITS = {"guest": 20}
 PERSON_ROLE_TO_MEMBER_ROLE = {"adult": "adult", "kid": "kid", "guest": "guest"}
 PENDING = "pending"
 REJECTED = "rejected"
@@ -90,7 +90,6 @@ async def admit(
         name=name[:100],
         role=role,
         phone=application.phone,
-        requests_today=0,
         homesec_person_id=person_id,
     )
     db.add(member)
@@ -179,18 +178,30 @@ async def expire_applications(db: AsyncSession) -> int:
     return int(result.rowcount)  # type: ignore[attr-defined]
 
 
-async def consume_daily_request(db: AsyncSession, member: AssistantMember, today: date) -> bool:
-    """Count one request; False when the member's daily allowance is spent."""
-    if member.usage_day != today:
-        member.usage_day = today
-        member.requests_today = 0
-    limit = DAILY_REQUEST_LIMITS.get(member.role)
-    if limit is not None and member.requests_today >= limit:
-        await db.commit()
-        return False
-    member.requests_today += 1
+def access_ended(member: AssistantMember) -> bool:
+    return member.access_until is not None and member.access_until <= datetime.now(UTC)
+
+
+def age_of(member: AssistantMember, today: date) -> int | None:
+    return None if member.birth_year is None else today.year - member.birth_year
+
+
+def spent_this_month(member: AssistantMember, today: date) -> Decimal:
+    return member.spent_usd if member.spend_month == today.replace(day=1) else Decimal(0)
+
+
+def money_limit_reached(member: AssistantMember, today: date) -> bool:
+    return member.money_limit_usd is not None and spent_this_month(member, today) >= member.money_limit_usd
+
+
+async def record_spend(db: AsyncSession, telegram_id: int, cost: float, today: date) -> None:
+    member = await db.get(AssistantMember, telegram_id, with_for_update=True)
+    if member is None:
+        await db.rollback()
+        return
+    member.spent_usd = spent_this_month(member, today) + Decimal(str(cost))
+    member.spend_month = today.replace(day=1)
     await db.commit()
-    return True
 
 
 async def list_members(db: AsyncSession) -> Sequence[AssistantMember]:

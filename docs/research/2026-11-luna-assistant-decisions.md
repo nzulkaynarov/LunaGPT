@@ -58,6 +58,14 @@
 - Bot API не задаёт формат `Contact.phone_number`, поэтому номера приводятся к E.164 библиотекой [phonenumbers](https://pypi.org/project/phonenumbers/), портом libphonenumber от Google. Поиск устроен через [`ForceReply`](https://core.telegram.org/bots/api#forcereply): состояние не хранится и переживает перезапуск.
 - Заявка без решения через 30 дней закрывается, человек может подать новую. Объём заявок и уведомлений ограничен, потому что имя бота может найти кто угодно.
 
+## Возраст детей и настройки гостей
+
+**Возраст.** Стиль и защита разделены. [OpenAI](https://openai.com/index/our-approach-to-age-prediction/) отвечает подростку иначе, чем взрослому, и при неясном возрасте выбирает более безопасный режим. [Common Sense Media](https://www.commonsensemedia.org/press-releases/googles-gemini-platforms-for-kids-and-teens-pose-risks-despite-added-filters-common-sense-media-reports) критикует продукты, которые одинаково обращаются со всеми детьми и подростками, и [отмечает](https://www.commonsensemedia.org/press-releases/ai-companions-decoded-common-sense-media-recommends-ai-companion-safety-standards), что самостоятельное указание возраста легко обойти, поэтому возраст задаёт взрослый. Подростки 13–14 лет [доверяют советам ИИ больше](https://www.commonsensemedia.org/research/talk-trust-and-trade-offs-how-and-why-teens-use-ai-companions), чем 15–17 лет, поэтому в подростковом стиле запрещено поддакивать. Граница 13 лет совпадает с порогом [Google Family Link](https://support.google.com/gemini/answer/16109150). Исследований о том, какой именно тон нужен в каждом возрасте, найти не удалось, границы 9 и 12 лет выбраны по школьным ступеням и должны проверяться на реальных детях.
+
+**Бенчмарк на gemma4:e4b** (6 вопросов на вариант, 9 ноября 2026). Старый единый промпт: 3,0 эмодзи на ответ, приветствие в 5 ответах из 6. Новый для 15 лет: 0 эмодзи и 0 приветствий. Для 8 лет: 4,3 эмодзи и примеры с кубиками. Для 11 лет и неизвестного возраста: 0 приветствий.
+
+**Деньги гостей.** Встроенные [бюджеты конечных пользователей LiteLLM](https://docs.litellm.ai/docs/proxy/customers) не подошли: они блокируют и бесплатную модель, а настройка требует мастер-ключ в боте. Luna суммирует цену из заголовка шлюза `x-litellm-response-cost`, и после лимита гость остаётся на своей модели. Цена проверена на живом шлюзе: у `luna-fast` она ненулевая, у `luna-local` равна нулю.
+
 ## Источники
 
 - Telegram: [Клавиатуры и функции ботов](https://core.telegram.org/bots/features), [Bot API](https://core.telegram.org/bots/api)
