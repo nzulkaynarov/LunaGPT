@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import time
+import uuid
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime, timedelta
@@ -26,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import access
 from lunagpt.assistant.llm import QuizQuestion
+from lunagpt.assistant.memories import MEMORY_ROLES, Memory
 from lunagpt.assistant.pi_client import PiClient, PiConflictError, PiNotFoundError, PiUnavailableError
 from lunagpt.assistant.telegram import send_long
 from lunagpt.config import settings
@@ -33,7 +35,7 @@ from lunagpt.models import AssistantMember
 
 logger = logging.getLogger("lunagpt.assistant.bot")
 
-AnswerFn = Callable[[str, int, list[dict[str, str]], str], Awaitable[str]]
+AnswerFn = Callable[[str, int, list[dict[str, str]], str, list[str]], Awaitable[str]]
 QuizFn = Callable[[int], Awaitable[QuizQuestion | None]]
 
 BTN_MY_TIME = "⏳ Моё время"
@@ -43,8 +45,20 @@ BTN_FAMILY = "👨‍👩‍👧 Семья"
 BTN_SHARED = "📺 Общие устройства"
 BTN_GUEST = "➕ Гость"
 BTN_MEMBERS = "👥 Участники"
+BTN_MEMORY = "🧠 Что ты помнишь"
 BTN_HELP = "❓ Помощь"
-MENU_BUTTONS = {BTN_MY_TIME, BTN_ASK_TIME, BTN_QUIZ, BTN_FAMILY, BTN_SHARED, BTN_GUEST, BTN_MEMBERS, BTN_HELP}
+MENU_BUTTONS = {
+    BTN_MY_TIME,
+    BTN_ASK_TIME,
+    BTN_QUIZ,
+    BTN_FAMILY,
+    BTN_SHARED,
+    BTN_GUEST,
+    BTN_MEMBERS,
+    BTN_MEMORY,
+    BTN_HELP,
+}
+MEMORY_PAGE_SIZE = 8
 GUEST_HOURS = (3, 6, 24, 72)
 SHARED_LABELS = {"kid": "👶 Детский режим", "off": "⛔ Выключено", "adult": "🍿 Для взрослых"}
 TIME_POLL_SECONDS = 30
@@ -61,10 +75,16 @@ BAD_INVITE = "Приглашение недействительно или уж�
 LIMIT_REACHED = "На сегодня лимит запросов закончился. Приходи завтра 🌙"
 TOO_FAST = "Слишком много сообщений подряд. Подожди минуту 🙂"
 TEXT_ONLY = "Пока я понимаю только текст."
+MEMORY_NOTICE = (
+    " Запоминаю важное о тебе, посмотреть и удалить можно на кнопке «Что ты помнишь». "
+    "Другие члены семьи этого не видят."
+)
 HELP_TEXT = {
-    "owner": "Пиши мне любые вопросы, найду свежее в интернете. Семья, устройства и гости — на кнопках внизу.",
-    "adult": "Пиши мне любые вопросы, найду свежее в интернете. Устройства и гости — на кнопках внизу.",
-    "kid": "Спрашивай что угодно: уроки, игры, код, идеи. Могу поискать в интернете. Твоё время — на кнопках внизу.",
+    "owner": "Пиши мне любые вопросы, найду свежее в интернете. Семья, устройства и гости — на кнопках внизу."
+    + MEMORY_NOTICE,
+    "adult": "Пиши мне любые вопросы, найду свежее в интернете. Устройства и гости — на кнопках внизу." + MEMORY_NOTICE,
+    "kid": "Спрашивай что угодно: уроки, игры, код, идеи. Могу поискать в интернете. Твоё время — на кнопках внизу."
+    + MEMORY_NOTICE,
     "guest": "Спрашивай что угодно. Могу поискать в интернете.",
 }
 SAFETY_PATTERN = re.compile(
@@ -89,9 +109,9 @@ class GuestInvite(StatesGroup):
 def main_keyboard(role: str) -> ReplyKeyboardMarkup:
     """The persistent menu; server-side checks still decide what each role may do."""
     layouts = {
-        "owner": [[BTN_FAMILY, BTN_SHARED], [BTN_GUEST, BTN_MEMBERS], [BTN_HELP]],
-        "adult": [[BTN_SHARED, BTN_GUEST], [BTN_HELP]],
-        "kid": [[BTN_MY_TIME, BTN_ASK_TIME], [BTN_QUIZ, BTN_HELP]],
+        "owner": [[BTN_FAMILY, BTN_SHARED], [BTN_GUEST, BTN_MEMBERS], [BTN_MEMORY, BTN_HELP]],
+        "adult": [[BTN_SHARED, BTN_GUEST], [BTN_MEMORY, BTN_HELP]],
+        "kid": [[BTN_MY_TIME, BTN_ASK_TIME], [BTN_QUIZ, BTN_MEMORY], [BTN_HELP]],
         "guest": [[BTN_HELP]],
     }
     return ReplyKeyboardMarkup(
@@ -148,6 +168,7 @@ class LunaBot:
         make_quiz: QuizFn,
         pi: PiClient,
         bot_username: str,
+        memory: Memory | None = None,
     ) -> None:
         self._bot = bot
         self._sessions = session_factory
@@ -155,6 +176,9 @@ class LunaBot:
         self._make_quiz = make_quiz
         self._pi = pi
         self._username = bot_username
+        self._memory = memory
+        self._history_loaded: set[int] = set()
+        self._background: set[asyncio.Task[None]] = set()
         self._history: dict[int, deque[dict[str, str]]] = defaultdict(lambda: deque(maxlen=HISTORY_MESSAGES))
         self._locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._request_times: dict[int, deque[float]] = defaultdict(lambda: deque(maxlen=RATE_LIMIT))
@@ -210,6 +234,8 @@ class LunaBot:
             await self._send_members(member)
         elif text == BTN_SHARED and adult:
             await self._send_shared_list(member)
+        elif text == BTN_MEMORY and member.role in MEMORY_ROLES:
+            await self._send(member.telegram_id, *await self._memory_view(member.telegram_id, 0))
         elif text == BTN_GUEST and adult and state is not None:
             await state.set_state(GuestInvite.name)
             await self._send(
@@ -250,6 +276,14 @@ class LunaBot:
             await self._show_shared_device(callback, int(args[0]))
         elif prefix == "shs":
             await self._change_shared_device(callback, int(args[0]), args[1])
+        elif prefix == "mem":
+            await self._edit(callback, *await self._memory_view(user_id, int(args[0])))
+        elif prefix == "memd":
+            await self._forget_fact(callback, user_id, args[0], int(args[1]))
+        elif prefix == "memc":
+            await self._edit(callback, *self._confirm_forget_all())
+        elif prefix == "memy":
+            await self._forget_everything(callback, user_id)
         elif prefix == "rml":
             await self._edit(callback, *await self._members_view(member))
         elif prefix == "rm":
@@ -261,6 +295,8 @@ class LunaBot:
     def _callback_allowed(role: str, prefix: str) -> bool:
         if prefix == "quiz":
             return role == "kid"
+        if prefix in ("mem", "memd", "memc", "memy"):
+            return role in MEMORY_ROLES
         if prefix in ("link", "rm", "rmy", "rml"):
             return role == "owner"
         if prefix in ("guest", "sh", "shs", "shl"):
@@ -540,11 +576,77 @@ class LunaBot:
                 return
         async with self._locks[user_id]:
             await self._bot.send_chat_action(user_id, "typing")
-            history = list(self._history[user_id])
-            reply = await self._answer(member.role, user_id, history, text)
+            history = await self._conversation(member)
+            facts = await self._memory.recall(user_id, member.role, text) if self._memory else []
+            reply = await self._answer(member.role, user_id, history, text, facts)
             self._history[user_id].append({"role": "user", "content": text})
             self._history[user_id].append({"role": "assistant", "content": reply})
+            if self._memory and member.role in MEMORY_ROLES:
+                await self._memory.save_exchange(user_id, text, reply, HISTORY_MESSAGES)
         await self._send(user_id, reply)
+        if self._memory:
+            task = asyncio.create_task(self._memory.remember(user_id, member.role, text))
+            self._background.add(task)  # the event loop keeps only weak references to tasks
+            task.add_done_callback(self._background.discard)
+
+    async def _conversation(self, member: AssistantMember) -> list[dict[str, str]]:
+        """After a restart the last turns come back from the database once."""
+        user_id = member.telegram_id
+        if self._memory and member.role in MEMORY_ROLES and user_id not in self._history_loaded:
+            self._history_loaded.add(user_id)
+            try:
+                self._history[user_id].extend(await self._memory.load_history(user_id, HISTORY_MESSAGES))
+            except Exception:
+                logger.warning("could not load the conversation", exc_info=True)
+        return list(self._history[user_id])
+
+    async def _memory_view(self, user_id: int, page: int) -> tuple[str, InlineKeyboardMarkup | None]:
+        if self._memory is None:
+            return "Память сейчас недоступна.", None
+        facts = await self._memory.list_facts(user_id)
+        if not facts:
+            return "Пока ничего о тебе не запомнила. Расскажи о себе, и я учту это в разговорах.", None
+        last_page = (len(facts) - 1) // MEMORY_PAGE_SIZE
+        page = max(0, min(page, last_page))
+        shown = facts[page * MEMORY_PAGE_SIZE : (page + 1) * MEMORY_PAGE_SIZE]
+        first = page * MEMORY_PAGE_SIZE + 1
+        lines = [f"{first + i}. {fact.content}" for i, fact in enumerate(shown)]
+        text = f"🧠 Что я о тебе помню ({len(facts)}):\n\n" + "\n".join(lines) + "\n\nНажми номер, чтобы удалить."
+        delete_buttons = [
+            InlineKeyboardButton(text=f"🗑 {first + i}", callback_data=f"memd:{fact.id.hex}:{page}")
+            for i, fact in enumerate(shown)
+        ]
+        rows = [delete_buttons[i : i + 4] for i in range(0, len(delete_buttons), 4)]
+        navigation = []
+        if page > 0:
+            navigation.append(InlineKeyboardButton(text="←", callback_data=f"mem:{page - 1}"))
+        if page < last_page:
+            navigation.append(InlineKeyboardButton(text="→", callback_data=f"mem:{page + 1}"))
+        if navigation:
+            rows.append(navigation)
+        rows.append([InlineKeyboardButton(text="Очистить всё", callback_data="memc", style="danger")])
+        return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+    async def _forget_fact(self, callback: CallbackQuery, user_id: int, memory_hex: str, page: int) -> None:
+        if self._memory is not None:
+            await self._memory.forget(user_id, uuid.UUID(hex=memory_hex))
+        await self._edit(callback, *await self._memory_view(user_id, page))
+
+    @staticmethod
+    def _confirm_forget_all() -> tuple[str, InlineKeyboardMarkup]:
+        markup = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="Да, забыть всё", callback_data="memy", style="danger")],
+                [InlineKeyboardButton(text="← Назад", callback_data="mem:0")],
+            ]
+        )
+        return "Забыть всё, что я о тебе знаю, и наш последний разговор? Отменить будет нельзя.", markup
+
+    async def _forget_everything(self, callback: CallbackQuery, user_id: int) -> None:
+        if self._memory is not None:
+            await self._memory.forget_all(user_id)
+        self._history[user_id].clear()
+        await self._edit(callback, "Готово, всё забыла.", None)
 
     async def _alert_parents(self, member: AssistantMember, text: str) -> None:
         async with self._sessions() as db:

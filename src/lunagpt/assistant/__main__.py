@@ -7,6 +7,7 @@ from aiogram import Bot, Dispatcher
 
 from lunagpt.assistant.bot import LunaBot, build_router, watch_time_requests
 from lunagpt.assistant.llm import generate_quiz, generate_reply
+from lunagpt.assistant.memories import Memory
 from lunagpt.assistant.monitor import send_heartbeats, watch_family, watch_pi
 from lunagpt.assistant.pi_client import PiClient
 from lunagpt.config import settings
@@ -22,7 +23,8 @@ async def main() -> None:
     me = await bot.get_me()
     await bot.delete_my_commands()  # navigation lives in the keyboards
     pi = PiClient()
-    luna = LunaBot(bot, async_session_factory, generate_reply, generate_quiz, pi, str(me.username))
+    memory = Memory(async_session_factory)
+    luna = LunaBot(bot, async_session_factory, generate_reply, generate_quiz, pi, str(me.username), memory)
     dispatcher = Dispatcher()
     dispatcher.include_router(build_router(luna))
     logger.info("Luna AI Assistant started as @%s", me.username)

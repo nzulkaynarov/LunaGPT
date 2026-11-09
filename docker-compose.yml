@@ -206,6 +206,7 @@ services:
       disable: true
     environment:
       - LITELLM_ENDPOINT=http://litellm:4000/v1/chat/completions
+      - LITELLM_EMBEDDINGS_ENDPOINT=http://litellm:4000/v1/embeddings
       - LITELLM_ASSISTANT_KEY=${LITELLM_ASSISTANT_KEY}
       - LUNA_TELEGRAM_BOT_TOKEN=${LUNA_TELEGRAM_BOT_TOKEN}
       - LUNA_PI_API_TOKEN=${LUNA_PI_API_TOKEN}

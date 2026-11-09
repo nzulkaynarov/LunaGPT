@@ -1,6 +1,8 @@
 """Luna AI Assistant: access rules, routing and failure notices."""
 
+import asyncio
 import json
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -611,3 +613,102 @@ async def test_real_dispatcher_runs_guest_flow(harness: Any, monkeypatch: pytest
     await dispatcher.feed_update(telegram, update(2, "Анна"))
     assert send.call_args.args[1] == "На сколько пустить: Анна?"
     await telegram.session.close()
+
+
+def _memory_fact(index: int) -> Any:
+    return MagicMock(id=uuid.UUID(int=index), content=f"факт {index}")
+
+
+def _with_memory(harness: Any, monkeypatch: pytest.MonkeyPatch, role: str, count: int = 0) -> tuple[bot.LunaBot, Any]:
+    instance, _, _ = harness
+    _as_member(monkeypatch, _member(role))
+    memory = MagicMock(
+        recall=AsyncMock(return_value=["Пользователь любит игры"]),
+        load_history=AsyncMock(return_value=[{"role": "user", "content": "раньше"}]),
+        save_exchange=AsyncMock(),
+        remember=AsyncMock(),
+        list_facts=AsyncMock(return_value=[_memory_fact(i) for i in range(count)]),
+        forget=AsyncMock(return_value=True),
+        forget_all=AsyncMock(),
+    )
+    instance._memory = memory
+    return instance, memory
+
+
+@pytest.mark.parametrize(("role", "expected"), [("owner", True), ("adult", True), ("kid", True), ("guest", False)])
+def test_memory_button_excludes_guests(role: str, expected: bool) -> None:
+    assert (bot.BTN_MEMORY in str(bot.main_keyboard(role).keyboard)) is expected
+    assert bot.LunaBot._callback_allowed(role, "memy") is expected
+
+
+@pytest.mark.asyncio
+async def test_reply_uses_facts_and_restored_history(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, memory = _with_memory(harness, monkeypatch, "owner")
+    _, _, answer = harness
+    await instance.on_message(_message("вопрос про игры"))
+    args = answer.call_args.args
+    assert args[2] == [{"role": "user", "content": "раньше"}] and args[4] == ["Пользователь любит игры"]
+    memory.save_exchange.assert_awaited_once_with(1, "вопрос про игры", "ответ", bot.HISTORY_MESSAGES)
+    await asyncio.sleep(0)
+    memory.remember.assert_awaited_once_with(1, "owner", "вопрос про игры")
+
+
+@pytest.mark.asyncio
+async def test_history_loads_from_database_only_once(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, memory = _with_memory(harness, monkeypatch, "owner")
+    await instance.on_message(_message("первый"))
+    await instance.on_message(_message("второй"))
+    memory.load_history.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_guest_history_is_not_saved(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, memory = _with_memory(harness, monkeypatch, "guest")
+    await instance.on_message(_message("вопрос гостя"))
+    memory.save_exchange.assert_not_awaited()
+    memory.load_history.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_kid_danger_message_is_not_remembered(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, memory = _with_memory(harness, monkeypatch, "kid")
+    monkeypatch.setattr(access, "adult_chat_ids", AsyncMock(return_value=[]))
+    await instance.on_message(_message("меня бьют в школе"))
+    await asyncio.sleep(0)
+    memory.remember.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_memory_view_pages_and_delete_buttons(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, _ = _with_memory(harness, monkeypatch, "owner", count=10)
+    text, markup = await instance._memory_view(1, 1)
+    assert "9. факт 8" in text and "(10)" in text
+    data = [b.callback_data for row in markup.inline_keyboard for b in row]
+    assert all(len(item.encode()) <= 64 for item in data)
+    assert "mem:0" in data and "mem:2" not in data and "memc" in data
+
+
+@pytest.mark.asyncio
+async def test_delete_button_is_scoped_to_the_presser(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, memory = _with_memory(harness, monkeypatch, "kid", count=1)
+    target = uuid.UUID(int=5)
+    await instance.on_callback(_callback(f"memd:{target.hex}:0"))
+    memory.forget.assert_awaited_once_with(1, target)
+
+
+@pytest.mark.asyncio
+async def test_clear_all_asks_first(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, memory = _with_memory(harness, monkeypatch, "owner", count=1)
+    callback = _callback("memc")
+    await instance.on_callback(callback)
+    memory.forget_all.assert_not_awaited()
+    assert "memy" in str(callback.message.edit_text.await_args.kwargs["reply_markup"])
+    await instance.on_callback(_callback("memy"))
+    memory.forget_all.assert_awaited_once_with(1)
+
+
+@pytest.mark.asyncio
+async def test_guest_is_denied_memory_press(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, memory = _with_memory(harness, monkeypatch, "guest")
+    await instance.on_callback(_callback("memy"))
+    memory.forget_all.assert_not_awaited()
