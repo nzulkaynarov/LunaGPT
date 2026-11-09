@@ -1,11 +1,13 @@
 """The single way in: applications, and the adults' overview of who is who."""
 
+import html
 import logging
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -14,6 +16,7 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import (
     CallbackQuery,
     ForceReply,
+    FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -61,10 +64,15 @@ REPLY_INTERVAL_SECONDS = 3600
 NOTIFICATIONS_PER_HOUR = 10
 MAX_LISTED = 30
 BTN_SHARE_CONTACT = "📱 Отправить мой контакт"
-ASK_CONTACT = (
-    "Привет! Я Luna, семейный ИИ-ассистент. Чтобы получить доступ, отправь свой контакт кнопкой ниже. "
-    "Заявку рассмотрит взрослый из семьи. Номер сохранится, его видят только взрослые семьи."
+ASK_CONTACT = "Чтобы пользоваться Luna, отправь свой контакт кнопкой внизу."
+GREETING = (
+    "<b>Привет, {name}! Я Luna</b> 🌙\n\n"
+    "Личный ИИ-ассистент этой семьи и её близких. Отвечаю на вопросы, ищу свежее в интернете "
+    "и помню важное о каждом.\n\n"
+    "Чтобы начать, отправь свой контакт кнопкой внизу. Взрослый из семьи увидит заявку и откроет доступ. "
+    "Номер сохранится, его видят только взрослые семьи."
 )
+WELCOME_IMAGE = Path(__file__).parent / "assets" / "welcome.jpg"
 NOT_YOUR_CONTACT = "Нужен твой собственный контакт. Нажми кнопку ниже."
 APPLIED = "Заявка отправлена. Напишу, когда взрослый примет решение."
 STILL_WAITING = "Заявка ещё ждёт решения взрослых."
@@ -89,6 +97,7 @@ def contact_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[[KeyboardButton(text=BTN_SHARE_CONTACT, request_contact=True)]],
         resize_keyboard=True,
         one_time_keyboard=True,
+        input_field_placeholder="Нажми кнопку внизу",
     )
 
 
@@ -142,7 +151,9 @@ class PeopleDesk:
             return
         contact = message.contact
         if contact is None:
-            if (message.text or "").startswith("/start") or self._may_reply(user_id):
+            if (message.text or "").startswith("/start"):
+                await self._greet(user_id, message.from_user.first_name)
+            elif self._may_reply(user_id):
                 await self._bot.send_message(user_id, ASK_CONTACT, reply_markup=contact_keyboard())
             return
         if contact.user_id != user_id:
@@ -159,6 +170,23 @@ class PeopleDesk:
         await self._bot.send_message(user_id, APPLIED if created else FULL, reply_markup=ReplyKeyboardRemove())
         if created:
             await self._notify_adults(user_id)
+
+    async def _greet(self, user_id: int, first_name: str) -> None:
+        """The picture is a bonus: without the file, or if the upload fails, the greeting goes as text."""
+        text = GREETING.format(name=html.escape(first_name))
+        if WELCOME_IMAGE.exists():
+            try:
+                await self._bot.send_photo(
+                    user_id,
+                    FSInputFile(WELCOME_IMAGE),
+                    caption=text,
+                    parse_mode="HTML",
+                    reply_markup=contact_keyboard(),
+                )
+                return
+            except TelegramAPIError as exc:
+                logger.warning("could not send the welcome picture: %s", type(exc).__name__)
+        await self._bot.send_message(user_id, text, parse_mode="HTML", reply_markup=contact_keyboard())
 
     def _may_reply(self, user_id: int) -> bool:
         now = time.monotonic()

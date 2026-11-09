@@ -1,13 +1,16 @@
 """The single way in and the adults' decisions, against a real database."""
 
 import asyncio
+import html
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import ForceReply, InlineKeyboardMarkup, Message, ReplyKeyboardRemove
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -54,7 +57,7 @@ def _message(
     user_id: int = NEW, text: str = "/start", contact_user: int | None = None, phone: str = PHONE
 ) -> MagicMock:
     message = MagicMock(spec=Message, text=text)
-    message.from_user = MagicMock(id=user_id, full_name="Новый", username="newbie")
+    message.from_user = MagicMock(id=user_id, full_name="Новый", first_name="Новый", username="newbie")
     message.contact = (
         None if contact_user is None else MagicMock(user_id=contact_user, phone_number=phone, first_name="Н")
     )
@@ -106,7 +109,7 @@ def _sent_to(desk: Any) -> list[int]:
 @pytest.mark.asyncio
 async def test_start_asks_for_contact(desk: Any) -> None:
     await desk.on_stranger(_message())
-    assert desk._bot.send_message.await_args.args[1] == people.ASK_CONTACT
+    assert desk._bot.send_message.await_args.args[1] == people.GREETING.format(name="Новый")
     keyboard = desk._bot.send_message.await_args.kwargs["reply_markup"]
     assert keyboard.keyboard[0][0].request_contact is True
 
@@ -586,3 +589,37 @@ def test_setting_callbacks_fit_telegram_limit() -> None:
     biggest = 9_999_999_999
     for data in (f"pay:{biggest}:17", f"pty:{biggest}:30", f"pmy:{biggest}:10"):
         assert len(data.encode()) <= 64
+
+
+def test_greeting_picture_is_optional_and_name_is_escaped() -> None:
+    assert "&lt;b&gt;" in people.GREETING.format(name=html.escape("<b>"))
+
+
+@pytest.mark.asyncio
+async def test_greeting_uses_the_picture_when_it_exists(
+    desk: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    image = tmp_path / "welcome.jpg"
+    image.write_bytes(b"jpeg")
+    monkeypatch.setattr(people, "WELCOME_IMAGE", image)
+    desk._bot.send_photo = AsyncMock()
+    await desk.on_stranger(_message())
+    assert "Я Luna" in desk._bot.send_photo.await_args.kwargs["caption"]
+    desk._bot.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_failed_picture_falls_back_to_text(desk: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    image = tmp_path / "welcome.jpg"
+    image.write_bytes(b"jpeg")
+    monkeypatch.setattr(people, "WELCOME_IMAGE", image)
+    desk._bot.send_photo = AsyncMock(side_effect=TelegramBadRequest(MagicMock(), "bad photo"))
+    await desk.on_stranger(_message())
+    assert "Я Luna" in desk._bot.send_message.await_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_other_messages_get_a_short_hint_not_the_greeting(desk: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(people, "WELCOME_IMAGE", Path("/nonexistent"))
+    await desk.on_stranger(_message(text="привет"))
+    assert desk._bot.send_message.await_args.args[1] == people.ASK_CONTACT

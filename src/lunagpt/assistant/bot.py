@@ -1,6 +1,7 @@
 """Telegram message handling for Luna AI Assistant."""
 
 import asyncio
+import html
 import logging
 import re
 import time
@@ -21,6 +22,7 @@ from aiogram.types import (
     Message,
     ReplyKeyboardMarkup,
 )
+from aiogram.utils.chat_action import ChatActionSender
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import access
@@ -28,7 +30,7 @@ from lunagpt.assistant.llm import QuizQuestion, ReplyOptions
 from lunagpt.assistant.memories import FAMILY_DUPLICATE, FAMILY_FAILED, FAMILY_FULL, FAMILY_SAVED, Memory
 from lunagpt.assistant.people import PEOPLE_PREFIXES, PeopleDesk
 from lunagpt.assistant.pi_client import PiClient, PiConflictError, PiNotFoundError, PiUnavailableError
-from lunagpt.assistant.telegram import is_reply_to_prompt, send_long
+from lunagpt.assistant.telegram import is_reply_to_prompt, send_long, send_model_reply
 from lunagpt.config import settings
 from lunagpt.models import AssistantMember
 
@@ -72,18 +74,28 @@ MEMORY_NOTICE = (
     " Запоминаю важное о тебе, посмотреть и удалить можно на кнопке «Что ты помнишь». Другие люди этого не видят."
 )
 FAMILY_NOTICE = " Чтобы запомнить для всех в семье, напиши: «запомни для семьи, что…»."
+ASK_ANYTHING = "Просто напиши, что нужно: вопрос, идея, перевод, свежие новости."
+ADULT_HELP = (
+    f"{ASK_ANYTHING}\n\n"
+    f"{BTN_PEOPLE} — семья, гости и заявки\n"
+    f"{BTN_SHARED} — телевизор и другое домашнее\n"
+    f"{BTN_INVITE} — отправить приглашение\n"
+    f"{BTN_MEMORY} — личная и общая память\n\n" + MEMORY_NOTICE.strip() + FAMILY_NOTICE
+)
 HELP_TEXT = {
-    "owner": "Пиши мне любые вопросы, найду свежее в интернете. Устройства и люди — на кнопках внизу."
-    + MEMORY_NOTICE
-    + FAMILY_NOTICE,
-    "adult": "Пиши мне любые вопросы, найду свежее в интернете. Устройства и люди — на кнопках внизу."
-    + MEMORY_NOTICE
-    + FAMILY_NOTICE,
-    "kid": "Спрашивай что угодно: уроки, игры, код, идеи. Могу поискать в интернете. Твоё время — на кнопках внизу."
-    + MEMORY_NOTICE
-    + FAMILY_NOTICE,
-    "guest": "Спрашивай что угодно. Могу поискать в интернете." + MEMORY_NOTICE,
+    "owner": ADULT_HELP,
+    "adult": ADULT_HELP,
+    "kid": (
+        "Спрашивай что угодно: уроки, игры, код, идеи, свежие новости.\n\n"
+        f"{BTN_MY_TIME} — сколько осталось интернета\n"
+        f"{BTN_ASK_TIME} — написать родителям\n"
+        f"{BTN_QUIZ} — ответить и заработать время\n"
+        f"{BTN_MEMORY} — личная и общая память\n\n" + MEMORY_NOTICE.strip() + FAMILY_NOTICE
+    ),
+    "guest": f"{ASK_ANYTHING}\n\n{BTN_MEMORY} — что я о тебе помню\n\n" + MEMORY_NOTICE.strip(),
 }
+WELCOME = "<b>Добро пожаловать, {name}!</b> 🌙\n\n{help}"
+BACK_AGAIN = "Привет, {name}! Я на связи. Напиши, что нужно, или выбери кнопку внизу."
 FAMILY_REQUEST = re.compile(
     r"^\s*(?:запомни|запиши|сохрани)\s+(?:для\s+(?:всей\s+)?(?:семьи|всех)|в\s+(?:семейн\w+|общ\w+)\s+памят\w+)"
     r"[\s:,—-]*(?:что\s+)?(?P<fact>\S.*)$",
@@ -203,7 +215,12 @@ class LunaBot:
 
     async def _welcome(self, telegram_id: int, name: str, role: str) -> None:
         try:
-            await self._send(telegram_id, f"Привет, {name}! Я Luna.\n{HELP_TEXT[role]}", main_keyboard(role))
+            await self._bot.send_message(
+                telegram_id,
+                WELCOME.format(name=html.escape(name), help=html.escape(HELP_TEXT[role], quote=False)),
+                parse_mode="HTML",
+                reply_markup=main_keyboard(role),
+            )
         except TelegramAPIError as exc:
             logger.warning("could not welcome a new member: %s", type(exc).__name__)
 
@@ -228,6 +245,9 @@ class LunaBot:
             await self._chat(member, text, family_note=text)
             return
         if await self._menu_action(member, text):
+            return
+        if text.startswith("/start"):
+            await self._send(user_id, BACK_AGAIN.format(name=member.name), main_keyboard(member.role))
             return
         if text.startswith("/"):
             await self._send(user_id, HELP_TEXT[member.role], main_keyboard(member.role))
@@ -468,16 +488,16 @@ class LunaBot:
         today = self._today()
         costs: list[float] = []
         async with self._locks[user_id]:
-            await self._bot.send_chat_action(user_id, "typing")
-            history = await self._conversation(member)
-            facts = await self._memory.recall(user_id, member.role, text) if self._memory else []
-            options = ReplyOptions(
-                age=access.age_of(current, today),
-                local_only=access.money_limit_reached(current, today),
-                on_cost=costs.append if current.role == "guest" else None,
-                family_facts=await self._memory.family.recall(current.role, text) if self._memory else (),
-            )
-            reply = await self._answer(member.role, user_id, history, text, facts, options)
+            async with ChatActionSender.typing(chat_id=user_id, bot=self._bot):  # repeats while the model works
+                history = await self._conversation(member)
+                facts = await self._memory.recall(user_id, member.role, text) if self._memory else []
+                options = ReplyOptions(
+                    age=access.age_of(current, today),
+                    local_only=access.money_limit_reached(current, today),
+                    on_cost=costs.append if current.role == "guest" else None,
+                    family_facts=await self._memory.family.recall(current.role, text) if self._memory else (),
+                )
+                reply = await self._answer(member.role, user_id, history, text, facts, options)
             self._history[user_id].append({"role": "user", "content": text})
             self._history[user_id].append({"role": "assistant", "content": reply})
             if self._memory:
@@ -485,7 +505,7 @@ class LunaBot:
         if any(costs):
             async with self._sessions() as db:
                 await access.record_spend(db, user_id, sum(costs), today)
-        await self._send(user_id, reply)
+        await send_model_reply(self._bot, user_id, reply)
         if self._memory:
             task = asyncio.create_task(self._memory.remember(user_id, member.role, text))
             self._background.add(task)  # the event loop keeps only weak references to tasks

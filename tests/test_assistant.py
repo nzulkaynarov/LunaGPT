@@ -35,6 +35,11 @@ def _message(text: str, user_id: int = 1, chat_type: str = "private") -> Any:
 @pytest.fixture
 def harness(monkeypatch: pytest.MonkeyPatch) -> tuple[bot.LunaBot, AsyncMock, AsyncMock]:
     telegram = MagicMock(send_message=AsyncMock(), send_chat_action=AsyncMock())
+
+    async def shown_like_text(chat_id: int, rich: Any, reply_markup: Any = None) -> None:
+        await telegram.send_message(chat_id, rich.markdown, reply_markup=reply_markup)
+
+    telegram.send_rich_message = shown_like_text
     answer = AsyncMock(return_value="ответ")
     session = MagicMock()
     session.__aenter__ = AsyncMock(return_value=MagicMock())

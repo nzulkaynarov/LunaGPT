@@ -10,6 +10,7 @@ from lunagpt.assistant.llm import generate_quiz, generate_reply
 from lunagpt.assistant.memories import Memory
 from lunagpt.assistant.monitor import send_heartbeats, watch_family, watch_pi
 from lunagpt.assistant.pi_client import PiClient
+from lunagpt.assistant.profile import apply_profile
 from lunagpt.config import settings
 from lunagpt.db import async_session_factory
 
@@ -21,7 +22,7 @@ async def main() -> None:
         raise SystemExit("LUNA_TELEGRAM_BOT_TOKEN and LITELLM_ASSISTANT_KEY are required")
     bot = Bot(settings.luna_telegram_bot_token)
     me = await bot.get_me()
-    await bot.delete_my_commands()  # navigation lives in the keyboards
+    await apply_profile(bot)
     pi = PiClient()
     memory = Memory(async_session_factory)
     luna = LunaBot(bot, async_session_factory, generate_reply, generate_quiz, pi, str(me.username), memory)
