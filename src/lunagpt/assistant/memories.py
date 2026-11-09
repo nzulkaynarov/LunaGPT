@@ -14,13 +14,16 @@ from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from lunagpt.assistant import llm
-from lunagpt.models import AssistantMemory, AssistantMessage
+from lunagpt.assistant import access, llm
+from lunagpt.models import AssistantFamilyMemory, AssistantMemory, AssistantMessage
 
 logger = logging.getLogger("lunagpt.assistant.memories")
 
 MAX_FACTS_IN_PROMPT = 30
 MAX_FACTS_PER_MEMBER = 200
+MAX_FAMILY_FACTS = 200
+MAX_FAMILY_FACT_CHARS = 300
+FAMILY_SAVED, FAMILY_DUPLICATE, FAMILY_FULL, FAMILY_FAILED = "saved", "duplicate", "full", "failed"
 MAX_FACTS_PER_MESSAGE = 5
 MAX_FACT_CHARS = 200
 MIN_MESSAGE_CHARS = 10
@@ -66,8 +69,72 @@ def _metadata(member_id: int, role: str) -> dict[str, Any]:
     }
 
 
+class FamilyMemory:
+    """Notes for the whole family, written only on someone's explicit request and kept word for word."""
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession], embed: EmbedFn) -> None:
+        self._sessions = session_factory
+        self._embed = embed
+
+    async def recall(self, role: str, query: str) -> tuple[str, ...]:
+        """Guests get nothing here whatever else goes wrong; a failure only loses the shared context."""
+        if role not in access.FAMILY_ROLES:
+            return ()
+        try:
+            return await self._recall(query)
+        except Exception:
+            logger.warning("family memory recall failed", exc_info=True)
+            return ()
+
+    async def _recall(self, query: str) -> tuple[str, ...]:
+        async with self._sessions() as db:
+            total = await db.scalar(select(func.count()).select_from(AssistantFamilyMemory)) or 0
+            statement = select(AssistantFamilyMemory).order_by(AssistantFamilyMemory.created_at)
+            if total > MAX_FACTS_IN_PROMPT:
+                distance = AssistantFamilyMemory.embedding.cosine_distance(await self._embed(query))
+                nearest = select(AssistantFamilyMemory.id).order_by(distance).limit(MAX_FACTS_IN_PROMPT)
+                statement = statement.where(AssistantFamilyMemory.id.in_(nearest))
+            return tuple(row.content for row in await db.scalars(statement))
+
+    async def add(self, author_id: int, author_name: str, text: str) -> str:
+        fact = text.strip()[:MAX_FAMILY_FACT_CHARS]
+        try:
+            vector = await self._embed(fact)
+            distance = AssistantFamilyMemory.embedding.cosine_distance(vector)
+            async with self._sessions() as db:
+                if (await db.scalar(select(func.count()).select_from(AssistantFamilyMemory)) or 0) >= MAX_FAMILY_FACTS:
+                    return FAMILY_FULL
+                closest = await db.scalar(select(distance).order_by(distance).limit(1))
+                if closest is not None and 1 - closest >= DUPLICATE_SIMILARITY:
+                    return FAMILY_DUPLICATE
+                db.add(
+                    AssistantFamilyMemory(content=fact, embedding=vector, author_id=author_id, author_name=author_name)
+                )
+                await db.commit()
+        except Exception:
+            logger.warning("family memory update failed", exc_info=True)
+            return FAMILY_FAILED
+        return FAMILY_SAVED
+
+    async def list_facts(self) -> list[AssistantFamilyMemory]:
+        statement = select(AssistantFamilyMemory).order_by(
+            AssistantFamilyMemory.created_at.desc(), AssistantFamilyMemory.id
+        )
+        async with self._sessions() as db:
+            return list(await db.scalars(statement))
+
+    async def get(self, memory_id: uuid.UUID) -> AssistantFamilyMemory | None:
+        async with self._sessions() as db:
+            return await db.get(AssistantFamilyMemory, memory_id)
+
+    async def forget(self, memory_id: uuid.UUID) -> None:
+        async with self._sessions() as db:
+            await db.execute(delete(AssistantFamilyMemory).where(AssistantFamilyMemory.id == memory_id))
+            await db.commit()
+
+
 class Memory:
-    """Every operation is scoped to one member; no method can read across people."""
+    """Every personal operation is scoped to one member; shared notes live apart in `family`."""
 
     def __init__(
         self,
@@ -79,6 +146,7 @@ class Memory:
         self._complete = complete
         self._embed = embed
         self._locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self.family = FamilyMemory(session_factory, embed)
 
     async def recall(self, member_id: int, role: str, query: str) -> list[str]:
         """A failed recall must cost the person nothing but the personal touch."""

@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import access, phones
 from lunagpt.assistant.pi_client import PiClient, PiConflictError, PiNotFoundError, PiUnavailableError
+from lunagpt.assistant.telegram import is_reply_to_prompt
 from lunagpt.config import settings
 from lunagpt.models import AssistantApplication, AssistantMember
 
@@ -504,9 +505,7 @@ class PeopleDesk:
 
     @staticmethod
     def is_search_reply(message: Message) -> bool:
-        """Only the bot can author the prompt, so a reply to it is a search and never a chat turn."""
-        reply = message.reply_to_message
-        return bool(reply and reply.from_user and reply.from_user.is_bot and SEARCH_PROMPT in (reply.text or ""))
+        return bool(is_reply_to_prompt(message, SEARCH_PROMPT))
 
     async def _ask_number(self, chat_id: int, prefix: str = "") -> None:
         markup = ForceReply(input_field_placeholder="+998 90 123 45 67")

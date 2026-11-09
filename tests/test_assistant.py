@@ -454,6 +454,9 @@ def _with_memory(harness: Any, monkeypatch: pytest.MonkeyPatch, role: str, count
         list_facts=AsyncMock(return_value=[_memory_fact(i) for i in range(count)]),
         forget=AsyncMock(return_value=True),
         forget_all=AsyncMock(),
+        family=MagicMock(
+            recall=AsyncMock(return_value=("Бабушка приезжает в мае",)), add=AsyncMock(return_value="saved")
+        ),
     )
     instance._memory = memory
     return instance, memory
@@ -491,7 +494,7 @@ async def test_kid_danger_message_is_not_remembered(harness: Any, monkeypatch: p
 @pytest.mark.asyncio
 async def test_memory_view_pages_and_delete_buttons(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     instance, _ = _with_memory(harness, monkeypatch, "owner", count=10)
-    text, markup = await instance._memory_view(1, 1)
+    text, markup = await instance._memory_view(_member("owner"), 1)
     assert "9. факт 8" in text and "(10)" in text
     data = [b.callback_data for row in markup.inline_keyboard for b in row]
     assert all(len(item.encode()) <= 64 for item in data)
@@ -692,3 +695,137 @@ async def test_quiz_level_follows_age(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(llm, "_chat", fake_chat)
     await llm.generate_quiz(1, 16)
     assert "старшеклассника" in payloads[0]["messages"][0]["content"]
+
+
+@pytest.mark.parametrize(
+    ("text", "fact"),
+    [
+        ("запомни для семьи, что у бабушки день рождения 5 мая", "у бабушки день рождения 5 мая"),
+        ("Запомни для всей семьи: врач в среду", "врач в среду"),
+        ("запиши для всех код домофона другой", "код домофона другой"),
+        ("сохрани в общей памяти что кот боится пылесоса", "кот боится пылесоса"),
+        ("запомни в семейной памяти\nпоездка в июле", "поездка в июле"),
+    ],
+)
+def test_family_request_is_recognized(text: str, fact: str) -> None:
+    assert bot.family_request(text) == fact
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "запомни, что я люблю футбол",
+        "запомни для меня номер",
+        "что семья думает",
+        "запомни для семьи",
+        "для семьи запомни",
+    ],
+)
+def test_ordinary_messages_are_not_family_requests(text: str) -> None:
+    assert bot.family_request(text) is None
+
+
+@pytest.mark.asyncio
+async def test_family_request_is_saved_without_the_model(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, memory = _with_memory(harness, monkeypatch, "kid")
+    _, send, answer = harness
+    await instance.on_message(_message("запомни для семьи, что кот боится пылесоса"))
+    memory.family.add.assert_awaited_once_with(1, "Тест", "кот боится пылесоса")
+    answer.assert_not_awaited()
+    memory.remember.assert_not_called()
+    assert _sent(send) == bot.FAMILY_REPLIES["saved"]
+
+
+@pytest.mark.asyncio
+async def test_guest_cannot_write_to_family_memory(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, memory = _with_memory(harness, monkeypatch, "guest")
+    _, _, answer = harness
+    await instance.on_message(_message("запомни для семьи, что кот боится пылесоса"))
+    memory.family.add.assert_not_awaited()
+    answer.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_child_in_danger_is_not_filed_as_a_note(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, memory = _with_memory(harness, monkeypatch, "kid")
+    alert = AsyncMock()
+    monkeypatch.setattr(instance, "_alert_parents", alert)
+    await instance.on_message(_message("запомни для семьи, что меня бьют"))
+    alert.assert_awaited_once()
+    memory.family.add.assert_not_awaited()
+
+
+def _reply_to(text: str, prompt: str) -> Any:
+    message = _message(text)
+    message.reply_to_message = MagicMock(text=prompt, from_user=MagicMock(is_bot=True))
+    return message
+
+
+@pytest.mark.asyncio
+async def test_answer_to_the_family_prompt_is_kept_word_for_word(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, memory = _with_memory(harness, monkeypatch, "adult")
+    await instance.on_message(_reply_to("дача в августе", bot.FAMILY_PROMPT))
+    memory.family.add.assert_awaited_once_with(1, "Тест", "дача в августе")
+
+
+@pytest.mark.asyncio
+async def test_guest_answering_the_family_prompt_writes_nothing(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, memory = _with_memory(harness, monkeypatch, "guest")
+    await instance.on_message(_reply_to("дача в августе", bot.FAMILY_PROMPT))
+    memory.family.add.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_family_notes_reach_the_reply_by_role(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, memory = _with_memory(harness, monkeypatch, "kid")
+    _, _, answer = harness
+    await instance.on_message(_message("когда приедет бабушка?"))
+    memory.family.recall.assert_awaited_once_with("kid", "когда приедет бабушка?")
+    assert answer.await_args.args[5].family_facts == ("Бабушка приезжает в мае",)
+
+
+def test_family_memory_buttons_are_closed_to_guests() -> None:
+    for prefix in ("fam", "fama", "famd", "famy"):
+        assert not bot.LunaBot._callback_allowed("guest", prefix)
+        assert bot.LunaBot._callback_allowed("kid", prefix) and bot.LunaBot._callback_allowed("owner", prefix)
+
+
+def _labels(markup: Any) -> list[str]:
+    return [button.text for row in markup.inline_keyboard for button in row]
+
+
+@pytest.mark.asyncio
+async def test_memory_view_offers_family_memory_only_to_family(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, _ = _with_memory(harness, monkeypatch, "kid")
+    _, markup = await instance._memory_view(_member("kid"), 0)
+    assert "🏠 Общая память" in _labels(markup)
+    _, markup = await instance._memory_view(_member("guest"), 0)
+    assert markup is None
+
+
+def _family_note(author: int, index: int = 1) -> Any:
+    return MagicMock(id=uuid.UUID(int=index), content="заметка", author_id=author, author_name="Аня")
+
+
+@pytest.mark.asyncio
+async def test_child_may_delete_only_own_family_notes(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, memory = _with_memory(harness, monkeypatch, "kid")
+    memory.family.list_facts = AsyncMock(return_value=[_family_note(1, 1), _family_note(2, 2)])
+    _, markup = await instance._family_view(_member("kid"), 0)
+    assert [label for label in _labels(markup) if label.startswith("🗑")] == ["🗑 1"]
+    _, markup = await instance._family_view(_member("adult"), 0)
+    assert [label for label in _labels(markup) if label.startswith("🗑")] == ["🗑 1", "🗑 2"]
+
+
+@pytest.mark.asyncio
+async def test_old_button_cannot_delete_someone_elses_note(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, memory = _with_memory(harness, monkeypatch, "kid")
+    note = _family_note(2)
+    memory.family.get = AsyncMock(return_value=note)
+    memory.family.forget = AsyncMock()
+    memory.family.list_facts = AsyncMock(return_value=[note])
+    callback = MagicMock(message=MagicMock(spec=Message, edit_text=AsyncMock()))
+    await instance._forget_family_fact(callback, _member("kid"), note.id.hex)
+    memory.family.forget.assert_not_awaited()
+    await instance._forget_family_fact(callback, _member("adult"), note.id.hex)
+    memory.family.forget.assert_awaited_once_with(note.id)

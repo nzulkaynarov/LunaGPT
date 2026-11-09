@@ -202,3 +202,82 @@ async def test_facts_reach_the_system_prompt_as_notes(monkeypatch: pytest.Monkey
 @pytest.mark.asyncio
 async def test_memory_traces_keep_family_text_redacted() -> None:
     assert "client:luna-assistant" in memories._metadata(1, "kid")["tags"]
+
+
+def _family(sessions: Any, embed: Any = None) -> memories.FamilyMemory:
+    async def default_embed(fact: str) -> list[float]:
+        return vector_for(fact)
+
+    return memories.FamilyMemory(sessions, embed or default_embed)
+
+
+@pytest.mark.asyncio
+async def test_family_note_reaches_every_family_role_and_never_a_guest(sessions: Any) -> None:
+    family = _family(sessions)
+    assert await family.add(1, "Глава", "Бабушка приезжает в мае") == memories.FAMILY_SAVED
+    for role in ("owner", "adult", "kid"):
+        assert await family.recall(role, "когда?") == ("Бабушка приезжает в мае",)
+    assert await family.recall("guest", "когда?") == ()
+
+
+@pytest.mark.asyncio
+async def test_family_note_is_not_duplicated(sessions: Any) -> None:
+    family = _family(sessions)
+    await family.add(1, "Глава", "Кот боится пылесоса")
+    assert await family.add(2, "Аня", "Кот боится пылесоса") == memories.FAMILY_DUPLICATE
+    assert len(await family.list_facts()) == 1
+
+
+@pytest.mark.asyncio
+async def test_family_memory_refuses_rather_than_drops_old_notes(
+    sessions: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(memories, "MAX_FAMILY_FACTS", 1)
+    family = _family(sessions)
+    await family.add(1, "Глава", "Первая заметка о доме")
+    assert await family.add(1, "Глава", "Вторая совсем другая запись") == memories.FAMILY_FULL
+    assert [fact.content for fact in await family.list_facts()] == ["Первая заметка о доме"]
+
+
+@pytest.mark.asyncio
+async def test_family_memory_reports_a_failure(sessions: Any) -> None:
+    family = _family(sessions, AsyncMock(side_effect=RuntimeError("embeddings are down")))
+    assert await family.add(1, "Глава", "Заметка") == memories.FAMILY_FAILED
+
+
+@pytest.mark.asyncio
+async def test_large_family_memory_uses_similarity_and_keeps_order(
+    sessions: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(memories, "MAX_FACTS_IN_PROMPT", 2)
+    family = _family(sessions)
+    for note in ("Первая заметка о доме", "Вторая запись про кота", "Третье про поездку"):
+        await family.add(1, "Глава", note)
+    assert len(await family.recall("kid", "Вторая запись про кота")) == 2
+
+
+@pytest.mark.asyncio
+async def test_family_note_outlives_its_author_and_can_be_forgotten(sessions: Any) -> None:
+    family = _family(sessions)
+    await family.add(1, "Глава", "Кот боится пылесоса")
+    async with sessions() as db:
+        await db.delete(await db.get(AssistantMember, OWNER))
+        await db.commit()
+    fact = (await family.list_facts())[0]
+    assert fact.author_name == "Глава"
+    await family.forget(fact.id)
+    assert await family.list_facts() == []
+
+
+@pytest.mark.asyncio
+async def test_family_notes_reach_the_prompt_apart_from_personal_facts(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, str] = {}
+
+    async def fake_run(client: Any, model: str, messages: list[dict[str, Any]], *args: Any) -> str:
+        captured["system"] = messages[0]["content"]
+        return "ответ"
+
+    monkeypatch.setattr(llm, "_run_model", fake_run)
+    await llm.generate_reply("kid", 1, [], "привет", ["Личный факт"], llm.ReplyOptions(family_facts=("Общая заметка",)))
+    assert "Общие заметки семьи" in captured["system"]
+    assert captured["system"].index("Личный факт") < captured["system"].index("Общая заметка")

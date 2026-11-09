@@ -151,6 +151,29 @@ class AssistantMemory(Base):
     )
 
 
+class AssistantFamilyMemory(Base):
+    """A note one family member asked to keep for the whole family; guests never reach this table."""
+
+    __tablename__ = "assistant_family_memories"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding = mapped_column(Vector(1024), nullable=False)
+    author_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    author_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_assistant_family_memories_embedding",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_with={"m": 16, "ef_construction": 64},
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
+    )
+
+
 class AssistantMessage(Base):
     """The last turns of a conversation, kept so a restart does not interrupt it."""
 

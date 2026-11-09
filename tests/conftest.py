@@ -13,9 +13,18 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from lunagpt.config import settings
 from lunagpt.db import Base
-from lunagpt.models import AssistantApplication, AssistantMember, AssistantMemory, AssistantMessage
+from lunagpt.models import (
+    AssistantApplication,
+    AssistantFamilyMemory,
+    AssistantMember,
+    AssistantMemory,
+    AssistantMessage,
+)
 
-TABLES = [model.__table__ for model in (AssistantMember, AssistantApplication, AssistantMemory, AssistantMessage)]
+TABLES = [
+    model.__table__
+    for model in (AssistantMember, AssistantApplication, AssistantMemory, AssistantFamilyMemory, AssistantMessage)
+]
 
 
 @pytest_asyncio.fixture
