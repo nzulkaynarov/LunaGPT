@@ -42,3 +42,15 @@
 - Мониторинг: [Uptime Kuma vs Healthchecks](https://selfhosting.sh/compare/uptime-kuma-vs-healthchecks/)
 - Родительский контроль: [сравнение приложений 2026](https://www.security.org/parental-controls/best/)
 - Локальные модели: [Ollama Gemma 4](https://ollama.com/library/gemma4)
+
+## Разбор устройств
+
+**Наблюдение на реальных данных (2026-11-09):** из 60 устройств без владельца 34 называются `Watch` и 16 `Mac`, у всех приватный адрес.
+
+**Причина.** Apple в режиме Rotating меняет приватный адрес примерно раз в две недели, а в режиме Fixed не меняет ([Apple: private Wi-Fi addresses](https://support.apple.com/en-al/102509), [Apple Platform Deployment](https://support.apple.com/en-sg/guide/platform-support/sup56da67cfd/web)). Настройка задаётся для каждой сети на самом устройстве. Если выбрать Fixed для домашней сети, новые записи перестанут появляться.
+
+**Решения:**
+- Группируются только приватные адреса с одинаковым именем. Два настоящих MAC считаются двумя устройствами, даже если имя совпало. Приватный адрес определяется по локально администрируемому биту.
+- Объединение идёт одной транзакцией через уже существующий перенос правил и минут HomeSec.
+- Производитель берётся из реестра IEEE в пакете [mac-vendor-lookup](https://pypi.org/project/mac-vendor-lookup/) на ПК, чтобы не нагружать память Pi. Для приватных адресов поиск не выполняется: такие адреса в реестре не значатся.
+- Весь список состояний живёт на Pi, в `callback_data` только короткий id и номер карточки ([Bot API, лимит 64 байта](https://docs.aiogram.dev/en/latest/api/types/inline_keyboard_button.html)).
