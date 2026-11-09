@@ -81,3 +81,19 @@ async def test_rejected_markdown_falls_back_to_plain_text() -> None:
     )
     await telegram.send_model_reply(bot, 1, "сломанный <тег> ответ")
     assert bot.send_message.await_args.args[1] == "сломанный <тег> ответ"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("билет $5, обед $10, итого 15$", r"билет \$5, обед \$10, итого 15\$"),
+        ("тариф $5 в месяц", r"тариф \$5 в месяц"),
+        ("если $x то плати $y", r"если \$x то плати \$y"),
+        ("формула $E = mc^2$ верна", "формула $E = mc^2$ верна"),
+        ("$$\\int_0^1 x dx$$", "$$\\int_0^1 x dx$$"),
+        ("`echo $HOME` и $x^2$", "`echo $HOME` и $x^2$"),
+        ("```\nprice=$5\n```", "```\nprice=$5\n```"),
+    ],
+)
+def test_only_math_stays_a_formula(raw: str, expected: str) -> None:
+    assert telegram.escape_prices(raw) == expected

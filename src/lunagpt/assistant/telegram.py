@@ -9,6 +9,9 @@ from aiogram.types import InputRichMessage, Message
 
 MESSAGE_LIMIT = 4000  # Telegram rejects messages above 4096 characters
 RICH_MESSAGE_LIMIT = 32000  # Telegram rejects rich messages above 32768 characters
+# Code and display math stay as they are; an inline formula cannot open on a digit or a space, or close after a space.
+DOLLARS = re.compile(r"```.*?```|`[^`\n]*`|\$\$.+?\$\$|\$(?![\d\s$])(?:[^$\n]*?[^\s$])?\$|\$", re.DOTALL)
+CYRILLIC = re.compile(r"[А-Яа-яЁё]")
 # A model's image link would be fetched and shown by Telegram, past the strict search children get.
 EMBEDDED_MEDIA = re.compile(
     r"!\[[^\]]*\]\([^)]*\)|<(?:img|video|audio|iframe)\b[^>]*>(?:\s*</(?:video|audio|iframe)>)?", re.I
@@ -38,9 +41,21 @@ async def send_long(bot: Bot, chat_id: int, text: str, reply_markup: Any = None)
     await bot.send_message(chat_id, parts[-1], reply_markup=reply_markup)
 
 
+def _keep_or_escape_dollars(match: re.Match[str]) -> str:
+    found = match.group()
+    if found == "$" or (found[0] == "$" and found[:2] != "$$" and CYRILLIC.search(found)):
+        return found.replace("$", r"\$")
+    return found
+
+
+def escape_prices(markdown: str) -> str:
+    """Telegram reads any pair of dollars as a formula, so only what looks like math stays one."""
+    return DOLLARS.sub(_keep_or_escape_dollars, markdown)
+
+
 async def send_model_reply(bot: Bot, chat_id: int, markdown: str, reply_markup: Any = None) -> None:
     """Show a model's Markdown as Telegram's native rich message; plain text is the fallback."""
-    text = EMBEDDED_MEDIA.sub("", markdown).strip() or markdown
+    text = escape_prices(EMBEDDED_MEDIA.sub("", markdown).strip() or markdown)
     try:
         await bot.send_rich_message(
             chat_id, InputRichMessage(markdown=text[:RICH_MESSAGE_LIMIT]), reply_markup=reply_markup
