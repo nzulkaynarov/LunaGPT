@@ -236,6 +236,9 @@ class LunaBot:
         if member is None:
             await self._people.on_stranger(message)
             return
+        if member.role in access.ADULT_ROLES and self._people.is_edit_reply(message):
+            await self._people.apply_edit(member, message)
+            return
         if member.role in access.ADULT_ROLES and self._people.is_search_reply(message):
             await self._people.search(user_id, message)
             return

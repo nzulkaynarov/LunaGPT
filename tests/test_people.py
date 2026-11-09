@@ -624,3 +624,82 @@ async def test_other_messages_get_a_short_hint_not_the_greeting(desk: Any, monke
     monkeypatch.setattr(people, "WELCOME_IMAGE", Path("/nonexistent"))
     await desk.on_stranger(_message(text="привет"))
     assert desk._bot.send_message.await_args.args[1] == people.ASK_CONTACT
+
+
+def _edit_reply(prompt: str, text: str = "", phone: str | None = None) -> MagicMock:
+    message = MagicMock(spec=Message, text=text)
+    message.reply_to_message = MagicMock(text=prompt, from_user=MagicMock(is_bot=True))
+    message.contact = None if phone is None else MagicMock(phone_number=phone)
+    return message
+
+
+def _name_prompt(telegram_id: int = NEW) -> str:
+    return str(people.NAME_PROMPT.format(id=telegram_id))
+
+
+def _phone_prompt(telegram_id: int = NEW) -> str:
+    return str(people.PHONE_PROMPT.format(id=telegram_id))
+
+
+@pytest.mark.asyncio
+async def test_guest_can_be_renamed_and_card_comes_back(desk: Any, sessions: Any) -> None:
+    await _guest(desk)
+    assert f"pen:{NEW}" in _shown(await _press_as(desk, f"pc:{NEW}"))[1]
+    desk._bot.send_message.reset_mock()
+    await desk.apply_edit(_actor(), _edit_reply(_name_prompt(), "  Дядя   Марат "))
+    member = await _member(sessions)
+    assert member is not None and member.name == "Дядя Марат"
+    assert "Дядя Марат" in desk._bot.send_message.await_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_phone_can_be_set_by_text_or_contact(desk: Any, sessions: Any) -> None:
+    await _guest(desk)
+    await desk.apply_edit(_actor(), _edit_reply(_phone_prompt(), "90 111 22 33"))
+    member = await _member(sessions)
+    assert member is not None and member.phone == "+998901112233"
+    await desk.apply_edit(_actor(), _edit_reply(_phone_prompt(), phone="998901234567"))
+    member = await _member(sessions)
+    assert member is not None and member.phone == PHONE
+
+
+@pytest.mark.asyncio
+async def test_bad_input_asks_again_and_changes_nothing(desk: Any, sessions: Any) -> None:
+    await _guest(desk)
+    await desk.apply_edit(_actor(), _edit_reply(_phone_prompt(), "Миша"))
+    call = desk._bot.send_message.await_args
+    assert people.NOT_A_NUMBER in call.args[1] and isinstance(call.kwargs["reply_markup"], ForceReply)
+    await desk.apply_edit(_actor(), _edit_reply(_name_prompt(), "   "))
+    member = await _member(sessions)
+    assert member is not None and member.name == "Новый" and member.phone == PHONE
+
+
+@pytest.mark.asyncio
+async def test_name_from_homesec_cannot_be_edited_here(desk: Any, sessions: Any) -> None:
+    await _apply(desk)
+    await _press_as(desk, f"apf:{NEW}:4")
+    text, actions = _shown(await _press_as(desk, f"pc:{NEW}"))
+    assert f"pen:{NEW}" not in actions and f"pep:{NEW}" in actions and "HomeSec" in text
+    await desk.apply_edit(_actor(), _edit_reply(_name_prompt(), "Другое"))
+    member = await _member(sessions)
+    assert member is not None and member.name == "Миша"
+
+
+@pytest.mark.asyncio
+async def test_adult_cannot_edit_another_family_member(desk: Any, sessions: Any) -> None:
+    await _apply(desk)
+    await _press_as(desk, f"apf:{NEW}:3")
+    adult = _actor("adult", ADULT)
+    assert f"pep:{NEW}" not in _shown(await _press_as(desk, f"pc:{NEW}", adult))[1]
+    await desk.apply_edit(adult, _edit_reply(_phone_prompt(), "90 111 22 33"))
+    member = await _member(sessions)
+    assert member is not None and member.phone == PHONE
+    assert desk._bot.send_message.await_args.args[1] == people.NOT_ALLOWED
+
+
+def test_only_the_bots_edit_prompt_counts() -> None:
+    assert PeopleDesk.is_edit_reply(_edit_reply(_name_prompt()))
+    assert not PeopleDesk.is_edit_reply(_edit_reply(people.SEARCH_PROMPT))
+    forged = _edit_reply(_name_prompt())
+    forged.reply_to_message.from_user.is_bot = False
+    assert not PeopleDesk.is_edit_reply(forged)

@@ -2,6 +2,7 @@
 
 import html
 import logging
+import re
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -58,6 +59,8 @@ PEOPLE_PREFIXES = frozenset(
         "pty",
         "pm",
         "pmy",
+        "pen",
+        "pep",
     }
 )
 REPLY_INTERVAL_SECONDS = 3600
@@ -88,6 +91,12 @@ SEARCH_PROMPT = "Пришли номер телефона или контакт 
 AGES = range(5, 18)
 ACCESS_DAYS = (1, 7, 30)
 MONEY_LIMITS = (1, 3, 10)
+NAME_PROMPT = "Напиши новое имя ответом на это сообщение. Карточка №{id}"
+PHONE_PROMPT = "Пришли новый номер или контакт ответом на это сообщение. Карточка №{id}"
+EDIT_PROMPT = re.compile(r"(новое имя|новый номер).*Карточка №(\d+)", re.DOTALL)
+NOT_ALLOWED = "Это действие недоступно."
+NOT_A_NAME = "Имя не должно быть пустым."
+MAX_NAME_CHARS = 100
 NOT_A_NUMBER = "Не похоже на номер телефона."
 INVITE_TEXT = "Присоединяйся к Luna: нажми «Старт» и отправь свой контакт."
 
@@ -116,6 +125,15 @@ def _button(text: str, data: str, style: str | None = None) -> InlineKeyboardBut
 
 def _pairs(buttons: list[InlineKeyboardButton]) -> list[list[InlineKeyboardButton]]:
     return [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
+
+
+def _edit_target(message: Message) -> tuple[str, int] | None:
+    """Which field of which card this message answers, read from the bot's own prompt."""
+    reply = message.reply_to_message
+    match = EDIT_PROMPT.search(reply.text or "") if reply is not None else None
+    if match is None:
+        return None
+    return ("name" if match.group(1) == "новое имя" else "phone"), int(match.group(2))
 
 
 class PeopleDesk:
@@ -357,6 +375,11 @@ class PeopleDesk:
             return False
         return bool(target.role == "guest" or actor.role == "owner")
 
+    @staticmethod
+    def _may_edit(actor: AssistantMember, target: AssistantMember) -> bool:
+        """Adults manage guests, the head of the family manages everyone, and anyone manages their own card."""
+        return bool(target.telegram_id == actor.telegram_id or target.role == "guest" or actor.role == "owner")
+
     async def _exclude(self, callback: CallbackQuery, actor: AssistantMember, telegram_id: int) -> None:
         async with self._sessions() as db:
             member = await db.get(AssistantMember, telegram_id, with_for_update=True)
@@ -445,6 +468,11 @@ class PeopleDesk:
             rows.append([_button("👨‍👩‍👧 Перевести в семью", f"pgf:{telegram_id}")])
         if member.role == "kid":
             rows.append([_button("🎂 Возраст", f"pa:{telegram_id}")])
+        if self._may_edit(actor, member):
+            edits = [_button("📞 Изменить номер", f"pep:{telegram_id}")]
+            if member.homesec_person_id is None:
+                edits.insert(0, _button("✏️ Изменить имя", f"pen:{telegram_id}"))
+            rows.append(edits)
         if self._may_exclude(actor, member):
             rows.append([_button("⛔ Снять доступ", f"px:{telegram_id}", "danger")])
         section = "g" if member.role == "guest" else "f"
@@ -453,6 +481,8 @@ class PeopleDesk:
         if member.phone:
             lines.append(f"Телефон: {member.phone}")
         lines.extend(self._limits_lines(member))
+        if member.homesec_person_id is not None:
+            lines.append("Имя задаётся в HomeSec.")
         return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 
     @staticmethod
@@ -529,6 +559,54 @@ class PeopleDesk:
         )
         return "Снять доступ? Память этого человека будет удалена, новую заявку он подать не сможет.", markup
 
+    # ---- editing a card ----
+
+    @staticmethod
+    def is_edit_reply(message: Message) -> bool:
+        return is_reply_to_prompt(message, "Карточка №") and bool(_edit_target(message))
+
+    async def _ask_edit(self, chat_id: int, prompt: str, telegram_id: int) -> None:
+        await self._bot.send_message(chat_id, prompt.format(id=telegram_id), reply_markup=ForceReply())
+
+    async def apply_edit(self, actor: AssistantMember, message: Message) -> None:
+        """The prompt only says which card; the right to change it is decided again here."""
+        target = _edit_target(message)
+        if target is None:
+            return
+        field, telegram_id = target
+        if field == "phone":
+            problem, values = self._new_phone(message)
+        else:
+            problem, values = self._new_name(message)
+        if problem:
+            prompt = PHONE_PROMPT if field == "phone" else NAME_PROMPT
+            await self._ask_edit(actor.telegram_id, f"{problem}\n{prompt}", telegram_id)
+            return
+        async with self._sessions() as db:
+            member = await db.get(AssistantMember, telegram_id, with_for_update=True)
+            allowed = member is not None and self._may_edit(actor, member)
+            if member is not None and allowed and (field == "phone" or member.homesec_person_id is None):
+                for name, value in values.items():
+                    setattr(member, name, value)
+                await db.commit()
+            else:
+                await db.rollback()
+                await self._bot.send_message(actor.telegram_id, NOT_ALLOWED)
+                return
+        text, markup = await self._member_card(actor, telegram_id)
+        await self._bot.send_message(actor.telegram_id, text, reply_markup=markup)
+
+    @staticmethod
+    def _new_name(message: Message) -> tuple[str, dict[str, Any]]:
+        name = " ".join((message.text or "").split())[:MAX_NAME_CHARS]
+        return ("", {"name": name}) if name else (NOT_A_NAME, {})
+
+    @staticmethod
+    def _new_phone(message: Message) -> tuple[str, dict[str, Any]]:
+        phone = phones.from_telegram(message.contact.phone_number) if message.contact else None
+        phone = phone or phones.from_adult(message.text or "")
+        return ("", {"phone": phone}) if phone else (NOT_A_NUMBER, {})
+
     # ---- search by number ----
 
     @staticmethod
@@ -601,6 +679,10 @@ class PeopleDesk:
             await self._update_member(
                 callback, actor, int(args[0]), "guest", money_limit_usd=Decimal(usd) if usd else None
             )
+        elif prefix == "pen":
+            await self._ask_edit(actor.telegram_id, NAME_PROMPT, int(args[0]))
+        elif prefix == "pep":
+            await self._ask_edit(actor.telegram_id, PHONE_PROMPT, int(args[0]))
         elif prefix == "pf":
             await self._ask_number(actor.telegram_id)
         elif prefix == "pls":
