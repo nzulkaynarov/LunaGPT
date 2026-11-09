@@ -81,18 +81,6 @@ class PiClient:
         result: dict[str, Any] = await self._request("POST", f"shared-devices/{device_id}/state", body)
         return result
 
-    async def device_triage(self) -> list[dict[str, Any]]:
-        result: list[dict[str, Any]] = await self._request("GET", "device-triage")
-        return result
-
-    async def sort_devices(self, device_id: int, destination: str) -> dict[str, Any]:
-        """Apply a menu choice: "shared", "iot", or a person's id."""
-        body: dict[str, Any] = (
-            {"kind": destination} if destination in ("shared", "iot") else {"person_id": int(destination)}
-        )
-        result: dict[str, Any] = await self._request("POST", f"device-triage/{device_id}", body)
-        return result
-
     async def quota(self, name: str) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = await self._request("GET", f"{self._person(name)}/quota")
         return result

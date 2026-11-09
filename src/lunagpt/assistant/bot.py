@@ -28,7 +28,6 @@ from lunagpt.assistant import access
 from lunagpt.assistant.llm import QuizQuestion
 from lunagpt.assistant.pi_client import PiClient, PiConflictError, PiNotFoundError, PiUnavailableError
 from lunagpt.assistant.telegram import send_long
-from lunagpt.assistant.vendors import vendor_of
 from lunagpt.config import settings
 from lunagpt.models import AssistantMember
 
@@ -42,24 +41,12 @@ BTN_ASK_TIME = "🙏 Попросить время"
 BTN_QUIZ = "🧠 Викторина +15 мин"
 BTN_FAMILY = "👨‍👩‍👧 Семья"
 BTN_SHARED = "📺 Общие устройства"
-BTN_DEVICES = "🗂 Устройства"
 BTN_GUEST = "➕ Гость"
 BTN_MEMBERS = "👥 Участники"
 BTN_HELP = "❓ Помощь"
-MENU_BUTTONS = {
-    BTN_MY_TIME,
-    BTN_ASK_TIME,
-    BTN_QUIZ,
-    BTN_FAMILY,
-    BTN_SHARED,
-    BTN_DEVICES,
-    BTN_GUEST,
-    BTN_MEMBERS,
-    BTN_HELP,
-}
+MENU_BUTTONS = {BTN_MY_TIME, BTN_ASK_TIME, BTN_QUIZ, BTN_FAMILY, BTN_SHARED, BTN_GUEST, BTN_MEMBERS, BTN_HELP}
 GUEST_HOURS = (3, 6, 24, 72)
 SHARED_LABELS = {"kid": "👶 Детский режим", "off": "⛔ Выключено", "adult": "🍿 Для взрослых"}
-TRIAGE_KIND_LABELS = {"shared": "общее устройство", "iot": "умный дом"}
 TIME_POLL_SECONDS = 30
 TIME_REQUEST_TTL = timedelta(hours=24)
 PI_OFFLINE = "Сейчас домашняя сеть не отвечает, попробуй чуть позже."
@@ -102,7 +89,7 @@ class GuestInvite(StatesGroup):
 def main_keyboard(role: str) -> ReplyKeyboardMarkup:
     """The persistent menu; server-side checks still decide what each role may do."""
     layouts = {
-        "owner": [[BTN_FAMILY, BTN_SHARED], [BTN_DEVICES, BTN_GUEST], [BTN_MEMBERS, BTN_HELP]],
+        "owner": [[BTN_FAMILY, BTN_SHARED], [BTN_GUEST, BTN_MEMBERS], [BTN_HELP]],
         "adult": [[BTN_SHARED, BTN_GUEST], [BTN_HELP]],
         "kid": [[BTN_MY_TIME, BTN_ASK_TIME], [BTN_QUIZ, BTN_HELP]],
         "guest": [[BTN_HELP]],
@@ -113,35 +100,6 @@ def main_keyboard(role: str) -> ReplyKeyboardMarkup:
         is_persistent=True,
         input_field_placeholder="Напиши Luna…",
     )
-
-
-def triage_keyboard(device_id: int, index: int, total: int) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(text="👤 Чьё это?", callback_data=f"dvp:{device_id}:{index}")],
-        [
-            InlineKeyboardButton(text="📺 Общее", callback_data=f"dvc:{device_id}:shared:{index}"),
-            InlineKeyboardButton(text="🔌 Умный дом", callback_data=f"dvc:{device_id}:iot:{index}"),
-        ],
-    ]
-    if total > 1:
-        rows.append([InlineKeyboardButton(text="⏭ Дальше", callback_data=f"dv:{index + 1}")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def triage_card_text(group: dict[str, Any], index: int, total: int, vendor: str | None) -> str:
-    lines = [f"🗂 Разбор устройств: {index + 1} из {total}", "", f"«{group['name']}»"]
-    if group["count"] > 1:
-        lines.append(f"Записей: {group['count']}. Адрес приватный и меняется, поэтому устройство появлялось много раз.")
-    elif group["mac_random"]:
-        lines.append("Адрес приватный, производителя не определить.")
-    if vendor:
-        lines.append(f"Производитель: {vendor}")
-    if group["ip"]:
-        lines.append(f"Последний адрес в сети: {group['ip']}")
-    lines.append(f"Последняя новая запись: {group['last_seen'].replace('T', ' ')}")
-    if group["owners"]:
-        lines.append("С таким именем уже есть у: " + ", ".join(owner["name"] for owner in group["owners"]))
-    return "\n".join(lines)
 
 
 def shared_actions_keyboard(device_id: int) -> InlineKeyboardMarkup:
@@ -252,8 +210,6 @@ class LunaBot:
             await self._send_members(member)
         elif text == BTN_SHARED and adult:
             await self._send_shared_list(member)
-        elif text == BTN_DEVICES and member.role == "owner":
-            await self._send(member.telegram_id, *await self._triage_view(0))
         elif text == BTN_GUEST and adult and state is not None:
             await state.set_state(GuestInvite.name)
             await self._send(
@@ -294,14 +250,6 @@ class LunaBot:
             await self._show_shared_device(callback, int(args[0]))
         elif prefix == "shs":
             await self._change_shared_device(callback, int(args[0]), args[1])
-        elif prefix == "dv":
-            await self._edit(callback, *await self._triage_view(int(args[0])))
-        elif prefix == "dvp":
-            await self._edit(callback, *await self._triage_people_view(int(args[0]), int(args[1])))
-        elif prefix == "dvc":
-            await self._choose_destination(callback, int(args[0]), args[1], int(args[2]))
-        elif prefix == "dvy":
-            await self._apply_destination(callback, int(args[0]), args[1], int(args[2]))
         elif prefix == "rml":
             await self._edit(callback, *await self._members_view(member))
         elif prefix == "rm":
@@ -313,7 +261,7 @@ class LunaBot:
     def _callback_allowed(role: str, prefix: str) -> bool:
         if prefix == "quiz":
             return role == "kid"
-        if prefix in ("link", "rm", "rmy", "rml", "dv", "dvp", "dvc", "dvy"):
+        if prefix in ("link", "rm", "rmy", "rml"):
             return role == "owner"
         if prefix in ("guest", "sh", "shs", "shl"):
             return role in access.ADULT_ROLES
@@ -392,89 +340,6 @@ class LunaBot:
             await self._edit(callback, PI_OFFLINE, None)
             return
         await self._edit(callback, shared_status_text(device), shared_actions_keyboard(device_id))
-
-    async def _triage_view(self, index: int, notice: str = "") -> tuple[str, InlineKeyboardMarkup | None]:
-        prefix = f"{notice}\n\n" if notice else ""
-        try:
-            groups = await self._pi.device_triage()
-        except (PiNotFoundError, PiUnavailableError):
-            return PI_OFFLINE, None
-        if not groups:
-            return f"{prefix}Все устройства разобраны ✅", None
-        index %= len(groups)
-        group = groups[index]
-        vendor = None if group["mac_random"] else await vendor_of(group["mac"])
-        text = prefix + triage_card_text(group, index, len(groups), vendor)
-        return text, triage_keyboard(int(group["id"]), index, len(groups))
-
-    async def _triage_group(self, device_id: int) -> dict[str, Any] | None:
-        return next((g for g in await self._pi.device_triage() if int(g["id"]) == device_id), None)
-
-    async def _triage_people_view(self, device_id: int, index: int) -> tuple[str, InlineKeyboardMarkup | None]:
-        try:
-            group = await self._triage_group(device_id)
-            people = await self._pi.people()
-        except (PiNotFoundError, PiUnavailableError):
-            return PI_OFFLINE, None
-        if group is None:
-            return await self._triage_view(index, "Это устройство уже разобрали.")
-        owners = {int(owner["id"]) for owner in group["owners"]}
-        people.sort(key=lambda person: (int(person["id"]) not in owners, str(person["name"])))
-        buttons = [
-            InlineKeyboardButton(text=str(p["name"])[:30], callback_data=f"dvc:{device_id}:{p['id']}:{index}")
-            for p in people
-        ]
-        rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
-        rows.append([InlineKeyboardButton(text="← Назад", callback_data=f"dv:{index}")])
-        return f"Чьё устройство «{group['name']}»?", InlineKeyboardMarkup(inline_keyboard=rows)
-
-    async def _destination_label(self, destination: str) -> str:
-        if destination in TRIAGE_KIND_LABELS:
-            return TRIAGE_KIND_LABELS[destination]
-        people = await self._pi.people()
-        return next((str(p["name"]) for p in people if str(p["id"]) == destination), "выбранному человеку")
-
-    async def _choose_destination(self, callback: CallbackQuery, device_id: int, destination: str, index: int) -> None:
-        """Folding many records cannot be undone with a button, so it asks first."""
-        try:
-            group = await self._triage_group(device_id)
-            if group is None:
-                await self._edit(callback, *await self._triage_view(index, "Это устройство уже разобрали."))
-                return
-            if group["count"] == 1:
-                await self._apply_destination(callback, device_id, destination, index)
-                return
-            label = await self._destination_label(destination)
-        except (PiNotFoundError, PiUnavailableError):
-            await self._edit(callback, PI_OFFLINE, None)
-            return
-        text = (
-            f"Объединить {group['count']} записей «{group['name']}» в одно устройство и записать: {label}?\n\n"
-            "Если такие устройства есть у нескольких людей, все записи достанутся одному. "
-            "Сеть сама заведёт новую запись, когда устройство сменит адрес."
-        )
-        markup = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Да", callback_data=f"dvy:{device_id}:{destination}:{index}")],
-                [InlineKeyboardButton(text="← Назад", callback_data=f"dv:{index}")],
-            ]
-        )
-        await self._edit(callback, text, markup)
-
-    async def _apply_destination(self, callback: CallbackQuery, device_id: int, destination: str, index: int) -> None:
-        try:
-            result = await self._pi.sort_devices(device_id, destination)
-        except PiNotFoundError:
-            await self._edit(callback, *await self._triage_view(index, "Это устройство уже разобрали."))
-            return
-        except PiConflictError:
-            await self._edit(callback, *await self._triage_view(index + 1, "Это устройство сети, его не трогаю."))
-            return
-        except PiUnavailableError:
-            await self._edit(callback, PI_OFFLINE, None)
-            return
-        where = result["person"] or TRIAGE_KIND_LABELS[result["kind"]]
-        await self._edit(callback, *await self._triage_view(index, f"✅ «{result['name']}» → {where}"))
 
     async def _members_view(self, member: AssistantMember) -> tuple[str, InlineKeyboardMarkup | None]:
         async with self._sessions() as db:
