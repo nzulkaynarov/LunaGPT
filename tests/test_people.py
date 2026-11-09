@@ -107,7 +107,8 @@ def _sent_to(desk: Any) -> list[int]:
 
 
 @pytest.mark.asyncio
-async def test_start_asks_for_contact(desk: Any) -> None:
+async def test_start_asks_for_contact(desk: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(people, "WELCOME_IMAGE", Path("/nonexistent"))
     await desk.on_stranger(_message())
     assert desk._bot.send_message.await_args.args[1] == people.GREETING.format(name="Новый")
     keyboard = desk._bot.send_message.await_args.kwargs["reply_markup"]
