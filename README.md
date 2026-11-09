@@ -160,7 +160,7 @@ uv run ruff format --check src/ tests/
 
 ## Luna AI Assistant
 
-Семейный ассистент в Telegram работает на этом хосте как сервис `luna-assistant`. Вход только по приглашениям, первая ссылка создаётся командой:
+Семейный ассистент в Telegram работает на этом хосте как сервис `luna-assistant`. Вход один: заявка с контактом и решение взрослого. Первый владелец создаётся командой:
 
 ```bash
 docker exec luna-assistant python3 -m lunagpt.assistant.add_owner TELEGRAM_ID "Имя"
