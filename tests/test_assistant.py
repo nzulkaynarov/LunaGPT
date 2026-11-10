@@ -183,12 +183,39 @@ async def test_unreadable_last_answer_is_explained(harness: Any, monkeypatch: py
         ("ответь голосом", True),
         ("Скажи это вслух, пожалуйста", True),
         ("say it out loud", True),
+        ("сделай этот текст голосом", True),
+        ("озвучь этот ответ", True),
+        ("расскажи голосом сказку", False),
         ("ответь голосом, какая погода в ташкенте", False),
         ("какая погода", False),
     ],
 )
 def test_bare_voice_request_is_told_from_a_question(text: str, bare: bool) -> None:
     assert speech.is_bare_voice_request(text) is bare
+
+
+@pytest.mark.parametrize(
+    ("text", "question"),
+    [
+        ("расскажи голосом сказку", "расскажи сказку"),
+        ("ответь голосом, какая погода", "ответь , какая погода"),
+        ("Tell me a story out loud", "Tell me a story"),
+    ],
+)
+def test_the_model_never_sees_the_request_to_speak(text: str, question: str) -> None:
+    assert speech.without_voice_words(text) == question
+
+
+@pytest.mark.asyncio
+async def test_typed_voice_request_reaches_the_model_without_voice_words(
+    harness: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance, _, answer = harness
+    _as_member(monkeypatch, _member())
+    _hearing(instance, None)
+    await instance.on_message(_message("расскажи голосом сказку"))
+    assert answer.call_args.args[3] == "расскажи сказку"
+    instance._speak.assert_awaited_once_with("ответ")
 
 
 def test_past_voice_refusals_are_dropped_from_history() -> None:

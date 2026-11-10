@@ -10,6 +10,7 @@ import av
 SAMPLE_RATE = 16_000
 SAMPLE_BYTES = 2
 OPUS_RATE = 48_000
+VOICE_BIT_RATE = 32_000  # clear speech, and a long story stays a small file
 SILENCE_RMS = 100  # about -50 dBFS, well below a voice on a phone microphone
 
 
@@ -40,6 +41,7 @@ def encode_voice(pcm: bytes, rate: int) -> bytes:
     buffer = io.BytesIO()
     with av.open(buffer, mode="w", format="ogg") as output:
         stream = output.add_stream("libopus", rate=OPUS_RATE)
+        stream.bit_rate = VOICE_BIT_RATE
         frame = av.AudioFrame(format="s16", layout="mono", samples=len(pcm) // SAMPLE_BYTES)
         frame.rate = rate
         frame.pts = 0

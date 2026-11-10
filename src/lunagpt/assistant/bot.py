@@ -40,6 +40,7 @@ from lunagpt.assistant.speech import (
     is_bare_voice_request,
     speak_reply,
     without_voice_refusals,
+    without_voice_words,
 )
 from lunagpt.assistant.telegram import is_reply_to_prompt, send_long, send_model_reply
 from lunagpt.assistant.waiting import cat_is_thinking
@@ -288,7 +289,10 @@ class LunaBot:
         if spoken_note is None and is_bare_voice_request(text):
             await self._say_last_reply(member)
             return
-        await self._chat(member, text, speak=spoken_note is not None or asks_for_voice(text))
+        if asks_for_voice(text):
+            await self._chat(member, without_voice_words(text), speak=True)
+            return
+        await self._chat(member, text, speak=spoken_note is not None)
 
     async def _menu_action(self, member: AssistantMember, text: str) -> bool:
         """Run the pressed menu button if this role is allowed to use it."""

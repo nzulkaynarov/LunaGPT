@@ -15,11 +15,13 @@ logger = logging.getLogger("lunagpt.assistant.speech")
 
 VOICES_DIR = Path("/app/voices")
 VOICE_FILES = {"ru": "ru_RU-irina-medium.onnx", "en": "en_US-lessac-medium.onnx"}
-MAX_SPOKEN_CHARS = 700  # about a minute of speech; anything longer is better read
+MAX_SPOKEN_CHARS = 3000  # about three and a half minutes, enough for a bedtime story
 # Links, code, tables and formulas make no sense read aloud, so those replies stay text only.
 NOT_SPEAKABLE = re.compile(r"https?://|www\.|```|\$\$|\\\(|\\\[|^\s*\|", re.MULTILINE)
 UNSPOKEN_CHARS = re.compile(r"_|[^\w\s.,!?:;'\"«»()—–-]")
-VOICE_REQUEST = re.compile(r"голосом|озвучь|вслух|out loud|aloud|by voice|with your voice|voice message", re.IGNORECASE)
+VOICE_REQUEST = re.compile(
+    r"голосом|озвуч\w*|вслух|out loud|aloud|by voice|with your voice|voice message", re.IGNORECASE
+)
 BARE_REQUEST_WORDS = frozenset(
     [
         "ответь",
@@ -27,11 +29,20 @@ BARE_REQUEST_WORDS = frozenset(
         "повтори",
         "произнеси",
         "прочитай",
+        "прочти",
         "расскажи",
+        "сделай",
         "можешь",
         "можно",
         "пожалуйста",
         "это",
+        "этот",
+        "эту",
+        "его",
+        "её",
+        "текст",
+        "сообщение",
+        "ответ",
         "мне",
         "ещё",
         "раз",
@@ -54,7 +65,9 @@ BARE_REQUEST_WORDS = frozenset(
         "you",
     ]
 )
-VOICE_REFUSAL = re.compile(r"не могу[^.!?]*(голос|говорить)|текстов\w+ (ии|ассистент)|can(no|')t speak", re.IGNORECASE)
+VOICE_REFUSAL = re.compile(
+    r"не могу[^.!?]*(голос|говорить)|текстов\w+ (ии|ассистент|формат)|can(no|')t speak", re.IGNORECASE
+)
 CYRILLIC = re.compile(r"[А-Яа-яЁё]")
 LATIN = re.compile(r"[A-Za-z]")
 
@@ -70,6 +83,11 @@ class SpokenReply:
 def asks_for_voice(text: str) -> bool:
     """True when a typed message asks for the answer to be spoken."""
     return VOICE_REQUEST.search(text) is not None
+
+
+def without_voice_words(text: str) -> str:
+    """Remove the request to speak: on seeing it the local model claims it cannot and refuses the question."""
+    return " ".join(VOICE_REQUEST.sub(" ", text).split()).strip(" ,.") or text
 
 
 def is_bare_voice_request(text: str) -> bool:
