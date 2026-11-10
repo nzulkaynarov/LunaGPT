@@ -19,6 +19,7 @@ MAX_SPOKEN_CHARS = 700  # about a minute of speech; anything longer is better re
 # Links, code, tables and formulas make no sense read aloud, so those replies stay text only.
 NOT_SPEAKABLE = re.compile(r"https?://|www\.|```|\$\$|\\\(|\\\[|^\s*\|", re.MULTILINE)
 UNSPOKEN_CHARS = re.compile(r"_|[^\w\s.,!?:;'\"«»()—–-]")
+VOICE_REQUEST = re.compile(r"голосом|озвучь|вслух|out loud|aloud|by voice|with your voice|voice message", re.IGNORECASE)
 CYRILLIC = re.compile(r"[А-Яа-яЁё]")
 LATIN = re.compile(r"[A-Za-z]")
 
@@ -29,6 +30,11 @@ class SpokenReply:
 
     ogg: bytes
     seconds: int
+
+
+def asks_for_voice(text: str) -> bool:
+    """True when a typed message asks for the answer to be spoken."""
+    return VOICE_REQUEST.search(text) is not None
 
 
 def speakable_text(reply: str) -> str | None:

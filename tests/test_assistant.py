@@ -131,6 +131,22 @@ async def test_voice_question_gets_text_then_voice(harness: Any, monkeypatch: py
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["ответь голосом, какая погода", "Say it out loud please"])
+async def test_typed_request_for_voice_is_voiced(harness: Any, monkeypatch: pytest.MonkeyPatch, text: str) -> None:
+    instance, _, answer = harness
+    _as_member(monkeypatch, _member())
+    _hearing(instance, None)
+    await instance.on_message(_message(text))
+    instance._speak.assert_awaited_once_with("ответ")
+    assert answer.call_args.args[5].spoken is True
+
+
+@pytest.mark.parametrize("role", ["owner", "adult", "kid", "guest"])
+def test_every_role_knows_it_can_speak(role: str) -> None:
+    assert "умеешь отвечать голосом" in llm.system_prompt(role, 11)
+
+
+@pytest.mark.asyncio
 async def test_text_question_is_never_voiced(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     instance, _, _ = harness
     _as_member(monkeypatch, _member())

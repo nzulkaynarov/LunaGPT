@@ -33,7 +33,7 @@ from lunagpt.assistant.llm import QuizQuestion, ReplyOptions, transcribe_voice
 from lunagpt.assistant.memories import FAMILY_DUPLICATE, FAMILY_FAILED, FAMILY_FULL, FAMILY_SAVED, Memory
 from lunagpt.assistant.people import PEOPLE_PREFIXES, PeopleDesk
 from lunagpt.assistant.pi_client import PiClient, PiConflictError, PiNotFoundError, PiUnavailableError
-from lunagpt.assistant.speech import SpokenReply, speak_reply
+from lunagpt.assistant.speech import SpokenReply, asks_for_voice, speak_reply
 from lunagpt.assistant.telegram import is_reply_to_prompt, send_long, send_model_reply
 from lunagpt.assistant.waiting import cat_is_thinking
 from lunagpt.config import settings
@@ -274,7 +274,7 @@ class LunaBot:
         if text.startswith("/"):
             await self._send(user_id, HELP_TEXT[member.role], main_keyboard(member.role))
             return
-        await self._chat(member, text, speak=message.voice is not None)
+        await self._chat(member, text, speak=message.voice is not None or asks_for_voice(text))
 
     async def _menu_action(self, member: AssistantMember, text: str) -> bool:
         """Run the pressed menu button if this role is allowed to use it."""
@@ -566,6 +566,7 @@ class LunaBot:
                     local_only=access.money_limit_reached(current, today),
                     on_cost=costs.append if current.role == "guest" else None,
                     family_facts=await self._memory.family.recall(current.role, text) if self._memory else (),
+                    spoken=speak,
                 )
                 reply = await self._answer(member.role, user_id, history, text, facts, options)
             self._history[user_id].append({"role": "user", "content": text})
