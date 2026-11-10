@@ -131,7 +131,7 @@ async def test_voice_question_gets_text_then_voice(harness: Any, monkeypatch: py
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("text", ["ответь голосом, какая погода", "Say it out loud please"])
+@pytest.mark.parametrize("text", ["ответь голосом, какая погода", "Say out loud why the sky is blue"])
 async def test_typed_request_for_voice_is_voiced(harness: Any, monkeypatch: pytest.MonkeyPatch, text: str) -> None:
     instance, _, answer = harness
     _as_member(monkeypatch, _member())
@@ -139,6 +139,64 @@ async def test_typed_request_for_voice_is_voiced(harness: Any, monkeypatch: pyte
     await instance.on_message(_message(text))
     instance._speak.assert_awaited_once_with("ответ")
     assert answer.call_args.args[5].spoken is True
+
+
+@pytest.mark.asyncio
+async def test_bare_voice_request_says_the_last_answer_without_a_model(
+    harness: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance, _, answer = harness
+    _as_member(monkeypatch, _member())
+    _hearing(instance, None)
+    await instance.on_message(_message("вопрос"))
+    answer.reset_mock()
+    await instance.on_message(_message("ответь голосом"))
+    answer.assert_not_awaited()
+    instance._speak.assert_awaited_once_with("ответ")
+
+
+@pytest.mark.asyncio
+async def test_bare_voice_request_with_nothing_to_say(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, send, _ = harness
+    _as_member(monkeypatch, _member())
+    _hearing(instance, None)
+    await instance.on_message(_message("скажи голосом"))
+    assert _sent(send) == bot.NOTHING_TO_SAY
+
+
+@pytest.mark.asyncio
+async def test_unreadable_last_answer_is_explained(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, send, _ = harness
+    _as_member(monkeypatch, _member())
+    _hearing(instance, None)
+    instance._speak = AsyncMock(return_value=None)
+    await instance.on_message(_message("вопрос"))
+    await instance.on_message(_message("ответь голосом"))
+    assert _sent(send) == bot.CANNOT_SAY
+
+
+@pytest.mark.parametrize(
+    ("text", "bare"),
+    [
+        ("ответь голосом", True),
+        ("Скажи это вслух, пожалуйста", True),
+        ("say it out loud", True),
+        ("ответь голосом, какая погода в ташкенте", False),
+        ("какая погода", False),
+    ],
+)
+def test_bare_voice_request_is_told_from_a_question(text: str, bare: bool) -> None:
+    assert speech.is_bare_voice_request(text) is bare
+
+
+def test_past_voice_refusals_are_dropped_from_history() -> None:
+    history = [
+        {"role": "user", "content": "ответь голосом"},
+        {"role": "assistant", "content": "Я не могу ответить голосом. 😔"},
+        {"role": "user", "content": "привет"},
+        {"role": "assistant", "content": "Привет!"},
+    ]
+    assert speech.without_voice_refusals(history) == history[2:]
 
 
 @pytest.mark.parametrize("role", ["owner", "adult", "kid", "guest"])

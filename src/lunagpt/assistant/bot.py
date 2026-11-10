@@ -33,7 +33,13 @@ from lunagpt.assistant.llm import QuizQuestion, ReplyOptions, transcribe_voice
 from lunagpt.assistant.memories import FAMILY_DUPLICATE, FAMILY_FAILED, FAMILY_FULL, FAMILY_SAVED, Memory
 from lunagpt.assistant.people import PEOPLE_PREFIXES, PeopleDesk
 from lunagpt.assistant.pi_client import PiClient, PiConflictError, PiNotFoundError, PiUnavailableError
-from lunagpt.assistant.speech import SpokenReply, asks_for_voice, speak_reply
+from lunagpt.assistant.speech import (
+    SpokenReply,
+    asks_for_voice,
+    is_bare_voice_request,
+    speak_reply,
+    without_voice_refusals,
+)
 from lunagpt.assistant.telegram import is_reply_to_prompt, send_long, send_model_reply
 from lunagpt.assistant.waiting import cat_is_thinking
 from lunagpt.config import settings
@@ -80,6 +86,8 @@ TEXT_ONLY = "Пока я понимаю текст и голосовые соо�
 MAX_VOICE_SECONDS = 120
 VOICE_TOO_LONG = "Слишком длинное голосовое. Запиши покороче, до двух минут."
 VOICE_FAILED = "Не получилось разобрать голосовое. Попробуй ещё раз или напиши текстом."
+NOTHING_TO_SAY = "Спроси что-нибудь, и я отвечу голосом."
+CANNOT_SAY = "Этот ответ вслух не прочитать: он длинный или со ссылками. Спроси покороче."
 VOICE_NOT_HEARD = "Не расслышала слов в этом голосовом. Попробуй ещё раз."
 MEMORY_NOTICE = (
     " Запоминаю важное о тебе, посмотреть и удалить можно на кнопке «Что ты помнишь». Другие люди этого не видят."
@@ -273,6 +281,9 @@ class LunaBot:
             return
         if text.startswith("/"):
             await self._send(user_id, HELP_TEXT[member.role], main_keyboard(member.role))
+            return
+        if message.voice is None and is_bare_voice_request(text):
+            await self._say_last_reply(member)
             return
         await self._chat(member, text, speak=message.voice is not None or asks_for_voice(text))
 
@@ -559,7 +570,7 @@ class LunaBot:
                 ChatActionSender.typing(chat_id=user_id, bot=self._bot),  # repeats while the model works
                 cat_is_thinking(self._bot, user_id),
             ):
-                history = await self._conversation(member)
+                history = without_voice_refusals(await self._conversation(member))
                 facts = await self._memory.recall(user_id, member.role, text) if self._memory else []
                 options = ReplyOptions(
                     age=access.age_of(current, today),
@@ -584,15 +595,33 @@ class LunaBot:
             self._background.add(task)  # the event loop keeps only weak references to tasks
             task.add_done_callback(self._background.discard)
 
-    async def _send_voice_reply(self, user_id: int, reply: str) -> None:
+    async def _send_voice_reply(self, user_id: int, reply: str) -> bool:
         """Say the reply after showing it; the text is already there if this fails."""
         spoken = await self._speak(reply)
         if spoken is None:
-            return
+            return False
         try:
             await self._bot.send_voice(user_id, BufferedInputFile(spoken.ogg, "luna.ogg"), duration=spoken.seconds)
         except TelegramAPIError as exc:
             logger.warning("could not send a voice reply: %s", type(exc).__name__)
+            return False
+        return True
+
+    async def _say_last_reply(self, member: AssistantMember) -> None:
+        """Answer "say it aloud" by voicing the last answer, with no model that could refuse."""
+        user_id = member.telegram_id
+        if not self._allow_request(user_id):
+            await self._send(user_id, TOO_FAST)
+            return
+        if access.access_ended(member):
+            await self._send(user_id, ACCESS_ENDED)
+            return
+        history = without_voice_refusals(await self._conversation(member))
+        last = next((turn["content"] for turn in reversed(history) if turn["role"] == "assistant"), None)
+        if last is None:
+            await self._send(user_id, NOTHING_TO_SAY)
+        elif not await self._send_voice_reply(user_id, last):
+            await self._send(user_id, CANNOT_SAY)
 
     async def _conversation(self, member: AssistantMember) -> list[dict[str, str]]:
         """After a restart the last turns come back from the database once."""
