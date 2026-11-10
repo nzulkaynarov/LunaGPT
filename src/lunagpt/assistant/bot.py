@@ -22,6 +22,7 @@ from aiogram.types import (
     KeyboardButton,
     Message,
     ReplyKeyboardMarkup,
+    VideoNote,
     Voice,
 )
 from aiogram.utils.chat_action import ChatActionSender
@@ -82,7 +83,8 @@ RATE_LIMIT = 10
 RATE_WINDOW_SECONDS = 60
 ACCESS_ENDED = "Срок доступа закончился. Попроси взрослого из семьи его продлить."
 TOO_FAST = "Слишком много сообщений подряд. Подожди минуту 🙂"
-TEXT_ONLY = "Пока я понимаю текст и голосовые сообщения."
+TEXT_ONLY = "Пока я понимаю текст, голосовые и кружки."
+NO_VIDEO = "Видео я не смотрю. Пришли голосовое или кружок, или напиши текстом."
 MAX_VOICE_SECONDS = 120
 VOICE_TOO_LONG = "Слишком длинное голосовое. Запиши покороче, до двух минут."
 VOICE_FAILED = "Не получилось разобрать голосовое. Попробуй ещё раз или напиши текстом."
@@ -264,12 +266,13 @@ class LunaBot:
         if member.role in access.ADULT_ROLES and self._people.is_search_reply(message):
             await self._people.search(user_id, message)
             return
-        if not text and message.voice is not None:
-            text = await self._voice_text(member, message.voice) or ""
+        spoken_note = message.voice or message.video_note
+        if not text and spoken_note is not None:
+            text = await self._voice_text(member, spoken_note) or ""
             if not text:
                 return
         if not text:
-            await self._send(user_id, TEXT_ONLY)
+            await self._send(user_id, NO_VIDEO if message.video else TEXT_ONLY)
             return
         if member.role in access.FAMILY_ROLES and is_reply_to_prompt(message, FAMILY_PROMPT):
             await self._chat(member, text, family_note=text)
@@ -282,10 +285,10 @@ class LunaBot:
         if text.startswith("/"):
             await self._send(user_id, HELP_TEXT[member.role], main_keyboard(member.role))
             return
-        if message.voice is None and is_bare_voice_request(text):
+        if spoken_note is None and is_bare_voice_request(text):
             await self._say_last_reply(member)
             return
-        await self._chat(member, text, speak=message.voice is not None or asks_for_voice(text))
+        await self._chat(member, text, speak=spoken_note is not None or asks_for_voice(text))
 
     async def _menu_action(self, member: AssistantMember, text: str) -> bool:
         """Run the pressed menu button if this role is allowed to use it."""
@@ -495,8 +498,8 @@ class LunaBot:
         self._request_times[user_id].append(time.monotonic())
         return True
 
-    async def _voice_text(self, member: AssistantMember, voice: Voice) -> str | None:
-        """Turn a voice note into text and show it, or explain why not and return None."""
+    async def _voice_text(self, member: AssistantMember, voice: Voice | VideoNote) -> str | None:
+        """Turn a voice note or the sound of a round video into text and show it, or explain why not."""
         user_id = member.telegram_id
         today = self._today()
         refusal = None

@@ -36,6 +36,8 @@ def _message(text: str, user_id: int = 1, chat_type: str = "private") -> Any:
     message.from_user.id = user_id
     message.text = text
     message.voice = None
+    message.video_note = None
+    message.video = None
     return message
 
 
@@ -202,6 +204,36 @@ def test_past_voice_refusals_are_dropped_from_history() -> None:
 @pytest.mark.parametrize("role", ["owner", "adult", "kid", "guest"])
 def test_every_role_knows_it_can_speak(role: str) -> None:
     assert "умеешь отвечать голосом" in llm.system_prompt(role, 11)
+
+
+@pytest.mark.asyncio
+async def test_round_video_is_heard_and_answered_with_voice(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, send, answer = harness
+    _as_member(monkeypatch, _member())
+    transcribe = _hearing(instance, "какая погода")
+    message = _message("")
+    message.text = None
+    message.video_note = MagicMock(duration=20)
+    await instance.on_message(message)
+    transcribe.assert_awaited_once()
+    instance._bot.download.assert_awaited_once_with(message.video_note)
+    assert send.await_args_list[0].args[1] == "🗣 «какая погода»"
+    assert answer.call_args.args[3] == "какая погода"
+    instance._speak.assert_awaited_once_with("ответ")
+
+
+@pytest.mark.asyncio
+async def test_ordinary_video_is_declined_without_download(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, send, answer = harness
+    _as_member(monkeypatch, _member())
+    _hearing(instance, "слова")
+    message = _message("")
+    message.text = None
+    message.video = MagicMock()
+    await instance.on_message(message)
+    instance._bot.download.assert_not_awaited()
+    answer.assert_not_awaited()
+    assert _sent(send) == bot.NO_VIDEO
 
 
 @pytest.mark.asyncio
