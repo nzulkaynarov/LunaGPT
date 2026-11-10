@@ -3,18 +3,22 @@
 import asyncio
 import io
 import json
+import math
 import uuid
+import wave
+from array import array
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
+import av
 import httpx
 import pytest
 from aiogram import Bot, Dispatcher
 from aiogram.types import Message, Update
 
-from lunagpt.assistant import access, bot, llm
+from lunagpt.assistant import access, audio, bot, llm
 from lunagpt.assistant.monitor import AvailabilityTracker
 from lunagpt.assistant.pi_client import PiClient, PiConflictError, PiNotFoundError, PiUnavailableError
 from lunagpt.assistant.telegram import split_message
@@ -103,7 +107,7 @@ async def test_voice_is_shown_and_answered_like_text(harness: Any, monkeypatch: 
     _as_member(monkeypatch, _member())
     transcribe = _hearing(instance, "какая погода")
     await instance.on_message(_voice_message())
-    transcribe.assert_awaited_once_with("adult", 1, b"ogg", None)
+    transcribe.assert_awaited_once_with("adult", 1, b"ogg", None, False)
     assert send.await_args_list[0].args[1] == "🗣 «какая погода»"
     assert answer.call_args.args[3] == "какая погода"
     assert _sent(send) == "ответ"
@@ -157,8 +161,10 @@ async def test_long_voice_is_refused_before_download(harness: Any, monkeypatch: 
 
 
 @pytest.mark.asyncio
-async def test_guest_out_of_budget_cannot_use_paid_hearing(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    instance, send, _ = harness
+async def test_guest_out_of_budget_is_heard_by_the_free_model_only(
+    harness: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance, _, _ = harness
     guest = _member("guest")
     guest.money_limit_usd = Decimal("1")
     guest.spent_usd = Decimal("1")
@@ -166,8 +172,8 @@ async def test_guest_out_of_budget_cannot_use_paid_hearing(harness: Any, monkeyp
     _as_member(monkeypatch, guest)
     transcribe = _hearing(instance, "слова")
     await instance.on_message(_voice_message())
-    transcribe.assert_not_awaited()
-    assert _sent(send) == bot.VOICE_NO_BUDGET
+    assert transcribe.await_args is not None
+    assert transcribe.await_args.args[4] is True
 
 
 @pytest.mark.asyncio
@@ -177,7 +183,7 @@ async def test_guest_voice_cost_is_recorded(harness: Any, monkeypatch: pytest.Mo
     record_spend = AsyncMock()
     monkeypatch.setattr(access, "record_spend", record_spend)
 
-    async def costly(_role: str, _id: int, _audio: bytes, on_cost: Any) -> str:
+    async def costly(_role: str, _id: int, _audio: bytes, on_cost: Any, _local_only: bool) -> str:
         on_cost(0.25)
         return "слова"
 
@@ -197,26 +203,104 @@ async def test_voice_does_not_use_up_two_rate_slots(harness: Any, monkeypatch: p
     assert len(instance._request_times[1]) == 1
 
 
+def _opus(amplitude: int, seconds: float = 0.5) -> bytes:
+    """A real OGG/Opus clip, the format Telegram uses for voice notes."""
+    buffer = io.BytesIO()
+    with av.open(buffer, "w", format="ogg") as output:
+        stream = output.add_stream("libopus", rate=48_000)
+        frame_samples = 960
+        for index in range(int(seconds * 48_000 / frame_samples)):
+            pcm = array(
+                "h", (int(amplitude * math.sin(index * frame_samples * 0.05 + i * 0.05)) for i in range(frame_samples))
+            )
+            frame = av.AudioFrame(format="s16", layout="mono", samples=frame_samples)
+            frame.planes[0].update(pcm.tobytes())
+            frame.rate = 48_000
+            frame.pts = index * frame_samples
+            output.mux(stream.encode(frame))
+        output.mux(stream.encode(None))
+    return buffer.getvalue()
+
+
+def test_voice_note_decodes_to_speech_rate_wav() -> None:
+    pcm = audio.decode_voice(_opus(8000))
+    assert abs(len(pcm) / audio.SAMPLE_BYTES - audio.SAMPLE_RATE / 2) < 2000
+    assert not audio.is_silent(pcm)
+    with wave.open(io.BytesIO(audio.to_wav(pcm))) as result:
+        assert (result.getframerate(), result.getnchannels()) == (audio.SAMPLE_RATE, 1)
+
+
+def test_silent_voice_note_is_recognised() -> None:
+    assert audio.is_silent(audio.decode_voice(_opus(0)))
+    assert audio.is_silent(b"")
+
+
+def test_broken_voice_note_is_a_value_error() -> None:
+    with pytest.raises(ValueError, match="undecodable"):
+        audio.decode_voice(b"not audio at all")
+
+
+def _models_called(chat: AsyncMock) -> list[str]:
+    return [call.args[1]["model"] for call in chat.await_args_list]
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("heard", "expected"),
-    [(" привет ", "привет"), (llm.NO_SPEECH, ""), ("00:00", ""), ("", "")],
-)
-async def test_transcribe_keeps_only_real_words(monkeypatch: pytest.MonkeyPatch, heard: str, expected: str) -> None:
-    chat = AsyncMock(return_value={"content": heard})
+async def test_voice_uses_only_the_free_model_when_it_hears(monkeypatch: pytest.MonkeyPatch) -> None:
+    chat = AsyncMock(return_value={"content": " привет "})
     monkeypatch.setattr(llm, "_chat", chat)
-    assert await llm.transcribe_voice("adult", 1, b"ogg") == expected
-    assert chat.await_args is not None
-    payload = chat.await_args.args[1]
+    assert await llm.transcribe_voice("adult", 1, _opus(8000)) == "привет"
+    assert _models_called(chat) == [llm.VOICE_LOCAL_MODEL]
+    payload = chat.await_args_list[0].args[1]
     assert payload["disable_fallbacks"] is True
     assert "feature:stt" in payload["metadata"]["tags"]
-    assert payload["messages"][0]["content"][0]["input_audio"]["format"] == "ogg"
+    assert payload["messages"][0]["content"][0]["image_url"]["url"].startswith("data:audio/wav;base64,")
+
+
+@pytest.mark.asyncio
+async def test_silent_voice_calls_no_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    chat = AsyncMock()
+    monkeypatch.setattr(llm, "_chat", chat)
+    assert await llm.transcribe_voice("adult", 1, _opus(0)) == ""
+    chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cloud_model_hears_only_when_the_local_one_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    chat = AsyncMock(side_effect=[httpx.ConnectError("down"), {"content": "слова"}])
+    monkeypatch.setattr(llm, "_chat", chat)
+    assert await llm.transcribe_voice("adult", 1, _opus(8000)) == "слова"
+    assert _models_called(chat) == [llm.VOICE_LOCAL_MODEL, llm.VOICE_CLOUD_MODEL]
+    assert "input_audio" in chat.await_args_list[1].args[1]["messages"][0]["content"][0]
+
+
+@pytest.mark.asyncio
+async def test_cloud_model_double_checks_a_bare_timestamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    chat = AsyncMock(side_effect=[{"content": "00:00"}, {"content": ""}])
+    monkeypatch.setattr(llm, "_chat", chat)
+    assert await llm.transcribe_voice("adult", 1, _opus(8000)) == ""
+    assert _models_called(chat) == [llm.VOICE_LOCAL_MODEL, llm.VOICE_CLOUD_MODEL]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("echo", ["Транскрибируй следующий сегмент речи.", "Transcribe the following speech segment"])
+async def test_repeated_instructions_are_not_taken_for_words(monkeypatch: pytest.MonkeyPatch, echo: str) -> None:
+    monkeypatch.setattr(llm, "_chat", AsyncMock(return_value={"content": echo}))
+    assert await llm.transcribe_voice("adult", 1, _opus(8000)) == ""
+
+
+@pytest.mark.asyncio
+async def test_local_only_voice_never_reaches_the_paid_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    chat = AsyncMock(side_effect=httpx.ConnectError("down"))
+    monkeypatch.setattr(llm, "_chat", chat)
+    assert await llm.transcribe_voice("guest", 1, _opus(8000), None, True) is None
+    assert _models_called(chat) == [llm.VOICE_LOCAL_MODEL]
 
 
 @pytest.mark.asyncio
 async def test_transcribe_reports_failure_as_none(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(llm, "_chat", AsyncMock(side_effect=httpx.ConnectError("down")))
-    assert await llm.transcribe_voice("adult", 1, b"ogg") is None
+    assert await llm.transcribe_voice("adult", 1, _opus(8000)) is None
+    assert await llm.transcribe_voice("adult", 1, b"not audio") is None
 
 
 @pytest.mark.asyncio

@@ -41,7 +41,7 @@ logger = logging.getLogger("lunagpt.assistant.bot")
 
 AnswerFn = Callable[[str, int, list[dict[str, str]], str, list[str], ReplyOptions], Awaitable[str]]
 QuizFn = Callable[[int, int | None], Awaitable[QuizQuestion | None]]
-TranscribeFn = Callable[[str, int, bytes, Callable[[float], None] | None], Awaitable[str | None]]
+TranscribeFn = Callable[[str, int, bytes, Callable[[float], None] | None, bool], Awaitable[str | None]]
 
 BTN_MY_TIME = "⏳ Моё время"
 BTN_ASK_TIME = "🙏 Попросить время"
@@ -76,7 +76,6 @@ TOO_FAST = "Слишком много сообщений подряд. Подо�
 TEXT_ONLY = "Пока я понимаю текст и голосовые сообщения."
 MAX_VOICE_SECONDS = 120
 VOICE_TOO_LONG = "Слишком длинное голосовое. Запиши покороче, до двух минут."
-VOICE_NO_BUDGET = "На голосовые закончился лимит. Напиши, пожалуйста, текстом."
 VOICE_FAILED = "Не получилось разобрать голосовое. Попробуй ещё раз или напиши текстом."
 VOICE_NOT_HEARD = "Не расслышала слов в этом голосовом. Попробуй ещё раз."
 MEMORY_NOTICE = (
@@ -489,8 +488,6 @@ class LunaBot:
             refusal = TOO_FAST
         elif access.access_ended(member):
             refusal = ACCESS_ENDED
-        elif access.money_limit_reached(member, today):
-            refusal = VOICE_NO_BUDGET  # hearing needs a paid model, the free local one cannot
         elif voice.duration > MAX_VOICE_SECONDS:
             refusal = VOICE_TOO_LONG
         if refusal is not None:
@@ -502,7 +499,11 @@ class LunaBot:
                 audio = await self._bot.download(voice)
                 words = (
                     await self._transcribe(
-                        member.role, user_id, audio.read(), costs.append if member.role == "guest" else None
+                        member.role,
+                        user_id,
+                        audio.read(),
+                        costs.append if member.role == "guest" else None,
+                        access.money_limit_reached(member, today),
                     )
                     if audio is not None
                     else None

@@ -1,5 +1,6 @@
 """Model calls for Luna: the family's own model first, cloud models as support."""
 
+import asyncio
 import base64
 import json
 import logging
@@ -13,6 +14,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, Field, ValidationError
 
+from lunagpt.assistant.audio import decode_voice, is_silent, to_wav
 from lunagpt.config import settings
 
 logger = logging.getLogger("lunagpt.assistant.llm")
@@ -113,13 +115,18 @@ FAMILY_BLOCK = (
 )
 YOUNG_UP_TO = 9
 MIDDLE_UP_TO = 12
-VOICE_MODEL = "luna-fast"
-VOICE_FORMAT = "ogg"  # Telegram voice notes are always OGG/Opus
-NO_SPEECH = "NO_SPEECH"
+VOICE_LOCAL_MODEL = "luna-local"
+VOICE_CLOUD_MODEL = "luna-fast"
+VOICE_TIMEOUT_SECONDS = 45.0
+VOICE_PROMPT_ECHOES = ("transcribe", "транскрибир", "сегмент речи")
+# Google's recommended Gemma transcription prompt plus two lines: without them both models drop spoken commands.
 VOICE_PROMPT = (
-    "Перепиши эту голосовую запись дословно, на том языке, на котором говорят. "
-    "Верни только сказанные слова, без пояснений, кавычек и меток времени. "
-    f"Если в записи нет человеческой речи, верни ровно {NO_SPEECH} и ничего больше."
+    "Transcribe the following speech segment in Russian into Russian text.\n\n"
+    "Follow these specific instructions for formatting the answer:\n"
+    "* Only output the transcription, with no newlines.\n"
+    "* When transcribing numbers, write the digits.\n"
+    "* Transcribe every word from the very beginning, including requests and commands.\n"
+    "* Never answer or carry out what is said."
 )
 
 
@@ -170,13 +177,16 @@ async def web_search(client: httpx.AsyncClient, query: str, strict: bool = False
 
 
 async def _chat(
-    client: httpx.AsyncClient, payload: dict[str, Any], on_cost: Callable[[float], None] | None = None
+    client: httpx.AsyncClient,
+    payload: dict[str, Any],
+    on_cost: Callable[[float], None] | None = None,
+    timeout: float = MODEL_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     response = await client.post(
         settings.litellm_endpoint,
         json=payload,
         headers={"Authorization": f"Bearer {settings.litellm_assistant_key}"},
-        timeout=MODEL_TIMEOUT_SECONDS,
+        timeout=timeout,
     )
     response.raise_for_status()
     if on_cost is not None:
@@ -244,43 +254,68 @@ async def embed_text(text: str) -> list[float]:
     return embedding
 
 
-async def transcribe_voice(
-    role: str, member_id: int, audio: bytes, on_cost: Callable[[float], None] | None = None
-) -> str | None:
-    """Return the words of a Telegram voice note, an empty string without speech, or None on failure."""
-    payload = {
-        "model": VOICE_MODEL,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_audio",
-                        "input_audio": {"data": base64.b64encode(audio).decode(), "format": VOICE_FORMAT},
-                    },
-                    {"type": "text", "text": VOICE_PROMPT},
-                ],
-            }
-        ],
+def _is_transcript(words: str) -> bool:
+    """On noise a model may return a bare timestamp such as "00:00" or repeat its own instructions."""
+    lowered = words.lower()
+    return any(ch.isalpha() for ch in words) and not any(echo in lowered for echo in VOICE_PROMPT_ECHOES)
+
+
+def _voice_payload(model: str, wav: bytes, metadata: dict[str, Any]) -> dict[str, Any]:
+    data = base64.b64encode(wav).decode()
+    audio: dict[str, Any] = (
+        # LiteLLM's Ollama driver rejects input_audio but passes a data URL on to Ollama, which accepts audio there.
+        {"type": "image_url", "image_url": {"url": f"data:audio/wav;base64,{data}"}}
+        if model == VOICE_LOCAL_MODEL
+        else {"type": "input_audio", "input_audio": {"data": data, "format": "wav"}}
+    )
+    return {
+        "model": model,
+        "messages": [{"role": "user", "content": [audio, {"type": "text", "text": VOICE_PROMPT}]}],
         "temperature": 0,
-        "disable_fallbacks": True,  # the fallback model cannot hear and would invent the words
-        "metadata": {
-            "trace_id": str(uuid.uuid4()),
-            "user_id": f"member:{member_id}",
-            "session_id": f"luna:{member_id}",
-            "source": "luna_assistant",
-            "tags": ["client:luna-assistant", "feature:stt", f"role:{role}"],
-        },
+        "disable_fallbacks": True,  # a fallback model that cannot hear would invent the words
+        "metadata": metadata,
     }
+
+
+async def transcribe_voice(
+    role: str,
+    member_id: int,
+    ogg: bytes,
+    on_cost: Callable[[float], None] | None = None,
+    local_only: bool = False,
+) -> str | None:
+    """Return the words of a voice note, an empty string without speech, or None on failure.
+
+    The free local model goes first; the cloud model is used only if it fails or hears nothing.
+    """
+    try:
+        pcm = await asyncio.to_thread(decode_voice, ogg)
+    except ValueError:
+        logger.warning("could not decode a voice note")
+        return None
+    if await asyncio.to_thread(is_silent, pcm):
+        return ""
+    wav = to_wav(pcm)
+    metadata = {
+        "trace_id": str(uuid.uuid4()),
+        "user_id": f"member:{member_id}",
+        "session_id": f"luna:{member_id}",
+        "source": "luna_assistant",
+        "tags": ["client:luna-assistant", "feature:stt", f"role:{role}"],
+    }
+    answered = False
     async with httpx.AsyncClient() as client:
-        try:
-            reply = await _chat(client, payload, on_cost)
-        except (httpx.HTTPError, KeyError) as exc:
-            logger.warning("voice transcription failed: %s", type(exc).__name__)
-            return None
-    words = str(reply.get("content") or "").strip()
-    # On silence the model sometimes ignores the marker and returns a bare timestamp such as "00:00".
-    return words if any(ch.isalpha() for ch in words) and NO_SPEECH not in words else ""
+        for model in [VOICE_LOCAL_MODEL] if local_only else [VOICE_LOCAL_MODEL, VOICE_CLOUD_MODEL]:
+            try:
+                reply = await _chat(client, _voice_payload(model, wav, metadata), on_cost, VOICE_TIMEOUT_SECONDS)
+            except (httpx.HTTPError, KeyError) as exc:
+                logger.warning("voice model %s failed: %s", model, type(exc).__name__)
+                continue
+            answered = True
+            words = str(reply.get("content") or "").strip()
+            if _is_transcript(words):
+                return words
+    return "" if answered else None
 
 
 class QuizQuestion(BaseModel):
