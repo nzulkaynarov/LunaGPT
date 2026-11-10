@@ -21,6 +21,7 @@ dependencies = [
     "aiogram>=3.13,<4",
     "phonenumberslite>=9,<10",
     "av>=14,<17",
+    "piper-tts>=1.4,<2",
 ]
 
 [dependency-groups]

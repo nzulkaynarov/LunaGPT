@@ -9,6 +9,7 @@ import av
 
 SAMPLE_RATE = 16_000
 SAMPLE_BYTES = 2
+OPUS_RATE = 48_000
 SILENCE_RMS = 100  # about -50 dBFS, well below a voice on a phone microphone
 
 
@@ -32,6 +33,21 @@ def is_silent(pcm: bytes) -> bool:
     """True for a recording with no sound worth sending to a model."""
     samples = array("h", pcm)
     return not samples or math.sqrt(sum(s * s for s in samples) / len(samples)) < SILENCE_RMS
+
+
+def encode_voice(pcm: bytes, rate: int) -> bytes:
+    """Encode mono 16-bit PCM as OGG/Opus, the only format Telegram shows as a voice note."""
+    buffer = io.BytesIO()
+    with av.open(buffer, mode="w", format="ogg") as output:
+        stream = output.add_stream("libopus", rate=OPUS_RATE)
+        frame = av.AudioFrame(format="s16", layout="mono", samples=len(pcm) // SAMPLE_BYTES)
+        frame.rate = rate
+        frame.pts = 0
+        plane = frame.planes[0]
+        plane.update(pcm.ljust(plane.buffer_size, b"\0"))
+        output.mux(stream.encode(frame))
+        output.mux(stream.encode(None))
+    return buffer.getvalue()
 
 
 def to_wav(pcm: bytes) -> bytes:

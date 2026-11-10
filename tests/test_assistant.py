@@ -16,9 +16,10 @@ import av
 import httpx
 import pytest
 from aiogram import Bot, Dispatcher
+from aiogram.exceptions import TelegramAPIError
 from aiogram.types import Message, Update
 
-from lunagpt.assistant import access, audio, bot, llm
+from lunagpt.assistant import access, audio, bot, llm, speech
 from lunagpt.assistant.monitor import AvailabilityTracker
 from lunagpt.assistant.pi_client import PiClient, PiConflictError, PiNotFoundError, PiUnavailableError
 from lunagpt.assistant.telegram import split_message
@@ -50,6 +51,8 @@ def _hearing(instance: bot.LunaBot, words: str | None) -> AsyncMock:
     transcribe = AsyncMock(return_value=words)
     instance._transcribe = transcribe
     cast(Any, instance._bot).download = AsyncMock(return_value=io.BytesIO(b"ogg"))
+    cast(Any, instance._bot).send_voice = AsyncMock()
+    instance._speak = AsyncMock(return_value=speech.SpokenReply(b"voice", 3))
     return transcribe
 
 
@@ -111,6 +114,84 @@ async def test_voice_is_shown_and_answered_like_text(harness: Any, monkeypatch: 
     assert send.await_args_list[0].args[1] == "🗣 «какая погода»"
     assert answer.call_args.args[3] == "какая погода"
     assert _sent(send) == "ответ"
+
+
+@pytest.mark.asyncio
+async def test_voice_question_gets_text_then_voice(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, send, _ = harness
+    _as_member(monkeypatch, _member())
+    _hearing(instance, "какая погода")
+    await instance.on_message(_voice_message())
+    assert _sent(send) == "ответ"
+    instance._speak.assert_awaited_once_with("ответ")
+    voice = instance._bot.send_voice.await_args
+    assert voice.args[0] == 1
+    assert voice.args[1].data == b"voice"
+    assert voice.kwargs["duration"] == 3
+
+
+@pytest.mark.asyncio
+async def test_text_question_is_never_voiced(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, _, _ = harness
+    _as_member(monkeypatch, _member())
+    _hearing(instance, None)
+    await instance.on_message(_message("вопрос"))
+    instance._speak.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_failed_voice_reply_leaves_the_text_answer(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, send, _ = harness
+    _as_member(monkeypatch, _member())
+    _hearing(instance, "какая погода")
+    instance._bot.send_voice = AsyncMock(side_effect=TelegramAPIError(MagicMock(), "voice forbidden"))
+    await instance.on_message(_voice_message())
+    assert _sent(send) == "ответ"
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "Смотри https://example.com",
+        "```python\nprint(1)\n```",
+        "Формула: $$x^2$$",
+        "| a | b |\n|---|---|",
+        "я" * (speech.MAX_SPOKEN_CHARS + 1),
+        "🙂 ...",
+    ],
+)
+def test_unreadable_replies_stay_text_only(reply: str) -> None:
+    assert speech.speakable_text(reply) is None
+
+
+def test_markup_is_not_read_aloud() -> None:
+    assert speech.speakable_text("**Привет**, _мир_! 🙂") == "Привет , мир !"
+
+
+@pytest.mark.parametrize(
+    ("text", "language"),
+    [
+        ("Привет, как дела?", "ru"),
+        ("How are you today?", "en"),
+        ("Window sill.", "en"),
+        ("Слово window значит окно", "ru"),
+    ],
+)
+def test_voice_follows_the_language_of_the_reply(text: str, language: str) -> None:
+    assert speech.reply_language(text) == language
+
+
+def test_synthesised_speech_becomes_a_telegram_voice_note() -> None:
+    pcm = array("h", (int(8000 * math.sin(i * 0.1)) for i in range(22_050))).tobytes()
+    decoded = audio.decode_voice(audio.encode_voice(pcm, 22_050))
+    assert abs(len(decoded) / audio.SAMPLE_BYTES - audio.SAMPLE_RATE) < 2000
+    assert not audio.is_silent(decoded)
+
+
+@pytest.mark.asyncio
+async def test_voicing_failure_is_quiet(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(speech, "_synthesize", MagicMock(side_effect=OSError("no model file")))
+    assert await speech.speak_reply("привет") is None
 
 
 @pytest.mark.asyncio

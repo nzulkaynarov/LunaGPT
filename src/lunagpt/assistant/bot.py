@@ -14,6 +14,7 @@ from typing import Any
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import (
+    BufferedInputFile,
     CallbackQuery,
     ForceReply,
     InlineKeyboardButton,
@@ -32,6 +33,7 @@ from lunagpt.assistant.llm import QuizQuestion, ReplyOptions, transcribe_voice
 from lunagpt.assistant.memories import FAMILY_DUPLICATE, FAMILY_FAILED, FAMILY_FULL, FAMILY_SAVED, Memory
 from lunagpt.assistant.people import PEOPLE_PREFIXES, PeopleDesk
 from lunagpt.assistant.pi_client import PiClient, PiConflictError, PiNotFoundError, PiUnavailableError
+from lunagpt.assistant.speech import SpokenReply, speak_reply
 from lunagpt.assistant.telegram import is_reply_to_prompt, send_long, send_model_reply
 from lunagpt.assistant.waiting import cat_is_thinking
 from lunagpt.config import settings
@@ -42,6 +44,7 @@ logger = logging.getLogger("lunagpt.assistant.bot")
 AnswerFn = Callable[[str, int, list[dict[str, str]], str, list[str], ReplyOptions], Awaitable[str]]
 QuizFn = Callable[[int, int | None], Awaitable[QuizQuestion | None]]
 TranscribeFn = Callable[[str, int, bytes, Callable[[float], None] | None, bool], Awaitable[str | None]]
+SpeakFn = Callable[[str], Awaitable[SpokenReply | None]]
 
 BTN_MY_TIME = "⏳ Моё время"
 BTN_ASK_TIME = "🙏 Попросить время"
@@ -198,9 +201,11 @@ class LunaBot:
         bot_username: str,
         memory: Memory | None = None,
         transcribe: TranscribeFn = transcribe_voice,
+        speak: SpeakFn = speak_reply,
     ) -> None:
         self._bot = bot
         self._transcribe = transcribe
+        self._speak = speak
         self._sessions = session_factory
         self._answer = answer
         self._make_quiz = make_quiz
@@ -269,7 +274,7 @@ class LunaBot:
         if text.startswith("/"):
             await self._send(user_id, HELP_TEXT[member.role], main_keyboard(member.role))
             return
-        await self._chat(member, text)
+        await self._chat(member, text, speak=message.voice is not None)
 
     async def _menu_action(self, member: AssistantMember, text: str) -> bool:
         """Run the pressed menu button if this role is allowed to use it."""
@@ -524,7 +529,9 @@ class LunaBot:
     def _today() -> date:
         return (datetime.now(UTC) + timedelta(hours=settings.luna_utc_offset_hours)).date()
 
-    async def _chat(self, member: AssistantMember, text: str, family_note: str | None = None) -> None:
+    async def _chat(
+        self, member: AssistantMember, text: str, family_note: str | None = None, speak: bool = False
+    ) -> None:
         user_id = member.telegram_id
         if not self._allow_request(user_id):
             await self._send(user_id, TOO_FAST)
@@ -569,10 +576,22 @@ class LunaBot:
             async with self._sessions() as db:
                 await access.record_spend(db, user_id, sum(costs), today)
         await send_model_reply(self._bot, user_id, reply)
+        if speak:
+            await self._send_voice_reply(user_id, reply)
         if self._memory:
             task = asyncio.create_task(self._memory.remember(user_id, member.role, text))
             self._background.add(task)  # the event loop keeps only weak references to tasks
             task.add_done_callback(self._background.discard)
+
+    async def _send_voice_reply(self, user_id: int, reply: str) -> None:
+        """Say the reply after showing it; the text is already there if this fails."""
+        spoken = await self._speak(reply)
+        if spoken is None:
+            return
+        try:
+            await self._bot.send_voice(user_id, BufferedInputFile(spoken.ogg, "luna.ogg"), duration=spoken.seconds)
+        except TelegramAPIError as exc:
+            logger.warning("could not send a voice reply: %s", type(exc).__name__)
 
     async def _conversation(self, member: AssistantMember) -> list[dict[str, str]]:
         """After a restart the last turns come back from the database once."""
