@@ -21,12 +21,14 @@ from aiogram.types import (
     KeyboardButton,
     Message,
     ReplyKeyboardMarkup,
+    Voice,
 )
 from aiogram.utils.chat_action import ChatActionSender
+from aiohttp import ClientError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import access
-from lunagpt.assistant.llm import QuizQuestion, ReplyOptions
+from lunagpt.assistant.llm import QuizQuestion, ReplyOptions, transcribe_voice
 from lunagpt.assistant.memories import FAMILY_DUPLICATE, FAMILY_FAILED, FAMILY_FULL, FAMILY_SAVED, Memory
 from lunagpt.assistant.people import PEOPLE_PREFIXES, PeopleDesk
 from lunagpt.assistant.pi_client import PiClient, PiConflictError, PiNotFoundError, PiUnavailableError
@@ -39,6 +41,7 @@ logger = logging.getLogger("lunagpt.assistant.bot")
 
 AnswerFn = Callable[[str, int, list[dict[str, str]], str, list[str], ReplyOptions], Awaitable[str]]
 QuizFn = Callable[[int, int | None], Awaitable[QuizQuestion | None]]
+TranscribeFn = Callable[[str, int, bytes, Callable[[float], None] | None], Awaitable[str | None]]
 
 BTN_MY_TIME = "⏳ Моё время"
 BTN_ASK_TIME = "🙏 Попросить время"
@@ -70,12 +73,17 @@ RATE_LIMIT = 10
 RATE_WINDOW_SECONDS = 60
 ACCESS_ENDED = "Срок доступа закончился. Попроси взрослого из семьи его продлить."
 TOO_FAST = "Слишком много сообщений подряд. Подожди минуту 🙂"
-TEXT_ONLY = "Пока я понимаю только текст."
+TEXT_ONLY = "Пока я понимаю текст и голосовые сообщения."
+MAX_VOICE_SECONDS = 120
+VOICE_TOO_LONG = "Слишком длинное голосовое. Запиши покороче, до двух минут."
+VOICE_NO_BUDGET = "На голосовые закончился лимит. Напиши, пожалуйста, текстом."
+VOICE_FAILED = "Не получилось разобрать голосовое. Попробуй ещё раз или напиши текстом."
+VOICE_NOT_HEARD = "Не расслышала слов в этом голосовом. Попробуй ещё раз."
 MEMORY_NOTICE = (
     " Запоминаю важное о тебе, посмотреть и удалить можно на кнопке «Что ты помнишь». Другие люди этого не видят."
 )
 FAMILY_NOTICE = " Чтобы запомнить для всех в семье, напиши: «запомни для семьи, что…»."
-ASK_ANYTHING = "Просто напиши, что нужно: вопрос, идея, перевод, свежие новости."
+ASK_ANYTHING = "Просто напиши или скажи голосом, что нужно: вопрос, идея, перевод, свежие новости."
 ADULT_HELP = (
     f"{ASK_ANYTHING}\n\n"
     f"{BTN_PEOPLE} — семья, гости и заявки\n"
@@ -190,8 +198,10 @@ class LunaBot:
         pi: PiClient,
         bot_username: str,
         memory: Memory | None = None,
+        transcribe: TranscribeFn = transcribe_voice,
     ) -> None:
         self._bot = bot
+        self._transcribe = transcribe
         self._sessions = session_factory
         self._answer = answer
         self._make_quiz = make_quiz
@@ -242,6 +252,10 @@ class LunaBot:
         if member.role in access.ADULT_ROLES and self._people.is_search_reply(message):
             await self._people.search(user_id, message)
             return
+        if not text and message.voice is not None:
+            text = await self._voice_text(member, message.voice) or ""
+            if not text:
+                return
         if not text:
             await self._send(user_id, TEXT_ONLY)
             return
@@ -456,13 +470,54 @@ class LunaBot:
         self._quizzes[user_id] = quiz
         await self._send(user_id, f"🧠 {quiz.topic}\n\n{quiz.q}", quiz_keyboard(quiz.options))
 
-    def _allow_request(self, user_id: int) -> bool:
-        now = time.monotonic()
+    def _over_rate_limit(self, user_id: int) -> bool:
         times = self._request_times[user_id]
-        if len(times) == RATE_LIMIT and now - times[0] < RATE_WINDOW_SECONDS:
+        return len(times) == RATE_LIMIT and time.monotonic() - times[0] < RATE_WINDOW_SECONDS
+
+    def _allow_request(self, user_id: int) -> bool:
+        if self._over_rate_limit(user_id):
             return False
-        times.append(now)
+        self._request_times[user_id].append(time.monotonic())
         return True
+
+    async def _voice_text(self, member: AssistantMember, voice: Voice) -> str | None:
+        """Turn a voice note into text and show it, or explain why not and return None."""
+        user_id = member.telegram_id
+        today = self._today()
+        refusal = None
+        if self._over_rate_limit(user_id):
+            refusal = TOO_FAST
+        elif access.access_ended(member):
+            refusal = ACCESS_ENDED
+        elif access.money_limit_reached(member, today):
+            refusal = VOICE_NO_BUDGET  # hearing needs a paid model, the free local one cannot
+        elif voice.duration > MAX_VOICE_SECONDS:
+            refusal = VOICE_TOO_LONG
+        if refusal is not None:
+            await self._send(user_id, refusal)
+            return None
+        costs: list[float] = []
+        try:
+            async with ChatActionSender.typing(chat_id=user_id, bot=self._bot):
+                audio = await self._bot.download(voice)
+                words = (
+                    await self._transcribe(
+                        member.role, user_id, audio.read(), costs.append if member.role == "guest" else None
+                    )
+                    if audio is not None
+                    else None
+                )
+        except (TelegramAPIError, ClientError, TimeoutError) as exc:
+            logger.warning("could not download a voice note: %s", type(exc).__name__)
+            words = None
+        if any(costs):
+            async with self._sessions() as db:
+                await access.record_spend(db, user_id, sum(costs), today)
+        if not words:
+            await self._send(user_id, VOICE_FAILED if words is None else VOICE_NOT_HEARD)
+            return None
+        await self._send(user_id, f"🗣 «{words}»")  # a misheard word is visible before the answer
+        return words
 
     @staticmethod
     def _today() -> date:

@@ -1,6 +1,7 @@
 """Luna AI Assistant: access rules, routing and failure notices."""
 
 import asyncio
+import io
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -29,7 +30,23 @@ def _message(text: str, user_id: int = 1, chat_type: str = "private") -> Any:
     message.chat.type = chat_type
     message.from_user.id = user_id
     message.text = text
+    message.voice = None
     return message
+
+
+def _voice_message(duration: int = 5) -> Any:
+    message = _message("")
+    message.text = None
+    message.voice = MagicMock(duration=duration)
+    return message
+
+
+def _hearing(instance: bot.LunaBot, words: str | None) -> AsyncMock:
+    """Give the bot a downloaded voice note and a transcriber that hears the given words."""
+    transcribe = AsyncMock(return_value=words)
+    instance._transcribe = transcribe
+    cast(Any, instance._bot).download = AsyncMock(return_value=io.BytesIO(b"ogg"))
+    return transcribe
 
 
 @pytest.fixture
@@ -78,6 +95,128 @@ async def test_member_gets_answer_and_history(harness: Any, monkeypatch: pytest.
         {"role": "user", "content": "вопрос"},
         {"role": "assistant", "content": "ответ"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_voice_is_shown_and_answered_like_text(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, send, answer = harness
+    _as_member(monkeypatch, _member())
+    transcribe = _hearing(instance, "какая погода")
+    await instance.on_message(_voice_message())
+    transcribe.assert_awaited_once_with("adult", 1, b"ogg", None)
+    assert send.await_args_list[0].args[1] == "🗣 «какая погода»"
+    assert answer.call_args.args[3] == "какая погода"
+    assert _sent(send) == "ответ"
+
+
+@pytest.mark.asyncio
+async def test_kid_voice_gets_the_same_safety_check_as_text(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, send, answer = harness
+    _as_member(monkeypatch, _member("kid", 5))
+    monkeypatch.setattr(access, "adult_chat_ids", AsyncMock(return_value=[9]))
+    _hearing(instance, "меня бьют в школе")
+    message = _voice_message()
+    message.from_user.id = 5
+    await instance.on_message(message)
+    answer.assert_not_awaited()
+    assert _sent(send) == bot.SAFETY_REPLY
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("words", "reply"), [(None, bot.VOICE_FAILED), ("", bot.VOICE_NOT_HEARD)])
+async def test_unusable_voice_is_explained_without_a_model_call(
+    harness: Any, monkeypatch: pytest.MonkeyPatch, words: str | None, reply: str
+) -> None:
+    instance, send, answer = harness
+    _as_member(monkeypatch, _member())
+    _hearing(instance, words)
+    await instance.on_message(_voice_message())
+    answer.assert_not_awaited()
+    assert _sent(send) == reply
+
+
+@pytest.mark.asyncio
+async def test_failed_voice_download_is_explained(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, send, _ = harness
+    _as_member(monkeypatch, _member())
+    transcribe = _hearing(instance, "слова")
+    instance._bot.download = AsyncMock(side_effect=TimeoutError())
+    await instance.on_message(_voice_message())
+    transcribe.assert_not_awaited()
+    assert _sent(send) == bot.VOICE_FAILED
+
+
+@pytest.mark.asyncio
+async def test_long_voice_is_refused_before_download(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, send, _ = harness
+    _as_member(monkeypatch, _member())
+    _hearing(instance, "слова")
+    await instance.on_message(_voice_message(bot.MAX_VOICE_SECONDS + 1))
+    instance._bot.download.assert_not_awaited()
+    assert _sent(send) == bot.VOICE_TOO_LONG
+
+
+@pytest.mark.asyncio
+async def test_guest_out_of_budget_cannot_use_paid_hearing(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, send, _ = harness
+    guest = _member("guest")
+    guest.money_limit_usd = Decimal("1")
+    guest.spent_usd = Decimal("1")
+    guest.spend_month = bot.LunaBot._today().replace(day=1)
+    _as_member(monkeypatch, guest)
+    transcribe = _hearing(instance, "слова")
+    await instance.on_message(_voice_message())
+    transcribe.assert_not_awaited()
+    assert _sent(send) == bot.VOICE_NO_BUDGET
+
+
+@pytest.mark.asyncio
+async def test_guest_voice_cost_is_recorded(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, _, _ = harness
+    _as_member(monkeypatch, _member("guest"))
+    record_spend = AsyncMock()
+    monkeypatch.setattr(access, "record_spend", record_spend)
+
+    async def costly(_role: str, _id: int, _audio: bytes, on_cost: Any) -> str:
+        on_cost(0.25)
+        return "слова"
+
+    _hearing(instance, None)
+    instance._transcribe = costly
+    await instance.on_message(_voice_message())
+    assert record_spend.await_args is not None
+    assert record_spend.await_args.args[2] == 0.25
+
+
+@pytest.mark.asyncio
+async def test_voice_does_not_use_up_two_rate_slots(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, _, _ = harness
+    _as_member(monkeypatch, _member())
+    _hearing(instance, "слова")
+    await instance.on_message(_voice_message())
+    assert len(instance._request_times[1]) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("heard", "expected"),
+    [(" привет ", "привет"), (llm.NO_SPEECH, ""), ("00:00", ""), ("", "")],
+)
+async def test_transcribe_keeps_only_real_words(monkeypatch: pytest.MonkeyPatch, heard: str, expected: str) -> None:
+    chat = AsyncMock(return_value={"content": heard})
+    monkeypatch.setattr(llm, "_chat", chat)
+    assert await llm.transcribe_voice("adult", 1, b"ogg") == expected
+    assert chat.await_args is not None
+    payload = chat.await_args.args[1]
+    assert payload["disable_fallbacks"] is True
+    assert "feature:stt" in payload["metadata"]["tags"]
+    assert payload["messages"][0]["content"][0]["input_audio"]["format"] == "ogg"
+
+
+@pytest.mark.asyncio
+async def test_transcribe_reports_failure_as_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(llm, "_chat", AsyncMock(side_effect=httpx.ConnectError("down")))
+    assert await llm.transcribe_voice("adult", 1, b"ogg") is None
 
 
 @pytest.mark.asyncio

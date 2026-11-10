@@ -1,5 +1,6 @@
 """Model calls for Luna: the family's own model first, cloud models as support."""
 
+import base64
 import json
 import logging
 import random
@@ -112,6 +113,14 @@ FAMILY_BLOCK = (
 )
 YOUNG_UP_TO = 9
 MIDDLE_UP_TO = 12
+VOICE_MODEL = "luna-fast"
+VOICE_FORMAT = "ogg"  # Telegram voice notes are always OGG/Opus
+NO_SPEECH = "NO_SPEECH"
+VOICE_PROMPT = (
+    "Перепиши эту голосовую запись дословно, на том языке, на котором говорят. "
+    "Верни только сказанные слова, без пояснений, кавычек и меток времени. "
+    f"Если в записи нет человеческой речи, верни ровно {NO_SPEECH} и ничего больше."
+)
 
 
 @dataclass(frozen=True)
@@ -233,6 +242,45 @@ async def embed_text(text: str) -> list[float]:
     response.raise_for_status()
     embedding: list[float] = response.json()["data"][0]["embedding"]
     return embedding
+
+
+async def transcribe_voice(
+    role: str, member_id: int, audio: bytes, on_cost: Callable[[float], None] | None = None
+) -> str | None:
+    """Return the words of a Telegram voice note, an empty string without speech, or None on failure."""
+    payload = {
+        "model": VOICE_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_audio",
+                        "input_audio": {"data": base64.b64encode(audio).decode(), "format": VOICE_FORMAT},
+                    },
+                    {"type": "text", "text": VOICE_PROMPT},
+                ],
+            }
+        ],
+        "temperature": 0,
+        "disable_fallbacks": True,  # the fallback model cannot hear and would invent the words
+        "metadata": {
+            "trace_id": str(uuid.uuid4()),
+            "user_id": f"member:{member_id}",
+            "session_id": f"luna:{member_id}",
+            "source": "luna_assistant",
+            "tags": ["client:luna-assistant", "feature:stt", f"role:{role}"],
+        },
+    }
+    async with httpx.AsyncClient() as client:
+        try:
+            reply = await _chat(client, payload, on_cost)
+        except (httpx.HTTPError, KeyError) as exc:
+            logger.warning("voice transcription failed: %s", type(exc).__name__)
+            return None
+    words = str(reply.get("content") or "").strip()
+    # On silence the model sometimes ignores the marker and returns a bare timestamp such as "00:00".
+    return words if any(ch.isalpha() for ch in words) and NO_SPEECH not in words else ""
 
 
 class QuizQuestion(BaseModel):
