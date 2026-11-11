@@ -79,6 +79,28 @@ TIME_REQUEST_TTL = timedelta(hours=24)
 PI_OFFLINE = "Сейчас домашняя сеть не отвечает, попробуй чуть позже."
 NO_DEVICE = "Я не нашла твоё устройство в домашней сети. Попроси родителей привязать его."
 
+
+def _clock(value: str | None) -> str:
+    return datetime.fromisoformat(value).strftime("%H:%M") if value else ""
+
+
+def describe_restriction(restriction: dict[str, Any] | None) -> str:
+    """One honest line about why the home internet is off for this person now."""
+    if not restriction:
+        return ""
+    if restriction["kind"] == "bedtime":
+        text = f"🌙 Сейчас отбой, интернет дома включится в {_clock(restriction['until'])}."
+        if restriction.get("pause_until"):
+            text += f" Потом ещё пауза до {_clock(restriction['pause_until'])}."
+        return text
+    if restriction.get("open_until"):
+        return (
+            f"🔓 Родители открыли интернет до {_clock(restriction['open_until'])}, "
+            f"потом пауза до {_clock(restriction['until'])}."
+        )
+    return f"⏸ Интернет дома на паузе до {_clock(restriction['until'])}."
+
+
 HISTORY_MESSAGES = 8
 RATE_LIMIT = 10
 RATE_WINDOW_SECONDS = 60
@@ -436,6 +458,7 @@ class LunaBot:
 
     async def _my_time(self, member: AssistantMember) -> None:
         try:
+            restriction = await self._pi.restriction(member.name)
             rows = await self._pi.quota(member.name)
         except PiNotFoundError:
             await self._send(member.telegram_id, NO_DEVICE)
@@ -443,14 +466,25 @@ class LunaBot:
         except PiUnavailableError:
             await self._send(member.telegram_id, PI_OFFLINE)
             return
+        lines = [describe_restriction(restriction)] if restriction else []
+        lines += [
+            f"{r['device']}, {r['category_label']}: {r['used_minutes']} из {r['limit_minutes']} мин" for r in rows
+        ]
         if not rows:
-            await self._send(member.telegram_id, "Лимитов на сегодня нет.")
-            return
-        lines = [f"{r['device']}, {r['category_label']}: {r['used_minutes']} из {r['limit_minutes']} мин" for r in rows]
+            lines.append("Лимитов на сегодня нет.")
         await self._send(member.telegram_id, "\n".join(lines))
 
     async def _ask_time(self, member: AssistantMember, reason: str) -> None:
         user_id = member.telegram_id
+        try:
+            restriction = await self._pi.restriction(member.name)
+        except PiUnavailableError:
+            await self._send(user_id, PI_OFFLINE)
+            return
+        if restriction and restriction["kind"] == "bedtime":
+            # Parents do not open bedtime at night, so nobody is woken up for it.
+            await self._send(user_id, describe_restriction(restriction) + " Утром всё заработает само. Спокойной ночи!")
+            return
         try:
             request_id = await self._pi.request_time(member.name, reason)
         except PiConflictError:
@@ -464,6 +498,10 @@ class LunaBot:
             return
         async with self._sessions() as db:
             await access.track_time_request(db, request_id, user_id)
+        if restriction:
+            text = "✅ Попросила родителей открыть интернет. Сообщу, когда они ответят."
+            await self._send(user_id, f"{describe_restriction(restriction)}\n\n{text}")
+            return  # quiz minutes would not lift a pause
         text = "✅ Запрос отправлен родителям. Сообщу, когда они ответят."
         try:
             if await self._pi.quiz_available(member.name):
@@ -791,11 +829,12 @@ async def report_time_decisions(bot: Bot, pi: PiClient, session_factory: async_s
                 async with session_factory() as db:
                     await access.finish_time_request(db, request.request_id)
             continue
-        text = (
-            f"🎉 Родители добавили {status['minutes']} минут!"
-            if status["status"] == "approved"
-            else "Родители пока не добавили время. Поговори с ними 💬"
-        )
+        if status["status"] != "approved":
+            text = "Родители пока не добавили время. Поговори с ними 💬"
+        elif status.get("category") == "pause":
+            text = f"🎉 Родители открыли интернет на {status['minutes']} минут!"
+        else:
+            text = f"🎉 Родители добавили {status['minutes']} минут!"
         await send_long(bot, request.telegram_id, text)
         async with session_factory() as db:
             await access.finish_time_request(db, request.request_id)

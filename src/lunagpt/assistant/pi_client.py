@@ -85,6 +85,15 @@ class PiClient:
         result: list[dict[str, Any]] = await self._request("GET", f"{self._person(name)}/quota")
         return result
 
+    async def restriction(self, name: str) -> dict[str, Any] | None:
+        """What keeps the person offline now: bedtime or a pause, with local ISO times."""
+        try:
+            result = await self._request("GET", f"{self._person(name)}/restriction")
+        except PiNotFoundError:
+            return None  # unknown person, or a Pi that predates this endpoint
+        restriction: dict[str, Any] | None = result.get("restriction")
+        return restriction
+
     async def request_time(self, name: str, reason: str) -> int:
         result = await self._request("POST", f"{self._person(name)}/time-requests", {"reason": reason})
         return int(result["id"])

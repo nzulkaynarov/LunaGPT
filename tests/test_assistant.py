@@ -692,6 +692,7 @@ def _kid_with_pi(harness: Any, monkeypatch: pytest.MonkeyPatch) -> tuple[bot.Lun
     instance, send, _ = harness
     _as_member(monkeypatch, _member("kid", 5))
     monkeypatch.setattr(access, "track_time_request", AsyncMock())
+    instance._pi.restriction = AsyncMock(return_value=None)
     return instance, send, instance._pi
 
 
@@ -703,6 +704,45 @@ async def test_time_request_offers_quiz(harness: Any, monkeypatch: pytest.Monkey
     await instance.on_message(_message(bot.BTN_ASK_TIME, 5))
     access.track_time_request.assert_awaited()
     assert bot.BTN_QUIZ in _sent(send)
+
+
+BEDTIME = {"kind": "bedtime", "until": "2026-11-12T08:00", "pause_until": None, "open_until": None}
+PAUSE = {"kind": "pause", "until": "2026-11-12T10:44", "pause_until": None, "open_until": None}
+
+
+@pytest.mark.asyncio
+async def test_my_time_tells_the_truth_at_bedtime(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, send, pi = _kid_with_pi(harness, monkeypatch)
+    pi.restriction = AsyncMock(return_value=BEDTIME)
+    pi.quota = AsyncMock(return_value=[])
+    await instance.on_message(_message(bot.BTN_MY_TIME, 5))
+    assert "отбой" in _sent(send) and "08:00" in _sent(send)
+
+
+@pytest.mark.asyncio
+async def test_no_request_is_sent_at_bedtime(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, send, pi = _kid_with_pi(harness, monkeypatch)
+    pi.restriction = AsyncMock(return_value=BEDTIME)
+    pi.request_time = AsyncMock(return_value=7)
+    await instance.on_message(_message(bot.BTN_ASK_TIME, 5))
+    pi.request_time.assert_not_awaited()
+    assert "08:00" in _sent(send)
+
+
+@pytest.mark.asyncio
+async def test_pause_request_asks_to_open_without_quiz(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, send, pi = _kid_with_pi(harness, monkeypatch)
+    pi.restriction = AsyncMock(return_value=PAUSE)
+    pi.request_time = AsyncMock(return_value=7)
+    pi.quiz_available = AsyncMock(return_value=True)
+    await instance.on_message(_message(bot.BTN_ASK_TIME, 5))
+    pi.request_time.assert_awaited_once()
+    assert "открыть интернет" in _sent(send) and bot.BTN_QUIZ not in _sent(send)
+
+
+def test_open_window_is_described() -> None:
+    text = bot.describe_restriction({**PAUSE, "open_until": "2026-11-12T10:15"})
+    assert "до 10:15" in text and "пауза до 10:44" in text
 
 
 @pytest.mark.asyncio
@@ -804,6 +844,21 @@ async def test_decision_is_reported_and_closed(monkeypatch: pytest.MonkeyPatch) 
     await bot.report_time_decisions(telegram, pi, MagicMock(return_value=session))
     assert "30 минут" in telegram.send_message.call_args.args[1]
     finish.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_opened_pause_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    telegram = MagicMock(send_message=AsyncMock())
+    session = MagicMock()
+    session.__aenter__ = AsyncMock(return_value=MagicMock())
+    session.__aexit__ = AsyncMock(return_value=None)
+    request = MagicMock(request_id=3, telegram_id=5)
+    monkeypatch.setattr(access, "pending_time_requests", AsyncMock(return_value=[request]))
+    monkeypatch.setattr(access, "finish_time_request", AsyncMock())
+    status = {"status": "approved", "minutes": 30, "category": "pause"}
+    pi = MagicMock(time_request_status=AsyncMock(return_value=status))
+    await bot.report_time_decisions(telegram, pi, MagicMock(return_value=session))
+    assert "открыли интернет на 30 минут" in telegram.send_message.call_args.args[1]
 
 
 def _pi_client(handler: Any) -> PiClient:
