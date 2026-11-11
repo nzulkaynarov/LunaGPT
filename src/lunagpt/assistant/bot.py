@@ -34,6 +34,8 @@ from lunagpt.assistant.llm import QuizQuestion, ReplyOptions, transcribe_voice
 from lunagpt.assistant.memories import FAMILY_DUPLICATE, FAMILY_FAILED, FAMILY_FULL, FAMILY_SAVED, Memory
 from lunagpt.assistant.people import PEOPLE_PREFIXES, PeopleDesk
 from lunagpt.assistant.pi_client import PiClient, PiConflictError, PiNotFoundError, PiUnavailableError
+from lunagpt.assistant.reminder_desk import REMINDER_PREFIXES, ReminderDesk
+from lunagpt.assistant.reminders import is_reminder_request
 from lunagpt.assistant.speech import (
     SpokenReply,
     asks_for_voice,
@@ -62,7 +64,9 @@ BTN_INVITE = "➕ Пригласить"
 BTN_PEOPLE = "👥 Люди"
 BTN_MEMORY = "🧠 Что ты помнишь"
 BTN_HELP = "❓ Помощь"
+BTN_REMINDERS = "🔔 Напоминания"
 MENU_BUTTONS = {
+    BTN_REMINDERS,
     BTN_MY_TIME,
     BTN_ASK_TIME,
     BTN_QUIZ,
@@ -124,6 +128,7 @@ ADULT_HELP = (
     f"{BTN_PEOPLE} — семья, гости и заявки\n"
     f"{BTN_SHARED} — телевизор и другое домашнее\n"
     f"{BTN_INVITE} — отправить приглашение\n"
+    f"{BTN_REMINDERS} — напоминания и утренняя сводка\n"
     f"{BTN_MEMORY} — личная и общая память\n\n" + MEMORY_NOTICE.strip() + FAMILY_NOTICE
 )
 HELP_TEXT = {
@@ -134,9 +139,13 @@ HELP_TEXT = {
         f"{BTN_MY_TIME} — сколько осталось интернета\n"
         f"{BTN_ASK_TIME} — написать родителям\n"
         f"{BTN_QUIZ} — ответить и заработать время\n"
+        f"{BTN_REMINDERS} — напоминания и утренняя сводка\n"
         f"{BTN_MEMORY} — личная и общая память\n\n" + MEMORY_NOTICE.strip() + FAMILY_NOTICE
     ),
-    "guest": f"{ASK_ANYTHING}\n\n{BTN_MEMORY} — что я о тебе помню\n\n" + MEMORY_NOTICE.strip(),
+    "guest": (
+        f"{ASK_ANYTHING}\n\n{BTN_REMINDERS} — напоминания и утренняя сводка\n"
+        f"{BTN_MEMORY} — что я о тебе помню\n\n" + MEMORY_NOTICE.strip()
+    ),
 }
 WELCOME = "<b>Добро пожаловать, {name}!</b> 🌙\n\n{help}"
 BACK_AGAIN = "Привет, {name}! Я на связи. Напиши, что нужно, или выбери кнопку внизу."
@@ -178,12 +187,12 @@ def needs_adult_attention(text: str) -> bool:
 
 def main_keyboard(role: str) -> ReplyKeyboardMarkup:
     """The persistent menu; server-side checks still decide what each role may do."""
-    adults = [[BTN_SHARED, BTN_PEOPLE], [BTN_INVITE, BTN_MEMORY], [BTN_HELP]]
+    adults = [[BTN_SHARED, BTN_PEOPLE], [BTN_INVITE, BTN_MEMORY], [BTN_REMINDERS, BTN_HELP]]
     layouts = {
         "owner": adults,
         "adult": adults,
-        "kid": [[BTN_MY_TIME, BTN_ASK_TIME], [BTN_QUIZ, BTN_MEMORY], [BTN_HELP]],
-        "guest": [[BTN_MEMORY, BTN_HELP]],
+        "kid": [[BTN_MY_TIME, BTN_ASK_TIME], [BTN_QUIZ, BTN_MEMORY], [BTN_REMINDERS, BTN_HELP]],
+        "guest": [[BTN_REMINDERS, BTN_MEMORY], [BTN_HELP]],
     }
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text=text) for text in row] for row in layouts[role]],
@@ -246,6 +255,7 @@ class LunaBot:
         self._username = bot_username
         self._memory = memory
         self._people = PeopleDesk(bot, session_factory, pi, bot_username, self._welcome)
+        self.reminders = ReminderDesk(bot, session_factory)
         self._history_loaded: set[int] = set()
         self._background: set[asyncio.Task[None]] = set()
         self._history: dict[int, deque[dict[str, str]]] = defaultdict(lambda: deque(maxlen=HISTORY_MESSAGES))
@@ -300,6 +310,9 @@ class LunaBot:
         if member.role in access.FAMILY_ROLES and is_reply_to_prompt(message, FAMILY_PROMPT):
             await self._chat(member, text, family_note=text)
             return
+        if self.reminders.is_city_reply(message):
+            await self.reminders.set_city(member, text)
+            return
         if await self._menu_action(member, text):
             return
         if text.startswith("/start"):
@@ -307,6 +320,9 @@ class LunaBot:
             return
         if text.startswith("/"):
             await self._send(user_id, HELP_TEXT[member.role], main_keyboard(member.role))
+            return
+        if is_reminder_request(text):
+            await self._new_reminder(member, text)
             return
         if spoken_note is None and is_bare_voice_request(text):
             await self._say_last_reply(member)
@@ -329,6 +345,8 @@ class LunaBot:
             await self._send_shared_list(member)
         elif text == BTN_MEMORY:
             await self._send(member.telegram_id, *await self._memory_view(member, 0))
+        elif text == BTN_REMINDERS:
+            await self._send(member.telegram_id, *await self.reminders.view(member))
         elif member.role == "kid" and text == BTN_MY_TIME:
             await self._my_time(member)
         elif member.role == "kid" and text == BTN_ASK_TIME:
@@ -376,12 +394,14 @@ class LunaBot:
             await self._forget_family_fact(callback, member, args[0])
         elif prefix in PEOPLE_PREFIXES:
             await self._people.handle(callback, member, prefix, args)
+        elif prefix in REMINDER_PREFIXES:
+            await self.reminders.handle(callback, member, prefix, args)
 
     @staticmethod
     def _callback_allowed(role: str, prefix: str) -> bool:
         if prefix == "quiz":
             return role == "kid"
-        if prefix in ("mem", "memd", "memc", "memy"):
+        if prefix in ("mem", "memd", "memc", "memy") or prefix in REMINDER_PREFIXES:
             return role in access.ROLES
         if prefix in ("fam", "fama", "famd", "famy"):
             return role in access.FAMILY_ROLES
@@ -639,6 +659,17 @@ class LunaBot:
             task = asyncio.create_task(self._memory.remember(user_id, member.role, text))
             self._background.add(task)  # the event loop keeps only weak references to tasks
             task.add_done_callback(self._background.discard)
+
+    async def _new_reminder(self, member: AssistantMember, text: str) -> None:
+        user_id = member.telegram_id
+        if not self._allow_request(user_id):
+            await self._send(user_id, TOO_FAST)
+            return
+        if access.access_ended(member):
+            await self._send(user_id, ACCESS_ENDED)
+            return
+        async with ChatActionSender.typing(chat_id=user_id, bot=self._bot):
+            await self.reminders.create(member, text)
 
     async def _send_voice_reply(self, user_id: int, reply: str) -> bool:
         """Say the reply after showing it; the text is already there if this fails."""

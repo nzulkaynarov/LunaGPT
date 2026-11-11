@@ -19,11 +19,19 @@ from lunagpt.models import (
     AssistantMember,
     AssistantMemory,
     AssistantMessage,
+    AssistantReminder,
 )
 
 TABLES = [
     model.__table__
-    for model in (AssistantMember, AssistantApplication, AssistantMemory, AssistantFamilyMemory, AssistantMessage)
+    for model in (
+        AssistantMember,
+        AssistantApplication,
+        AssistantMemory,
+        AssistantFamilyMemory,
+        AssistantMessage,
+        AssistantReminder,
+    )
 ]
 
 

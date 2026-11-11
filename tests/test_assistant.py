@@ -1332,3 +1332,32 @@ async def test_old_button_cannot_delete_someone_elses_note(harness: Any, monkeyp
     memory.family.forget.assert_not_awaited()
     await instance._forget_family_fact(callback, _member("adult"), note.id.hex)
     memory.family.forget.assert_awaited_once_with(note.id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["owner", "kid", "guest"])
+async def test_reminder_phrase_goes_to_reminders_not_the_model(
+    harness: Any, monkeypatch: pytest.MonkeyPatch, role: str
+) -> None:
+    instance, _, answer = harness
+    _as_member(monkeypatch, _member(role, 5))
+    instance.reminders.create = AsyncMock()
+    await instance.on_message(_message("напомни завтра в 9 позвонить бабушке", 5))
+    instance.reminders.create.assert_awaited_once()
+    answer.assert_not_awaited()
+    buttons = [b.text for row in bot.main_keyboard(role).keyboard for b in row]
+    assert bot.BTN_REMINDERS in buttons
+
+
+@pytest.mark.asyncio
+async def test_reminders_button_and_callbacks_reach_the_desk(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, send, _ = harness
+    _as_member(monkeypatch, _member("guest", 5))
+    instance.reminders.view = AsyncMock(return_value=("🔔 Напоминаний пока нет.", None))
+    await instance.on_message(_message(bot.BTN_REMINDERS, 5))
+    assert "Напоминаний пока нет" in _sent(send)
+    instance.reminders.handle = AsyncMock()
+    callback = MagicMock(data="rmd:7", answer=AsyncMock())
+    callback.from_user.id = 5
+    await instance.on_callback(callback)
+    instance.reminders.handle.assert_awaited_once()

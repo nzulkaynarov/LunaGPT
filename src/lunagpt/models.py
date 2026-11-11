@@ -123,6 +123,11 @@ class AssistantMember(Base):
     spend_month: Mapped[date | None] = mapped_column(Date, nullable=True)
     spent_usd: Mapped[Decimal] = mapped_column(Numeric(10, 6), server_default="0", default=Decimal(0), nullable=False)
     homesec_person_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    brief_time: Mapped[str | None] = mapped_column(String(5), nullable=True)  # "07:30" local; None means off
+    brief_city: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    brief_lat: Mapped[float | None] = mapped_column(Float, nullable=True)
+    brief_lon: Mapped[float | None] = mapped_column(Float, nullable=True)
+    brief_sent_on: Mapped[date | None] = mapped_column(Date, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
@@ -210,4 +215,20 @@ class AssistantTimeRequest(Base):
 
     request_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
     telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class AssistantReminder(Base):
+    """A personal reminder; a repeating one moves its due time forward after each ring."""
+
+    __tablename__ = "assistant_reminders"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
+    member_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("assistant_members.telegram_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    repeat: Mapped[str] = mapped_column(String(10), nullable=False, server_default="none")
+    done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
