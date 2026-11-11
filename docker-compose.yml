@@ -210,6 +210,7 @@ services:
       - LITELLM_ASSISTANT_KEY=${LITELLM_ASSISTANT_KEY}
       - LUNA_TELEGRAM_BOT_TOKEN=${LUNA_TELEGRAM_BOT_TOKEN}
       - LUNA_PI_API_TOKEN=${LUNA_PI_API_TOKEN}
+      - LUNA_GOOGLE_SERVICE_ACCOUNT=${LUNA_GOOGLE_SERVICE_ACCOUNT:-}
       - LUNAGPT_DATABASE_URL=postgresql+psycopg://postgres:${POSTGRES_PASSWORD}@langfuse-db:5432/lunagpt
       - SEARXNG_URL=http://searxng:8080
     depends_on:

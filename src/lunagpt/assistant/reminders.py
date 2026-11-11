@@ -74,7 +74,7 @@ def is_reminder_request(text: str) -> bool:
     return bool(REMINDER_REQUEST.match(text))
 
 
-def _day_of(day: str, today: date) -> date:
+def day_of(day: str, today: date) -> date:
     if day == "today":
         return today
     if day == "tomorrow":
@@ -100,7 +100,7 @@ def resolve(parts: ReminderParts, now: datetime) -> datetime | None:
     if parts.day is None and parts.time is None and parts.repeat == "none":
         return None
     clock = time.fromisoformat(parts.time) if parts.time else DEFAULT_TIME
-    moment = datetime.combine(_day_of(parts.day, now.date()) if parts.day else now.date(), clock)
+    moment = datetime.combine(day_of(parts.day, now.date()) if parts.day else now.date(), clock)
     if moment <= now:
         # "в 9" said at ten means tomorrow; "в понедельник" said on a Monday evening means next week.
         moment += timedelta(days=7 if parts.day in WEEKDAYS else 1)

@@ -1459,3 +1459,19 @@ async def test_chat_knows_the_timetable(harness: Any, monkeypatch: pytest.Monkey
     instance.school.planner_block = AsyncMock(return_value="Расписание уроков:\nЧт: литература")
     await instance.on_message(_message("что завтра?", 5))
     assert answer.call_args.args[5].planner.endswith("Чт: литература")
+
+
+@pytest.mark.asyncio
+async def test_calendar_phrase_goes_to_the_calendar_and_chat_sees_it(
+    harness: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance, _, answer = harness
+    _as_member(monkeypatch, _member("adult", 5))
+    instance.calendar.request_event = AsyncMock()
+    await instance.on_message(_message("добавь в календарь стоматолог в четверг в 15:00", 5))
+    instance.calendar.request_event.assert_awaited_once()
+    answer.assert_not_awaited()
+    instance.school.planner_block = AsyncMock(return_value="")
+    instance.calendar.planner_text = AsyncMock(return_value="Календарь на неделю:\n- завтра 15:00–16:00: Стоматолог")
+    await instance.on_message(_message("что у меня завтра?", 5))
+    assert "Стоматолог" in answer.call_args.args[5].planner

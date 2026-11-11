@@ -32,6 +32,8 @@ from aiohttp import ClientError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import access
+from lunagpt.assistant.calendar_desk import CALENDAR_PREFIXES, CalendarDesk, is_calendar_request
+from lunagpt.assistant.gcal import GoogleCalendar
 from lunagpt.assistant.llm import QuizQuestion, ReplyOptions, transcribe_voice
 from lunagpt.assistant.memories import FAMILY_DUPLICATE, FAMILY_FAILED, FAMILY_FULL, FAMILY_SAVED, Memory
 from lunagpt.assistant.people import PEOPLE_PREFIXES, PeopleDesk
@@ -194,6 +196,17 @@ def family_request(text: str) -> str | None:
     return match.group("fact").strip() if match else None
 
 
+def google_calendar() -> GoogleCalendar | None:
+    """The calendar client when the owner has added the service account key; a broken key keeps it off."""
+    if not settings.luna_google_service_account:
+        return None
+    try:
+        return GoogleCalendar.from_json(settings.luna_google_service_account, settings.luna_utc_offset_hours)
+    except (ValueError, KeyError):
+        logger.warning("LUNA_GOOGLE_SERVICE_ACCOUNT is not a valid service account key")
+        return None
+
+
 def photo_of(message: Message) -> PhotoSize | Document | None:
     """The picture in a message: the largest size of a photo, or an image sent as a file."""
     if message.photo:
@@ -279,7 +292,8 @@ class LunaBot:
         self._memory = memory
         self._people = PeopleDesk(bot, session_factory, pi, bot_username, self._welcome)
         self.school = SchoolDesk(bot, session_factory)
-        self.reminders = ReminderDesk(bot, session_factory, extra_brief=self.school.brief_lines)
+        self.calendar = CalendarDesk(bot, session_factory, google_calendar())
+        self.reminders = ReminderDesk(bot, session_factory, extra_brief=self._brief_extra)
         self._history_loaded: set[int] = set()
         self._background: set[asyncio.Task[None]] = set()
         self._history: dict[int, deque[dict[str, str]]] = defaultdict(lambda: deque(maxlen=HISTORY_MESSAGES))
@@ -341,6 +355,9 @@ class LunaBot:
         if self.reminders.is_city_reply(message):
             await self.reminders.set_city(member, text)
             return
+        if self.calendar.is_link_reply(message):
+            await self.calendar.link(member, text)
+            return
         if await self._menu_action(member, text):
             return
         if text.startswith("/start"):
@@ -351,6 +368,11 @@ class LunaBot:
             return
         if is_reminder_request(text):
             await self._new_reminder(member, text)
+            return
+        if is_calendar_request(text):
+            if await self._may_ask(member):
+                async with ChatActionSender.typing(chat_id=user_id, bot=self._bot):
+                    await self.calendar.request_event(member, text)
             return
         if is_school_text(text):
             if await self._may_ask(member):
@@ -431,12 +453,17 @@ class LunaBot:
             await self.reminders.handle(callback, member, prefix, args)
         elif prefix in SCHOOL_PREFIXES:
             await self.school.handle(callback, member, prefix, args)
+        elif prefix in CALENDAR_PREFIXES:
+            await self.calendar.handle(callback, member, prefix, args)
 
     @staticmethod
     def _callback_allowed(role: str, prefix: str) -> bool:
         if prefix == "quiz":
             return role == "kid"
-        if prefix in ("mem", "memd", "memc", "memy") or prefix in REMINDER_PREFIXES or prefix in SCHOOL_PREFIXES:
+        if (
+            prefix in ("mem", "memd", "memc", "memy")
+            or prefix in REMINDER_PREFIXES | SCHOOL_PREFIXES | CALENDAR_PREFIXES
+        ):
             return role in access.ROLES
         if prefix in ("fam", "fama", "famd", "famy"):
             return role in access.FAMILY_ROLES
@@ -731,13 +758,23 @@ class LunaBot:
             task.add_done_callback(self._background.discard)
 
     async def _planner(self, user_id: int) -> str:
-        """The timetable and tasks for the model; a database hiccup only loses this context, not the answer."""
-        try:
-            block: str = await self.school.planner_block(user_id)
-            return block
-        except Exception:
-            logger.warning("could not load the timetable and tasks", exc_info=True)
-            return ""
+        """Timetable, tasks and calendar for the model; a failure only loses this context, not the answer."""
+        parts: list[str] = []
+        for source in (self.school.planner_block, self.calendar.planner_text):
+            try:
+                parts.append(await source(user_id))
+            except Exception:
+                logger.warning("could not load planner context", exc_info=True)
+        return "\n\n".join(part for part in parts if part)
+
+    async def _brief_extra(self, user_id: int, today: date) -> list[str]:
+        lines: list[str] = []
+        for source in (self.calendar.brief_lines, self.school.brief_lines):
+            try:
+                lines += await source(user_id, today)
+            except Exception:
+                logger.warning("could not load brief lines", exc_info=True)
+        return lines
 
     async def _may_ask(self, member: AssistantMember) -> bool:
         """The rate limit and guest access, for requests that skip the chat."""

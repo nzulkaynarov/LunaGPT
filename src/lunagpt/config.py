@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     luna_pi_api_token: str = ""
     luna_utc_offset_hours: int = 5
     luna_phone_region: str = "UZ"
+    # The service account's JSON key, on one line; empty keeps Google Calendar off.
+    luna_google_service_account: str = ""
 
     # Redis Cache
     redis_url: str = "redis://localhost:6380/0"
