@@ -11,16 +11,19 @@ from datetime import date, datetime, timedelta
 from aiogram import Bot
 from aiogram.types import CallbackQuery, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from pydantic import BaseModel, Field, ValidationError, field_validator
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from lunagpt.assistant import llm, reminders
+from lunagpt.assistant import llm, reminders, school
 from lunagpt.assistant.gcal import CalendarError, Event, GoogleCalendar
 from lunagpt.assistant.reminder_desk import local_now
 from lunagpt.assistant.telegram import is_reply_to_prompt, send_long
-from lunagpt.models import AssistantMember
+from lunagpt.models import AssistantMember, AssistantTask
 
 logger = logging.getLogger("lunagpt.assistant.calendar_desk")
 
+# Tasks copied from Luna start with this mark; the brief and chat already list tasks, so they skip these events.
+TASK_MARK = "📝 "
 CALENDAR_PREFIXES = frozenset({"cal", "calc", "calx", "caly", "caln"})
 CALENDAR_REQUEST = re.compile(
     r"^\s*(?:добавь|запиши|внеси|поставь|создай)\s+(?:в\s+(?:мой\s+)?календар\w*|встречу|событие)|"
@@ -260,7 +263,14 @@ class CalendarDesk:
             await send_long(self._bot, user_id, message)
             return
         await self._set_calendar_id(user_id, calendar_id)
-        await send_long(self._bot, user_id, "📅 Календарь подключён.")
+        connected = "📅 Календарь подключён."
+        try:
+            copied = await self.sync_tasks(user_id)
+        except CalendarError:
+            copied = 0
+        if copied:
+            connected += f" Перенесла туда заданий со сроком: {copied}."
+        await send_long(self._bot, user_id, connected)
         await send_long(self._bot, user_id, *await self.view(user_id))
 
     # ---------- adding ----------
@@ -306,11 +316,51 @@ class CalendarDesk:
         self._cache.pop(user_id, None)
         return f"✅ Добавила в календарь: {planned.title}, {event_when(planned, local_now().date())}"
 
+    # ---------- tasks copied to the calendar ----------
+
+    async def sync_tasks(self, user_id: int) -> int:
+        """Copy open tasks that have a deadline and no calendar event yet; returns how many were copied."""
+        calendar_id = await self._calendar_id(user_id)
+        if self._calendar is None or not calendar_id:
+            return 0
+        copied = 0
+        async with self._sessions() as db:
+            tasks = await db.scalars(
+                select(AssistantTask).where(
+                    AssistantTask.member_id == user_id,
+                    AssistantTask.done_at.is_(None),
+                    AssistantTask.due_on.is_not(None),
+                    AssistantTask.google_event_id.is_(None),
+                )
+            )
+            for task in tasks:
+                if task.due_on is None:
+                    continue
+                start = datetime.combine(task.due_on, datetime.min.time())
+                title = TASK_MARK + school.task_line(task.subject, task.text)
+                task.google_event_id = await self._calendar.add(
+                    calendar_id, title, start, start + timedelta(days=1), True
+                )
+                await db.commit()  # each copy is kept even if a later one fails
+                copied += 1
+        if copied:
+            self._cache.pop(user_id, None)
+        return copied
+
+    async def remove_task(self, user_id: int, event_id: str) -> None:
+        calendar_id = await self._calendar_id(user_id)
+        if self._calendar is not None and calendar_id:
+            await self._calendar.delete(calendar_id, event_id)
+            self._cache.pop(user_id, None)
+
     # ---------- brief and chat ----------
+
+    async def _own_events(self, user_id: int) -> list[Event]:
+        return [e for e in await self.week(user_id) if not e.title.startswith(TASK_MARK)]
 
     async def brief_lines(self, user_id: int, today: date) -> list[str]:
         try:
-            events = [e for e in await self.week(user_id) if e.start.date() == today]
+            events = [e for e in await self._own_events(user_id) if e.start.date() == today]
         except CalendarError:
             return ["📅 Календарь сейчас недоступен."]
         if not events:
@@ -321,7 +371,7 @@ class CalendarDesk:
 
     async def planner_text(self, user_id: int) -> str:
         try:
-            events = await self.week(user_id)
+            events = await self._own_events(user_id)
         except CalendarError:
             return ""
         if not events:

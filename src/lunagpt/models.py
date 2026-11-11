@@ -263,4 +263,5 @@ class AssistantTask(Base):
     text: Mapped[str] = mapped_column(Text, nullable=False)
     due_on: Mapped[date | None] = mapped_column(Date, nullable=True)
     done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    google_event_id: Mapped[str | None] = mapped_column(String(1024), nullable=True)  # its copy in Google Calendar
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

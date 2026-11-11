@@ -291,8 +291,8 @@ class LunaBot:
         self._username = bot_username
         self._memory = memory
         self._people = PeopleDesk(bot, session_factory, pi, bot_username, self._welcome)
-        self.school = SchoolDesk(bot, session_factory)
         self.calendar = CalendarDesk(bot, session_factory, google_calendar())
+        self.school = SchoolDesk(bot, session_factory, mirror=self.calendar)
         self.reminders = ReminderDesk(bot, session_factory, extra_brief=self._brief_extra)
         self._history_loaded: set[int] = set()
         self._background: set[asyncio.Task[None]] = set()

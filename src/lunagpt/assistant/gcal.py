@@ -23,7 +23,8 @@ MAX_EVENTS = 50
 
 
 class CalendarError(Exception):
-    """kind: "not_shared" when Google refuses this calendar, "unavailable" when Google or the key fails."""
+    """kind: "not_shared" when Google refuses this calendar (or the event is not there), "gone" for a deleted
+    event, "unavailable" when Google or the key fails."""
 
     def __init__(self, kind: str) -> None:
         super().__init__(kind)
@@ -89,8 +90,12 @@ class GoogleCalendar:
             raise CalendarError("unavailable") from exc
         if response.status_code in (403, 404):
             raise CalendarError("not_shared")
+        if response.status_code == 410:
+            raise CalendarError("gone")
         if response.status_code >= 300:
             raise CalendarError("unavailable")
+        if response.status_code == 204 or not response.content:
+            return {}
         result: dict[str, Any] = response.json()
         return result
 
@@ -121,10 +126,21 @@ class GoogleCalendar:
         now = datetime.now(UTC).replace(tzinfo=None) + self._offset
         await self.events(calendar_id, now, now + timedelta(days=1))
 
-    async def add(self, calendar_id: str, title: str, start: datetime, end: datetime, all_day: bool) -> None:
+    async def add(self, calendar_id: str, title: str, start: datetime, end: datetime, all_day: bool) -> str:
+        """Create an event and return its id."""
         if all_day:
             span = {"start": {"date": start.date().isoformat()}, "end": {"date": end.date().isoformat()}}
         else:
             span = {"start": {"dateTime": self._rfc3339(start)}, "end": {"dateTime": self._rfc3339(end)}}
         body = {"summary": title, **span, "reminders": {"useDefault": True}}
-        await self._call("POST", f"/calendars/{quote(calendar_id, safe='')}/events", json=body)
+        created = await self._call("POST", f"/calendars/{quote(calendar_id, safe='')}/events", json=body)
+        return str(created.get("id", ""))
+
+    async def delete(self, calendar_id: str, event_id: str) -> None:
+        """Remove an event; one already gone (deleted by hand, 404 or 410) counts as removed."""
+        path = f"/calendars/{quote(calendar_id, safe='')}/events/{quote(event_id, safe='')}"
+        try:
+            await self._call("DELETE", path)
+        except CalendarError as exc:
+            if exc.kind not in ("not_shared", "gone"):
+                raise

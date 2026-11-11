@@ -8,12 +8,14 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 from aiogram.types import Message
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from lunagpt.assistant import calendar_desk
+from lunagpt.assistant import calendar_desk, school_desk
 from lunagpt.assistant.calendar_desk import EventParts, plan
 from lunagpt.assistant.gcal import CalendarError, GoogleCalendar
-from lunagpt.models import AssistantMember
+from lunagpt.assistant.school import TaskItem, TaskList
+from lunagpt.models import AssistantMember, AssistantTask
 
 NOW = datetime(2026, 11, 11, 10, 30)  # a Wednesday
 SA_EMAIL = "luna@family.iam.gserviceaccount.com"
@@ -29,6 +31,7 @@ class FakeGoogle:
     def __init__(self, shared: str = "mama@gmail.com") -> None:
         self.shared = shared
         self.created: list[dict[str, Any]] = []
+        self.deleted: list[str] = []
         self.items: list[dict[str, Any]] = [
             {
                 "summary": "Стоматолог",
@@ -45,7 +48,10 @@ class FakeGoogle:
             return httpx.Response(404)
         if request.method == "POST":
             self.created.append(json.loads(request.content))
-            return httpx.Response(200, json={"id": "e1"})
+            return httpx.Response(200, json={"id": f"e{len(self.created)}"})
+        if request.method == "DELETE":
+            self.deleted.append(request.url.path.rsplit("/", 1)[-1])
+            return httpx.Response(204)
         return httpx.Response(200, json={"items": self.items})
 
 
@@ -191,3 +197,40 @@ async def test_without_a_key_calendar_is_off(db_sessions: async_sessionmaker[Asy
     await desk.request_event(member, "добавь в календарь дело завтра")
     assert telegram.send_message.call_args.args[1] == calendar_desk.NOT_CONFIGURED
     assert await desk.brief_lines(1, date(2026, 11, 11)) == [] and await desk.planner_text(1) == ""
+
+
+@pytest.mark.asyncio
+async def test_tasks_with_a_deadline_follow_into_the_calendar(
+    db_sessions: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(calendar_desk, "local_now", lambda: NOW)
+    monkeypatch.setattr(school_desk, "local_now", lambda: NOW)
+    member = await _member(db_sessions)
+    async with db_sessions() as db:
+        db.add(AssistantTask(member_id=1, subject="История", text="параграф 12", due_on=date(2026, 11, 17)))
+        db.add(AssistantTask(member_id=1, subject="", text="доклад"))  # no deadline: stays in Luna only
+        await db.commit()
+    google = FakeGoogle()
+    telegram = MagicMock(send_message=AsyncMock())
+    calendar = calendar_desk.CalendarDesk(telegram, db_sessions, _calendar(google))
+    await calendar.link(member, "mama@gmail.com")
+    assert "Перенесла туда заданий со сроком: 1" in telegram.send_message.call_args_list[0].args[1]
+    assert google.created[0]["summary"] == "📝 История: параграф 12"
+    assert google.created[0]["start"] == {"date": "2026-11-17"}
+
+    found = TaskList(items=[TaskItem(subject="Математика", task="№ 125", due="fri")])
+    desk = school_desk.SchoolDesk(telegram, db_sessions, read_tasks=AsyncMock(return_value=found), mirror=calendar)
+    await desk.read_tasks(member, "задали")
+    save = _callback("tky")
+    await desk.handle(save, member, "tky", [])
+    assert "В Google Calendar добавила: 1" in save.message.edit_text.call_args.args[0]
+    assert google.created[1]["summary"] == "📝 Математика: № 125"
+
+    google.items = [{"summary": "📝 Математика: № 125", "start": {"date": "2026-11-11"}, "end": {"date": "2026-11-12"}}]
+    assert await calendar.brief_lines(1, date(2026, 11, 11)) == []  # the brief lists tasks itself
+
+    async with db_sessions() as db:
+        task = await db.scalar(select(AssistantTask).where(AssistantTask.subject == "Математика"))
+    assert task is not None
+    await desk.handle(_callback(f"tkd:{task.id}"), member, "tkd", [str(task.id)])
+    assert google.deleted == [task.google_event_id]

@@ -6,6 +6,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import date, datetime
+from typing import Protocol
 
 from aiogram import Bot
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -30,6 +31,15 @@ NOT_READ = "Не получилось прочитать, попробуй ещ�
 NO_SCHEDULE = "Не нашла здесь расписание уроков. Пришли фото расписания или напиши его текстом."
 NO_TASKS = "Не нашла здесь заданий. Напиши, например: «задали по математике № 125 к пятнице»."
 EXPIRED = "Это уже неактуально, пришли ещё раз."
+
+
+class TaskMirror(Protocol):
+    """Somewhere tasks with a deadline are copied to, such as Google Calendar."""
+
+    async def sync_tasks(self, user_id: int) -> int: ...
+
+    async def remove_task(self, user_id: int, event_id: str) -> None: ...
+
 
 ReadScheduleFn = Callable[..., Awaitable[school.Timetable | None]]
 ReadTasksFn = Callable[..., Awaitable[school.TaskList | None]]
@@ -75,11 +85,13 @@ class SchoolDesk:
         session_factory: async_sessionmaker[AsyncSession],
         read_schedule: ReadScheduleFn = school.read_schedule,
         read_tasks: ReadTasksFn = school.read_tasks,
+        mirror: TaskMirror | None = None,
     ) -> None:
         self._bot = bot
         self._sessions = session_factory
         self._read_schedule = read_schedule
         self._read_tasks = read_tasks
+        self.mirror = mirror
         self._pending_schedule: dict[int, dict[str, list[str]]] = {}
         self._pending_tasks: dict[int, list[Planned]] = {}
 
@@ -207,7 +219,16 @@ class SchoolDesk:
                     text = f"📝 {when} — {school.task_line(p.subject, p.task)}"
                     db.add(AssistantReminder(member_id=user_id, text=text, due_at=to_utc(p.remind_at), task_id=task.id))
             await db.commit()
-        return f"📝 Сохранила заданий: {len(planned)}. Список — в «🔔 Напоминания» → «📝 Задания»."
+        text = f"📝 Сохранила заданий: {len(planned)}. Список — в «🔔 Напоминания» → «📝 Задания»."
+        if self.mirror is not None:
+            try:
+                copied = await self.mirror.sync_tasks(user_id)
+            except Exception:
+                logger.warning("could not copy tasks to the calendar", exc_info=True)
+                copied = 0
+            if copied:
+                text += f"\nВ Google Calendar добавила: {copied}."
+        return text
 
     async def _done(self, user_id: int, task_id: int) -> None:
         async with self._sessions() as db:
@@ -215,8 +236,14 @@ class SchoolDesk:
             if task is None or task.member_id != user_id:
                 return
             task.done_at = datetime.now().astimezone()
+            event_id = task.google_event_id
             await db.execute(delete(AssistantReminder).where(AssistantReminder.task_id == task_id))
             await db.commit()
+        if event_id and self.mirror is not None:
+            try:
+                await self.mirror.remove_task(user_id, event_id)
+            except Exception:
+                logger.warning("could not remove a done task from the calendar", exc_info=True)
 
     # ---------- reading back ----------
 
