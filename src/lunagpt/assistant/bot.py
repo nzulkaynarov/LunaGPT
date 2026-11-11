@@ -16,11 +16,13 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import (
     BufferedInputFile,
     CallbackQuery,
+    Document,
     ForceReply,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
     Message,
+    PhotoSize,
     ReplyKeyboardMarkup,
     VideoNote,
     Voice,
@@ -110,7 +112,12 @@ RATE_LIMIT = 10
 RATE_WINDOW_SECONDS = 60
 ACCESS_ENDED = "Срок доступа закончился. Попроси взрослого из семьи его продлить."
 TOO_FAST = "Слишком много сообщений подряд. Подожди минуту 🙂"
-TEXT_ONLY = "Пока я понимаю текст, голосовые и кружки."
+TEXT_ONLY = "Пока я понимаю текст, голосовые, кружки и фото."
+PHOTO_DEFAULT = "Что на фото? Если там задание, помоги с ним."
+PHOTO_FAILED = "Не получилось открыть фото. Пришли его ещё раз."
+PHOTO_TOO_BIG = "Слишком большой файл. Пришли фото обычным способом, не файлом."
+MAX_PHOTO_BYTES = 10 * 1024 * 1024
+PHOTO_TYPES = ("image/jpeg", "image/png", "image/webp")
 NO_VIDEO = "Видео я не смотрю. Пришли голосовое или кружок, или напиши текстом."
 MAX_VOICE_SECONDS = 120
 VOICE_TOO_LONG = "Слишком длинное голосовое. Запиши покороче, до двух минут."
@@ -179,6 +186,16 @@ def family_request(text: str) -> str | None:
     """The note someone explicitly asked to keep for the family, if this message is such a request."""
     match = FAMILY_REQUEST.match(text)
     return match.group("fact").strip() if match else None
+
+
+def photo_of(message: Message) -> PhotoSize | Document | None:
+    """The picture in a message: the largest size of a photo, or an image sent as a file."""
+    if message.photo:
+        return message.photo[-1]
+    document = message.document
+    if document is not None and document.mime_type in PHOTO_TYPES:
+        return document
+    return None
 
 
 def needs_adult_attention(text: str) -> bool:
@@ -298,6 +315,10 @@ class LunaBot:
             return
         if member.role in access.ADULT_ROLES and self._people.is_search_reply(message):
             await self._people.search(user_id, message)
+            return
+        picture = photo_of(message)
+        if picture is not None:
+            await self._photo(member, (message.caption or "").strip(), picture)
             return
         spoken_note = message.voice or message.video_note
         if not text and spoken_note is not None:
@@ -560,6 +581,22 @@ class LunaBot:
         self._request_times[user_id].append(time.monotonic())
         return True
 
+    async def _photo(self, member: AssistantMember, caption: str, picture: PhotoSize | Document) -> None:
+        user_id = member.telegram_id
+        if (picture.file_size or 0) > MAX_PHOTO_BYTES:
+            await self._send(user_id, PHOTO_TOO_BIG)
+            return
+        try:
+            data = await self._bot.download(picture)
+        except (TelegramAPIError, ClientError, TimeoutError) as exc:
+            logger.warning("could not download a photo: %s", type(exc).__name__)
+            data = None
+        if data is None:
+            await self._send(user_id, PHOTO_FAILED)
+            return
+        image_type = picture.mime_type if isinstance(picture, Document) and picture.mime_type else "image/jpeg"
+        await self._chat(member, caption or PHOTO_DEFAULT, image=data.read(), image_type=image_type)
+
     async def _voice_text(self, member: AssistantMember, voice: Voice | VideoNote) -> str | None:
         """Turn a voice note or the sound of a round video into text and show it, or explain why not."""
         user_id = member.telegram_id
@@ -606,7 +643,13 @@ class LunaBot:
         return (datetime.now(UTC) + timedelta(hours=settings.luna_utc_offset_hours)).date()
 
     async def _chat(
-        self, member: AssistantMember, text: str, family_note: str | None = None, speak: bool = False
+        self,
+        member: AssistantMember,
+        text: str,
+        family_note: str | None = None,
+        speak: bool = False,
+        image: bytes | None = None,
+        image_type: str = "image/jpeg",
     ) -> None:
         user_id = member.telegram_id
         if not self._allow_request(user_id):
@@ -616,7 +659,7 @@ class LunaBot:
             await self._alert_parents(member, text)
             await self._send(user_id, SAFETY_REPLY)
             return
-        if member.role in access.FAMILY_ROLES:
+        if member.role in access.FAMILY_ROLES and image is None:
             family_note = family_note or family_request(text)
         if family_note is not None:
             await self._save_family_note(member, family_note)
@@ -643,19 +686,23 @@ class LunaBot:
                     on_cost=costs.append if current.role == "guest" else None,
                     family_facts=await self._memory.family.recall(current.role, text) if self._memory else (),
                     spoken=speak,
+                    image=image,
+                    image_type=image_type,
                 )
                 reply = await self._answer(member.role, user_id, history, text, facts, options)
-            self._history[user_id].append({"role": "user", "content": text})
+            # Later turns keep only a mark of the photo: its bytes are never stored or sent again.
+            said = f"[фото] {text}" if image is not None else text
+            self._history[user_id].append({"role": "user", "content": said})
             self._history[user_id].append({"role": "assistant", "content": reply})
             if self._memory:
-                await self._memory.save_exchange(user_id, text, reply, HISTORY_MESSAGES)
+                await self._memory.save_exchange(user_id, said, reply, HISTORY_MESSAGES)
         if any(costs):
             async with self._sessions() as db:
                 await access.record_spend(db, user_id, sum(costs), today)
         await send_model_reply(self._bot, user_id, reply)
         if speak:
             await self._send_voice_reply(user_id, reply)
-        if self._memory:
+        if self._memory and (image is None or text != PHOTO_DEFAULT):
             task = asyncio.create_task(self._memory.remember(user_id, member.role, text))
             self._background.add(task)  # the event loop keeps only weak references to tasks
             task.add_done_callback(self._background.discard)

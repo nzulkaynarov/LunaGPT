@@ -17,7 +17,7 @@ import httpx
 import pytest
 from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import Message, Update
+from aiogram.types import Document, Message, Update
 
 from lunagpt.assistant import access, audio, bot, llm, speech
 from lunagpt.assistant.monitor import AvailabilityTracker
@@ -38,6 +38,9 @@ def _message(text: str, user_id: int = 1, chat_type: str = "private") -> Any:
     message.voice = None
     message.video_note = None
     message.video = None
+    message.photo = None
+    message.document = None
+    message.caption = None
     return message
 
 
@@ -1361,3 +1364,72 @@ async def test_reminders_button_and_callbacks_reach_the_desk(harness: Any, monke
     callback.from_user.id = 5
     await instance.on_callback(callback)
     instance.reminders.handle.assert_awaited_once()
+
+
+def _photo_message(caption: str | None, user_id: int = 5) -> Any:
+    message = _message("", user_id)
+    message.caption = caption
+    message.photo = [MagicMock(file_size=1000), MagicMock(file_size=50_000)]
+    return message
+
+
+@pytest.mark.asyncio
+async def test_photo_reaches_the_model_and_history_keeps_only_a_mark(
+    harness: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance, send, answer = harness
+    _as_member(monkeypatch, _member("kid", 5))
+    instance._bot.download = AsyncMock(return_value=io.BytesIO(b"jpeg-bytes"))
+    message = _photo_message("реши второе")
+    await instance.on_message(message)
+    instance._bot.download.assert_awaited_once_with(message.photo[-1])
+    text, options = answer.call_args.args[3], answer.call_args.args[5]
+    assert text == "реши второе" and options.image == b"jpeg-bytes"
+    assert instance._history[5][0]["content"] == "[фото] реши второе"
+
+
+@pytest.mark.asyncio
+async def test_photo_without_caption_gets_a_default_question(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, _, answer = harness
+    _as_member(monkeypatch, _member("adult", 5))
+    instance._bot.download = AsyncMock(return_value=io.BytesIO(b"x"))
+    await instance.on_message(_photo_message(None))
+    assert answer.call_args.args[3] == bot.PHOTO_DEFAULT
+
+
+@pytest.mark.asyncio
+async def test_image_file_is_a_photo_but_other_files_are_not(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, send, answer = harness
+    _as_member(monkeypatch, _member("adult", 5))
+    instance._bot.download = AsyncMock(return_value=io.BytesIO(b"png"))
+    message = _message("", 5)
+    message.document = MagicMock(spec=Document, mime_type="image/png", file_size=1000)
+    await instance.on_message(message)
+    assert answer.call_args.args[5].image_type == "image/png"
+    answer.reset_mock()
+    message.document = MagicMock(spec=Document, mime_type="application/pdf", file_size=1000)
+    await instance.on_message(message)
+    answer.assert_not_awaited()
+    assert _sent(send) == bot.TEXT_ONLY
+    message.document = MagicMock(spec=Document, mime_type="image/jpeg", file_size=bot.MAX_PHOTO_BYTES + 1)
+    await instance.on_message(message)
+    assert _sent(send) == bot.PHOTO_TOO_BIG
+
+
+@pytest.mark.asyncio
+async def test_photo_is_sent_to_the_model_as_an_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[Any] = []
+
+    async def fake_run(client: Any, model: str, messages: list[dict[str, Any]], *args: Any) -> str:
+        seen.append(messages)
+        models.append(model)
+        return "ответ"
+
+    models: list[str] = []
+    monkeypatch.setattr(llm, "_run_model", fake_run)
+    options = llm.ReplyOptions(image=b"abc", image_type="image/png")
+    assert await llm.generate_reply("kid", 1, [], "реши", options=options) == "ответ"
+    assert models == ["luna-fast"]
+    system, user = seen[0][0]["content"], seen[0][-1]["content"]
+    assert "решай по шагам" in system
+    assert user[0]["image_url"]["url"] == "data:image/png;base64,YWJj" and user[1]["text"] == "реши"
