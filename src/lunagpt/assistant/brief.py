@@ -136,11 +136,14 @@ def date_line(day: date) -> str:
     return f"Сегодня {DAY_NAMES[day.weekday()]}, {day.day} {MONTHS[day.month - 1]}."
 
 
-def compose(name: str, day: date, weather: str | None, today: list[tuple[datetime, str]]) -> str:
-    """The brief text; `today` holds this day's reminders as (local time, text)."""
+def compose(
+    name: str, day: date, weather: str | None, today: list[tuple[datetime, str]], extra: list[str] | None = None
+) -> str:
+    """The brief text; `today` holds this day's reminders as (local time, text), `extra` the lessons and tasks."""
     lines = [f"☀️ Доброе утро, {name}! {date_line(day)}"]
     if weather:
         lines.append(weather)
+    lines += extra or []
     if today:
         lines.append("\n🔔 Сегодня:")
         lines += [f"• {moment:%H:%M} — {text or 'напоминание'}" for moment, text in today]

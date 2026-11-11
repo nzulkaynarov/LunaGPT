@@ -38,6 +38,7 @@ from lunagpt.assistant.people import PEOPLE_PREFIXES, PeopleDesk
 from lunagpt.assistant.pi_client import PiClient, PiConflictError, PiNotFoundError, PiUnavailableError
 from lunagpt.assistant.reminder_desk import REMINDER_PREFIXES, ReminderDesk
 from lunagpt.assistant.reminders import is_reminder_request
+from lunagpt.assistant.school_desk import SCHOOL_PREFIXES, SchoolDesk, is_school_text, photo_kind
 from lunagpt.assistant.speech import (
     SpokenReply,
     asks_for_voice,
@@ -130,8 +131,12 @@ MEMORY_NOTICE = (
 )
 FAMILY_NOTICE = " Чтобы запомнить для всех в семье, напиши: «запомни для семьи, что…»."
 ASK_ANYTHING = "Просто напиши или скажи голосом, что нужно: вопрос, идея, перевод, свежие новости."
+PHOTO_HINT = (
+    "📸 Пришли фото задачи, чека или текста, и я разберу. "
+    "Фото расписания с подписью «расписание» или «задали …» запомню и напомню вовремя.\n\n"
+)
 ADULT_HELP = (
-    f"{ASK_ANYTHING}\n\n"
+    f"{ASK_ANYTHING}\n\n{PHOTO_HINT}"
     f"{BTN_PEOPLE} — семья, гости и заявки\n"
     f"{BTN_SHARED} — телевизор и другое домашнее\n"
     f"{BTN_INVITE} — отправить приглашение\n"
@@ -143,14 +148,15 @@ HELP_TEXT = {
     "adult": ADULT_HELP,
     "kid": (
         "Спрашивай что угодно: уроки, игры, код, идеи, свежие новости.\n\n"
-        f"{BTN_MY_TIME} — сколько осталось интернета\n"
+        + PHOTO_HINT
+        + f"{BTN_MY_TIME} — сколько осталось интернета\n"
         f"{BTN_ASK_TIME} — написать родителям\n"
         f"{BTN_QUIZ} — ответить и заработать время\n"
         f"{BTN_REMINDERS} — напоминания и утренняя сводка\n"
         f"{BTN_MEMORY} — личная и общая память\n\n" + MEMORY_NOTICE.strip() + FAMILY_NOTICE
     ),
     "guest": (
-        f"{ASK_ANYTHING}\n\n{BTN_REMINDERS} — напоминания и утренняя сводка\n"
+        f"{ASK_ANYTHING}\n\n{PHOTO_HINT}{BTN_REMINDERS} — напоминания и утренняя сводка\n"
         f"{BTN_MEMORY} — что я о тебе помню\n\n" + MEMORY_NOTICE.strip()
     ),
 }
@@ -272,7 +278,8 @@ class LunaBot:
         self._username = bot_username
         self._memory = memory
         self._people = PeopleDesk(bot, session_factory, pi, bot_username, self._welcome)
-        self.reminders = ReminderDesk(bot, session_factory)
+        self.school = SchoolDesk(bot, session_factory)
+        self.reminders = ReminderDesk(bot, session_factory, extra_brief=self.school.brief_lines)
         self._history_loaded: set[int] = set()
         self._background: set[asyncio.Task[None]] = set()
         self._history: dict[int, deque[dict[str, str]]] = defaultdict(lambda: deque(maxlen=HISTORY_MESSAGES))
@@ -344,6 +351,11 @@ class LunaBot:
             return
         if is_reminder_request(text):
             await self._new_reminder(member, text)
+            return
+        if is_school_text(text):
+            if await self._may_ask(member):
+                async with ChatActionSender.typing(chat_id=user_id, bot=self._bot):
+                    await self.school.handle_text(member, text)
             return
         if spoken_note is None and is_bare_voice_request(text):
             await self._say_last_reply(member)
@@ -417,12 +429,14 @@ class LunaBot:
             await self._people.handle(callback, member, prefix, args)
         elif prefix in REMINDER_PREFIXES:
             await self.reminders.handle(callback, member, prefix, args)
+        elif prefix in SCHOOL_PREFIXES:
+            await self.school.handle(callback, member, prefix, args)
 
     @staticmethod
     def _callback_allowed(role: str, prefix: str) -> bool:
         if prefix == "quiz":
             return role == "kid"
-        if prefix in ("mem", "memd", "memc", "memy") or prefix in REMINDER_PREFIXES:
+        if prefix in ("mem", "memd", "memc", "memy") or prefix in REMINDER_PREFIXES or prefix in SCHOOL_PREFIXES:
             return role in access.ROLES
         if prefix in ("fam", "fama", "famd", "famy"):
             return role in access.FAMILY_ROLES
@@ -595,7 +609,15 @@ class LunaBot:
             await self._send(user_id, PHOTO_FAILED)
             return
         image_type = picture.mime_type if isinstance(picture, Document) and picture.mime_type else "image/jpeg"
-        await self._chat(member, caption or PHOTO_DEFAULT, image=data.read(), image_type=image_type)
+        kind = photo_kind(caption)
+        if kind is None:
+            await self._chat(member, caption or PHOTO_DEFAULT, image=data.read(), image_type=image_type)
+            return
+        if not await self._may_ask(member):
+            return
+        async with ChatActionSender.typing(chat_id=user_id, bot=self._bot):
+            read = self.school.read_schedule if kind == "schedule" else self.school.read_tasks
+            await read(member, caption, data.read(), image_type)
 
     async def _voice_text(self, member: AssistantMember, voice: Voice | VideoNote) -> str | None:
         """Turn a voice note or the sound of a round video into text and show it, or explain why not."""
@@ -688,6 +710,7 @@ class LunaBot:
                     spoken=speak,
                     image=image,
                     image_type=image_type,
+                    planner=await self._planner(user_id),
                 )
                 reply = await self._answer(member.role, user_id, history, text, facts, options)
             # Later turns keep only a mark of the photo: its bytes are never stored or sent again.
@@ -707,16 +730,29 @@ class LunaBot:
             self._background.add(task)  # the event loop keeps only weak references to tasks
             task.add_done_callback(self._background.discard)
 
-    async def _new_reminder(self, member: AssistantMember, text: str) -> None:
-        user_id = member.telegram_id
-        if not self._allow_request(user_id):
-            await self._send(user_id, TOO_FAST)
-            return
+    async def _planner(self, user_id: int) -> str:
+        """The timetable and tasks for the model; a database hiccup only loses this context, not the answer."""
+        try:
+            block: str = await self.school.planner_block(user_id)
+            return block
+        except Exception:
+            logger.warning("could not load the timetable and tasks", exc_info=True)
+            return ""
+
+    async def _may_ask(self, member: AssistantMember) -> bool:
+        """The rate limit and guest access, for requests that skip the chat."""
+        if not self._allow_request(member.telegram_id):
+            await self._send(member.telegram_id, TOO_FAST)
+            return False
         if access.access_ended(member):
-            await self._send(user_id, ACCESS_ENDED)
-            return
-        async with ChatActionSender.typing(chat_id=user_id, bot=self._bot):
-            await self.reminders.create(member, text)
+            await self._send(member.telegram_id, ACCESS_ENDED)
+            return False
+        return True
+
+    async def _new_reminder(self, member: AssistantMember, text: str) -> None:
+        if await self._may_ask(member):
+            async with ChatActionSender.typing(chat_id=member.telegram_id, bot=self._bot):
+                await self.reminders.create(member, text)
 
     async def _send_voice_reply(self, user_id: int, reply: str) -> bool:
         """Say the reply after showing it; the text is already there if this fails."""

@@ -1433,3 +1433,29 @@ async def test_photo_is_sent_to_the_model_as_an_image(monkeypatch: pytest.Monkey
     system, user = seen[0][0]["content"], seen[0][-1]["content"]
     assert "решай по шагам" in system
     assert user[0]["image_url"]["url"] == "data:image/png;base64,YWJj" and user[1]["text"] == "реши"
+
+
+@pytest.mark.asyncio
+async def test_timetable_photo_and_homework_text_go_to_the_school_desk(
+    harness: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance, _, answer = harness
+    _as_member(monkeypatch, _member("kid", 5))
+    instance._bot.download = AsyncMock(return_value=io.BytesIO(b"jpeg"))
+    instance.school.read_schedule = AsyncMock()
+    await instance.on_message(_photo_message("моё расписание"))
+    instance.school.read_schedule.assert_awaited_once()
+    assert instance.school.read_schedule.call_args.args[2] == b"jpeg"
+    instance.school.handle_text = AsyncMock()
+    await instance.on_message(_message("задали по математике № 125 к пятнице", 5))
+    instance.school.handle_text.assert_awaited_once()
+    answer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_chat_knows_the_timetable(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, _, answer = harness
+    _as_member(monkeypatch, _member("kid", 5))
+    instance.school.planner_block = AsyncMock(return_value="Расписание уроков:\nЧт: литература")
+    await instance.on_message(_message("что завтра?", 5))
+    assert answer.call_args.args[5].planner.endswith("Чт: литература")

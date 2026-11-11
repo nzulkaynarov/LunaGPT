@@ -4,7 +4,7 @@ import asyncio
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
@@ -35,6 +35,7 @@ TOO_MANY = f"У тебя уже {MAX_ACTIVE} напоминаний. Удали 
 ExtractFn = Callable[[str, datetime, dict[str, object]], Awaitable[reminders.ReminderParts | None]]
 GeocodeFn = Callable[[str], Awaitable[brief.Place | None]]
 ForecastFn = Callable[[float, float], Awaitable[brief.Forecast | None]]
+ExtraBriefFn = Callable[[int, date], Awaitable[list[str]]]
 
 
 def local_now() -> datetime:
@@ -76,12 +77,14 @@ class ReminderDesk:
         extract: ExtractFn = reminders.extract,
         geocode: GeocodeFn = brief.find_city,
         weather: ForecastFn = brief.forecast,
+        extra_brief: ExtraBriefFn | None = None,
     ) -> None:
         self._bot = bot
         self._sessions = session_factory
         self._extract = extract
         self._geocode = geocode
         self._weather = weather
+        self._extra_brief = extra_brief
 
     # ---------- creating ----------
 
@@ -147,6 +150,7 @@ class ReminderDesk:
         lines.append("\n" + self._brief_status(member))
         numbers = [_button(f"✖ {n}", f"rmd:{row.id}") for n, row in enumerate(rows[:LIST_LIMIT], start=1)]
         keyboard = [numbers[i : i + 5] for i in range(0, len(numbers), 5)]
+        keyboard.append([_button("📚 Расписание", "sk"), _button("📝 Задания", "tk")])
         keyboard.append([_button("☀️ Утренняя сводка", "rb")])
         return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard)
 
@@ -332,7 +336,8 @@ class ReminderDesk:
                 .order_by(AssistantReminder.due_at)
             )
             today = [(to_local(row.due_at), row.text) for row in rows]
-        text: str = brief.compose(member.name, now.date(), weather, today)
+        extra = await self._extra_brief(member.telegram_id, now.date()) if self._extra_brief else []
+        text: str = brief.compose(member.name, now.date(), weather, today, extra)
         return text
 
     async def watch(self) -> None:

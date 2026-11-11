@@ -20,6 +20,8 @@ from lunagpt.models import (
     AssistantMemory,
     AssistantMessage,
     AssistantReminder,
+    AssistantSchedule,
+    AssistantTask,
 )
 
 TABLES = [
@@ -30,7 +32,9 @@ TABLES = [
         AssistantMemory,
         AssistantFamilyMemory,
         AssistantMessage,
+        AssistantTask,
         AssistantReminder,
+        AssistantSchedule,
     )
 ]
 

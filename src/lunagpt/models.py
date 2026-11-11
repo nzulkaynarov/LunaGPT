@@ -231,4 +231,35 @@ class AssistantReminder(Base):
     due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     repeat: Mapped[str] = mapped_column(String(10), nullable=False, server_default="none")
     done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    task_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("assistant_tasks.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class AssistantSchedule(Base):
+    """A person's weekly timetable: {"mon": ["математика", ...], ...}."""
+
+    __tablename__ = "assistant_schedules"
+
+    member_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("assistant_members.telegram_id", ondelete="CASCADE"), primary_key=True
+    )
+    days: Mapped[dict[str, list[str]]] = mapped_column(JSONB, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class AssistantTask(Base):
+    """Homework or an adult's task, with the day it is due when one is known."""
+
+    __tablename__ = "assistant_tasks"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
+    member_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("assistant_members.telegram_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    subject: Mapped[str] = mapped_column(String(80), nullable=False, server_default="")
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    due_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
