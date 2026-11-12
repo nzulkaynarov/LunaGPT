@@ -40,7 +40,18 @@ from lunagpt.assistant.calendar_desk import CALENDAR_PREFIXES, CalendarDesk, is_
 from lunagpt.assistant.gcal import GoogleCalendar
 from lunagpt.assistant.list_desk import LIST_PREFIXES, ListDesk
 from lunagpt.assistant.lists import is_list_request
-from lunagpt.assistant.llm import QuizQuestion, ReplyOptions, transcribe_voice
+from lunagpt.assistant.llm import (
+    LIST_TOOL,
+    LISTS_BLOCK,
+    LISTS_HINT,
+    REMINDER_HINT,
+    REMINDER_TOOLS,
+    REMINDERS_BLOCK,
+    Action,
+    QuizQuestion,
+    ReplyOptions,
+    transcribe_voice,
+)
 from lunagpt.assistant.memories import FAMILY_DUPLICATE, FAMILY_FAILED, FAMILY_FULL, FAMILY_SAVED, Memory
 from lunagpt.assistant.people import PEOPLE_PREFIXES, PeopleDesk
 from lunagpt.assistant.phrases import PHRASE_PREFIXES, PhraseDesk
@@ -257,6 +268,14 @@ def needs_adult_attention(text: str) -> bool:
     return bool(SAFETY_PATTERN.search(text))
 
 
+def number_of(args: dict[str, Any]) -> int | None:
+    value = args.get("number")
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def main_keyboard(role: str) -> ReplyKeyboardMarkup:
     """The persistent menu; server-side checks still decide what each role may do."""
     adults = [[BTN_SHARED, BTN_PEOPLE], [BTN_INVITE, BTN_MEMORY], [BTN_REMINDERS, BTN_LISTS], [BTN_STORY, BTN_HELP]]
@@ -440,9 +459,10 @@ class LunaBot:
             return
         if member.role in access.FAMILY_ROLES and is_list_request(text) and not self._over_rate_limit(user_id):
             async with ChatActionSender.typing(chat_id=user_id, bot=self._bot):
-                handled = await self.lists.request(member, text)
-            if handled:
+                said = await self.lists.request(member, text)
+            if said is not None:
                 self._allow_request(user_id)  # counts like a chat turn; anything else goes on to the chat
+                await self._keep_turn(member, text, said)
                 return
         if spoken_note is None and is_bare_voice_request(text):
             await self._say_last_reply(member)
@@ -852,7 +872,7 @@ class LunaBot:
                     planner=await self._planner(current),
                     on_search=waiting.searching,
                     about=await self._about(current, text),
-                    **await self._list_options(current),
+                    actions=await self._actions(current),
                 )
                 reply = await self._answer(member.role, user_id, history, text, facts, options)
             # Later turns keep only a mark of the photo: its bytes are never stored or sent again.
@@ -873,21 +893,53 @@ class LunaBot:
             self._background.add(task)  # the event loop keeps only weak references to tasks
             task.add_done_callback(self._background.discard)
 
-    async def _list_options(self, member: AssistantMember) -> dict[str, Any]:
-        """The list tool for the family; guests have no lists, and a failure only leaves the tool out."""
-        if member.role not in access.FAMILY_ROLES:
-            return {}
-        try:
-            names = tuple(await self.lists.names())
-        except Exception:
-            logger.warning("could not load the family lists", exc_info=True)
-            return {}
+    async def _actions(self, member: AssistantMember) -> tuple[Action, ...]:
+        """What the chat model may do for this person: reminders for everyone, the family's lists for family."""
 
-        async def add(name: str, items: list[str]) -> str:
-            result: str = await self.lists.add_from_chat(member, name, items)
-            return result
+        async def set_reminder(args: dict[str, Any]) -> str:
+            request = str(args.get("request") or "").strip()
+            if not request:
+                return "Не сказано, о чём и когда напомнить."
+            said = await self.reminders.create(member, f"напомни {request}")
+            return f"Человеку показано: {said}"
 
-        return {"list_names": names, "on_list": add}
+        async def move_reminder(args: dict[str, Any]) -> str:
+            number = number_of(args)
+            return (
+                "Нет номера напоминания."
+                if number is None
+                else await self.reminders.move(member, number, str(args.get("when") or ""))
+            )
+
+        async def cancel_reminder(args: dict[str, Any]) -> str:
+            number = number_of(args)
+            return "Нет номера напоминания." if number is None else await self.reminders.cancel(member, number)
+
+        runs = (set_reminder, move_reminder, cancel_reminder)
+        actions = [
+            Action(schema, run, REMINDERS_BLOCK, REMINDER_HINT)
+            for schema, run in zip(REMINDER_TOOLS, runs, strict=True)
+        ]
+        if member.role in access.FAMILY_ROLES:
+            try:
+                names = ", ".join(f"«{name}»" for name in await self.lists.names())
+            except Exception:
+                logger.warning("could not load the family lists", exc_info=True)
+                return tuple(actions)
+
+            async def add_to_list(args: dict[str, Any]) -> str:
+                items = args.get("items")
+                if not isinstance(items, list):
+                    return "Нет пунктов."
+                result: str = await self.lists.add_from_chat(
+                    member, str(args.get("list") or ""), [str(i) for i in items]
+                )
+                return result
+
+            actions.append(
+                Action(LIST_TOOL, add_to_list, LISTS_BLOCK.format(names=names), LISTS_HINT.format(names=names))
+            )
+        return tuple(actions)
 
     async def _about(self, member: AssistantMember, text: str) -> str:
         """Luna's facts about herself, only for a question about her; a failure just leaves them out."""
@@ -936,9 +988,10 @@ class LunaBot:
             logger.info("could not set a reaction: %s", type(exc).__name__)
 
     async def _planner(self, member: AssistantMember) -> str:
-        """Timetable, tasks, calendar and the family's lists for the model; a failure only loses this context."""
+        """Timetable, tasks, calendar, reminders and the family's lists for the model; a failure only loses this
+        context."""
         parts: list[str] = []
-        for source in (self.school.planner_block, self.calendar.planner_text):
+        for source in (self.school.planner_block, self.calendar.planner_text, self.reminders.planner_text):
             try:
                 parts.append(await source(member.telegram_id))
             except Exception:
@@ -980,7 +1033,21 @@ class LunaBot:
     async def _new_reminder(self, member: AssistantMember, text: str) -> None:
         if await self._may_ask(member):
             async with ChatActionSender.typing(chat_id=member.telegram_id, bot=self._bot):
-                await self.reminders.create(member, text)
+                said = await self.reminders.create(member, text)
+            await self._keep_turn(member, text, said)
+
+    async def _keep_turn(self, member: AssistantMember, text: str, said: str) -> None:
+        """A reminder or a list change done outside the chat still belongs to the conversation, so a follow-up
+        such as "не в 8, а в 8:30" is understood."""
+        user_id = member.telegram_id
+        await self._conversation(member)  # loads the stored turns first, so they are not lost behind this one
+        self._history[user_id].append({"role": "user", "content": text})
+        self._history[user_id].append({"role": "assistant", "content": said})
+        if self._memory:
+            try:
+                await self._memory.save_exchange(user_id, text, said, HISTORY_MESSAGES)
+            except Exception:
+                logger.warning("could not keep the turn", exc_info=True)
 
     async def _send_voice_reply(self, user_id: int, reply: str) -> bool:
         """Say the reply after showing it; the text is already there if this fails."""

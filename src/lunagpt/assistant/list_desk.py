@@ -214,8 +214,9 @@ class ListDesk:
 
     # ---------- by voice or text ----------
 
-    async def request(self, member: AssistantMember, text: str) -> bool:
-        """Act on "добавь молоко в покупки"; False when the message is not about a list after all."""
+    async def request(self, member: AssistantMember, text: str) -> str | None:
+        """Act on "добавь молоко в покупки" and return what the person was told; None when the message is not
+        about a list after all."""
         metadata: dict[str, object] = {
             "trace_id": str(uuid.uuid4()),
             "user_id": f"member:{member.telegram_id}",
@@ -225,13 +226,13 @@ class ListDesk:
         }
         asked = await lists.parse_request(text, await self.names(), metadata)
         if asked is None:
-            return False
+            return None
         async with self._sessions() as db:
             target = await self._named(db, asked.name, create=asked.action == "add")
             if target is None:
                 note = TOO_MANY_LISTS if asked.action == "add" else f"Списка «{asked.name}» у нас нет."
                 await self._bot.send_message(member.telegram_id, note)
-                return True
+                return note
             if asked.action == "add":
                 added = await self._add(db, target, asked.items, member.telegram_id)
                 note = self._added_note(target.name, asked.items, added)
@@ -240,7 +241,7 @@ class ListDesk:
             else:
                 note = ""
         await self._send_list(member.telegram_id, target.id, note)
-        return True
+        return note or f"Показала список «{target.name}»."
 
     @staticmethod
     def _added_note(name: str, asked: list[str], added: list[str]) -> str:

@@ -88,24 +88,31 @@ class ReminderDesk:
 
     # ---------- creating ----------
 
-    async def create(self, member: AssistantMember, text: str) -> None:
-        user_id = member.telegram_id
-        now = local_now()
-        metadata: dict[str, object] = {
+    @staticmethod
+    def _metadata(member: AssistantMember) -> dict[str, object]:
+        return {
             "trace_id": str(uuid.uuid4()),
-            "user_id": f"member:{user_id}",
-            "session_id": f"luna:{user_id}",
+            "user_id": f"member:{member.telegram_id}",
+            "session_id": f"luna:{member.telegram_id}",
             "source": "luna_assistant",
             "tags": ["client:luna-assistant", "feature:reminder", f"role:{member.role}"],
         }
-        parts = await self._extract(text, now, metadata)
+
+    async def create(self, member: AssistantMember, text: str) -> str:
+        """Set a reminder from a phrase and show it with a cancel button; return what the person was told."""
+        said, markup = await self._create(member, text)
+        await send_long(self._bot, member.telegram_id, said, markup)
+        return said
+
+    async def _create(self, member: AssistantMember, text: str) -> tuple[str, InlineKeyboardMarkup | None]:
+        user_id = member.telegram_id
+        now = local_now()
+        parts = await self._extract(text, now, self._metadata(member))
         if parts is None:
-            await send_long(self._bot, user_id, NOT_PARSED)
-            return
+            return NOT_PARSED, None
         due = reminders.resolve(parts, now)
         if due is None:
-            await send_long(self._bot, user_id, NOT_UNDERSTOOD)
-            return
+            return NOT_UNDERSTOOD, None
         async with self._sessions() as db:
             active = await db.scalar(
                 select(func.count())
@@ -113,15 +120,63 @@ class ReminderDesk:
                 .where(AssistantReminder.member_id == user_id, AssistantReminder.done_at.is_(None))
             )
             if (active or 0) >= MAX_ACTIVE:
-                await send_long(self._bot, user_id, TOO_MANY)
-                return
+                return TOO_MANY, None
             row = AssistantReminder(member_id=user_id, text=parts.task, due_at=to_utc(due), repeat=parts.repeat)
             db.add(row)
             await db.commit()
             reminder_id = row.id
         what = f": {parts.task}" if parts.task else ""
         cancel = InlineKeyboardMarkup(inline_keyboard=[[_button("✖ Отменить", f"rmd:{reminder_id}")]])
-        await send_long(self._bot, user_id, f"🔔 Напомню {reminders.when_text(due, now, parts.repeat)}{what}", cancel)
+        return f"🔔 Напомню {reminders.when_text(due, now, parts.repeat)}{what}", cancel
+
+    # ---------- from the chat ----------
+
+    async def planner_text(self, user_id: int) -> str:
+        """This person's reminders for the chat model, with the numbers its tools take."""
+        rows = await self._active(user_id)
+        if not rows:
+            return ""
+        now = local_now()
+        lines = [
+            f"- №{row.id}: {reminders.when_text(to_local(row.due_at), now, row.repeat)} — {row.text or 'напоминание'}"
+            for row in rows[:LIST_LIMIT]
+        ]
+        return "Напоминания этого человека:\n" + "\n".join(lines)
+
+    async def move(self, member: AssistantMember, reminder_id: int, when: str) -> str:
+        """Move one of this person's reminders to a new time said in words ("в 8:30", "завтра в 10")."""
+        async with self._sessions() as db:
+            row = await db.get(AssistantReminder, reminder_id)
+            if row is None or row.member_id != member.telegram_id or row.done_at is not None:
+                return f"Напоминания №{reminder_id} нет."
+            now = local_now()
+            parts = await self._extract(f"напомни {when}", now, self._metadata(member))
+            if parts is None or (parts.in_minutes is None and parts.day is None and parts.time is None):
+                return "Не поняла новое время."
+            if parts.in_minutes is None and parts.day is None and parts.time is not None:
+                # "не в 8, а в 8:30" keeps the day the reminder was set for
+                clock = datetime.strptime(parts.time, "%H:%M").time()
+                due: datetime | None = datetime.combine(to_local(row.due_at).date(), clock)
+                if due is not None and due <= now:
+                    due += timedelta(days=1)
+            else:
+                due = reminders.resolve(parts.model_copy(update={"repeat": row.repeat}), now)
+            if due is None:
+                return "Не поняла новое время."
+            row.due_at = to_utc(due)
+            text, repeat = row.text, row.repeat
+            await db.commit()
+        return f"Перенесено №{reminder_id}: напомню {reminders.when_text(due, now, repeat)}: {text or 'напоминание'}."
+
+    async def cancel(self, member: AssistantMember, reminder_id: int) -> str:
+        async with self._sessions() as db:
+            row = await db.get(AssistantReminder, reminder_id)
+            if row is None or row.member_id != member.telegram_id or row.done_at is not None:
+                return f"Напоминания №{reminder_id} нет."
+            text = row.text
+            await db.delete(row)
+            await db.commit()
+        return f"Отменено №{reminder_id}: {text or 'напоминание'}."
 
     # ---------- menu ----------
 

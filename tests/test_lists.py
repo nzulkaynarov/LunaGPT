@@ -98,12 +98,14 @@ async def test_spoken_items_land_in_the_list_and_everyone_sees_them(
     desk = list_desk.ListDesk(telegram, db_sessions)
     _hears(monkeypatch, '{"action": "add", "list": "Покупки", "items": ["молоко 2 л", "хлеб"]}')
 
-    assert await desk.request(people["kid"], "добавь молоко два литра и хлеб в покупки") is True
+    assert await desk.request(people["kid"], "добавь молоко два литра и хлеб в покупки") == (
+        "✅ Добавила в «Покупки»: молоко 2 л, хлеб"
+    )
     text, markup = _sent(telegram)
     assert text.startswith("✅ Добавила в «Покупки»: молоко 2 л, хлеб") and "осталось 2" in text
     assert "молоко 2 л — Заурбек" in text and [b[0] for b in _buttons(markup)][:2] == ["▫️ молоко 2 л", "▫️ хлеб"]
 
-    assert await desk.request(people["mom"], "добавь хлеб в покупки") is True
+    assert await desk.request(people["mom"], "добавь хлеб в покупки") is not None
     assert "уже есть" not in _sent(telegram)[0]  # the model named two items, only the new one is missing
     _hears(monkeypatch, '{"action": "add", "list": "Покупки", "items": ["Хлеб"]}')
     await desk.request(people["mom"], "добавь хлеб в покупки")
