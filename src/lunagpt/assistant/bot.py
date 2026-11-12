@@ -23,6 +23,9 @@ from aiogram.types import (
     KeyboardButton,
     Message,
     PhotoSize,
+    ReactionTypeCustomEmoji,
+    ReactionTypeEmoji,
+    ReactionTypePaid,
     ReplyKeyboardMarkup,
     VideoNote,
     Voice,
@@ -37,6 +40,7 @@ from lunagpt.assistant.gcal import GoogleCalendar
 from lunagpt.assistant.llm import QuizQuestion, ReplyOptions, transcribe_voice
 from lunagpt.assistant.memories import FAMILY_DUPLICATE, FAMILY_FAILED, FAMILY_FULL, FAMILY_SAVED, Memory
 from lunagpt.assistant.people import PEOPLE_PREFIXES, PeopleDesk
+from lunagpt.assistant.phrases import PHRASE_PREFIXES, PhraseDesk
 from lunagpt.assistant.pi_client import PiClient, PiConflictError, PiNotFoundError, PiUnavailableError
 from lunagpt.assistant.reminder_desk import REMINDER_PREFIXES, ReminderDesk
 from lunagpt.assistant.reminders import is_reminder_request
@@ -50,7 +54,7 @@ from lunagpt.assistant.speech import (
     without_voice_words,
 )
 from lunagpt.assistant.telegram import is_reply_to_prompt, send_long, send_model_reply
-from lunagpt.assistant.waiting import cat_is_thinking
+from lunagpt.assistant.waiting import Waiting, cat_is_thinking
 from lunagpt.config import settings
 from lunagpt.models import AssistantMember
 
@@ -70,7 +74,9 @@ BTN_PEOPLE = "👥 Люди"
 BTN_MEMORY = "🧠 Что ты помнишь"
 BTN_HELP = "❓ Помощь"
 BTN_REMINDERS = "🔔 Напоминания"
+BTN_PHRASE = "😺 Фраза для Луны"
 MENU_BUTTONS = {
+    BTN_PHRASE,
     BTN_REMINDERS,
     BTN_MY_TIME,
     BTN_ASK_TIME,
@@ -110,17 +116,23 @@ def describe_restriction(restriction: dict[str, Any] | None) -> str:
     return f"⏸ Интернет дома на паузе до {_clock(restriction['until'])}."
 
 
+BEDTIME_GOODNIGHT = " Утром всё заработает само.\n\n😴 Луна уже спит клубочком, и тебе пора. Спокойной ночи!"
 HISTORY_MESSAGES = 8
 RATE_LIMIT = 10
 RATE_WINDOW_SECONDS = 60
 ACCESS_ENDED = "Срок доступа закончился. Попроси взрослого из семьи его продлить."
-TOO_FAST = "Слишком много сообщений подряд. Подожди минуту 🙂"
+TOO_FAST = "🐾 Помедленнее, я не успеваю за мышкой! Подожди минутку."
 TEXT_ONLY = "Пока я понимаю текст, голосовые, кружки и фото."
 PHOTO_DEFAULT = "Что на фото? Если там задание, помоги с ним."
 PHOTO_FAILED = "Не получилось открыть фото. Пришли его ещё раз."
 PHOTO_TOO_BIG = "Слишком большой файл. Пришли фото обычным способом, не файлом."
 MAX_PHOTO_BYTES = 10 * 1024 * 1024
 PHOTO_TYPES = ("image/jpeg", "image/png", "image/webp")
+MATH_TEXT = re.compile(
+    r"\d\s*[-+*/×÷:=]\s*\d|\b(?:задач\w*|уравнени\w*|пример\w*|реши\w*|посчитай|сколько будет)\b", re.I
+)
+THINKING_REACTION = "👀"
+DONE_REACTION = "🤗"  # Telegram allows only its own reaction set, which has no cat
 # Telegram sends "what cat is this?" and the photo as two messages, in either order: a question a minute
 # before a captionless photo becomes its caption, and the photo stays attached to follow-up questions.
 QUESTION_BEFORE_PHOTO_SECONDS = 60.0
@@ -158,6 +170,7 @@ HELP_TEXT = {
         + f"{BTN_MY_TIME} — сколько осталось интернета\n"
         f"{BTN_ASK_TIME} — написать родителям\n"
         f"{BTN_QUIZ} — ответить и заработать время\n"
+        f"{BTN_PHRASE} — придумать, что я пишу, пока думаю\n"
         f"{BTN_REMINDERS} — напоминания и утренняя сводка\n"
         f"{BTN_MEMORY} — личная и общая память\n\n" + MEMORY_NOTICE.strip() + FAMILY_NOTICE
     ),
@@ -231,7 +244,7 @@ def main_keyboard(role: str) -> ReplyKeyboardMarkup:
     layouts = {
         "owner": adults,
         "adult": adults,
-        "kid": [[BTN_MY_TIME, BTN_ASK_TIME], [BTN_QUIZ, BTN_MEMORY], [BTN_REMINDERS, BTN_HELP]],
+        "kid": [[BTN_MY_TIME, BTN_ASK_TIME], [BTN_QUIZ, BTN_PHRASE], [BTN_REMINDERS, BTN_MEMORY], [BTN_HELP]],
         "guest": [[BTN_REMINDERS, BTN_MEMORY], [BTN_HELP]],
     }
     return ReplyKeyboardMarkup(
@@ -298,6 +311,7 @@ class LunaBot:
         self.calendar = CalendarDesk(bot, session_factory, google_calendar())
         self.school = SchoolDesk(bot, session_factory, mirror=self.calendar)
         self.reminders = ReminderDesk(bot, session_factory, extra_brief=self._brief_extra)
+        self.phrases = PhraseDesk(bot, session_factory)
         self._history_loaded: set[int] = set()
         self._background: set[asyncio.Task[None]] = set()
         self._history: dict[int, deque[dict[str, str]]] = defaultdict(lambda: deque(maxlen=HISTORY_MESSAGES))
@@ -345,7 +359,7 @@ class LunaBot:
             return
         picture = photo_of(message)
         if picture is not None:
-            await self._photo(member, (message.caption or "").strip(), picture)
+            await self._photo(member, (message.caption or "").strip(), picture, message.message_id)
             return
         spoken_note = message.voice or message.video_note
         if not text and spoken_note is not None:
@@ -357,6 +371,9 @@ class LunaBot:
             return
         if member.role in access.FAMILY_ROLES and is_reply_to_prompt(message, FAMILY_PROMPT):
             await self._chat(member, text, family_note=text)
+            return
+        if member.role in access.FAMILY_ROLES and self.phrases.is_reply(message):
+            await self.phrases.suggest(member, text)
             return
         if self.reminders.is_city_reply(message):
             await self.reminders.set_city(member, text)
@@ -391,7 +408,7 @@ class LunaBot:
         if asks_for_voice(text):
             await self._chat(member, without_voice_words(text), speak=True)
             return
-        await self._chat(member, text, speak=spoken_note is not None)
+        await self._chat(member, text, speak=spoken_note is not None, message_id=message.message_id)
 
     async def _menu_action(self, member: AssistantMember, text: str) -> bool:
         """Run the pressed menu button if this role is allowed to use it."""
@@ -414,6 +431,8 @@ class LunaBot:
             await self._ask_time(member, "")
         elif member.role == "kid" and text == BTN_QUIZ:
             await self._start_quiz(member)
+        elif member.role == "kid" and text == BTN_PHRASE:
+            await self.phrases.ask(member)
         else:
             return False
         return True
@@ -461,6 +480,8 @@ class LunaBot:
             await self.school.handle(callback, member, prefix, args)
         elif prefix in CALENDAR_PREFIXES:
             await self.calendar.handle(callback, member, prefix, args)
+        elif prefix in PHRASE_PREFIXES:
+            await self.phrases.handle(callback, member, prefix, args)
 
     @staticmethod
     def _callback_allowed(role: str, prefix: str) -> bool:
@@ -473,7 +494,7 @@ class LunaBot:
             return role in access.ROLES
         if prefix in ("fam", "fama", "famd", "famy"):
             return role in access.FAMILY_ROLES
-        if prefix in PEOPLE_PREFIXES or prefix in ("sh", "shs", "shl"):
+        if prefix in PEOPLE_PREFIXES or prefix in PHRASE_PREFIXES or prefix in ("sh", "shs", "shl"):
             return role in access.ADULT_ROLES
         return False
 
@@ -571,7 +592,7 @@ class LunaBot:
             return
         if restriction and restriction["kind"] == "bedtime":
             # Parents do not open bedtime at night, so nobody is woken up for it.
-            await self._send(user_id, describe_restriction(restriction) + " Утром всё заработает само. Спокойной ночи!")
+            await self._send(user_id, describe_restriction(restriction) + BEDTIME_GOODNIGHT)
             return
         try:
             request_id = await self._pi.request_time(member.name, reason)
@@ -628,7 +649,9 @@ class LunaBot:
         self._request_times[user_id].append(time.monotonic())
         return True
 
-    async def _photo(self, member: AssistantMember, caption: str, picture: PhotoSize | Document) -> None:
+    async def _photo(
+        self, member: AssistantMember, caption: str, picture: PhotoSize | Document, message_id: int | None = None
+    ) -> None:
         user_id = member.telegram_id
         if (picture.file_size or 0) > MAX_PHOTO_BYTES:
             await self._send(user_id, PHOTO_TOO_BIG)
@@ -645,7 +668,7 @@ class LunaBot:
         kind = photo_kind(caption)
         if kind is None:
             question = caption or self._recent_question(user_id) or PHOTO_DEFAULT
-            await self._chat(member, question, image=data.read(), image_type=image_type)
+            await self._chat(member, question, image=data.read(), image_type=image_type, message_id=message_id)
             return
         if not await self._may_ask(member):
             return
@@ -720,6 +743,7 @@ class LunaBot:
         speak: bool = False,
         image: bytes | None = None,
         image_type: str = "image/jpeg",
+        message_id: int | None = None,
     ) -> None:
         user_id = member.telegram_id
         if not self._allow_request(user_id):
@@ -753,10 +777,12 @@ class LunaBot:
         else:
             self._last_question.pop(user_id, None)
             self._last_photo[user_id] = (image, image_type, time.monotonic())
+        waiting = await self._waiting(member, text, speak, image is not None)
+        await self._react(user_id, message_id, THINKING_REACTION)
         async with self._locks[user_id]:
             async with (
                 ChatActionSender.typing(chat_id=user_id, bot=self._bot),  # repeats while the model works
-                cat_is_thinking(self._bot, user_id),
+                cat_is_thinking(self._bot, user_id, waiting),
             ):
                 history = without_voice_refusals(await self._conversation(member))
                 facts = await self._memory.recall(user_id, member.role, text) if self._memory else []
@@ -770,6 +796,7 @@ class LunaBot:
                     image_type=image_type,
                     earlier_photo=earlier_photo,
                     planner=await self._planner(user_id),
+                    on_search=waiting.searching,
                 )
                 reply = await self._answer(member.role, user_id, history, text, facts, options)
             # Later turns keep only a mark of the photo: its bytes are never stored or sent again.
@@ -782,12 +809,37 @@ class LunaBot:
             async with self._sessions() as db:
                 await access.record_spend(db, user_id, sum(costs), today)
         await send_model_reply(self._bot, user_id, reply)
+        await self._react(user_id, message_id, DONE_REACTION if member.role == "kid" else None)
         if speak:
             await self._send_voice_reply(user_id, reply)
         if self._memory and text != PHOTO_DEFAULT:
             task = asyncio.create_task(self._memory.remember(user_id, member.role, text))
             self._background.add(task)  # the event loop keeps only weak references to tasks
             task.add_done_callback(self._background.discard)
+
+    async def _waiting(self, member: AssistantMember, text: str, speak: bool, photo: bool) -> Waiting:
+        """The cat's phrases for this answer; the family's own ones are never shown to guests."""
+        kind = "math" if MATH_TEXT.search(text) else "photo" if photo else "voice" if speak else "chat"
+        family: list[str] = []
+        if member.role in access.FAMILY_ROLES:
+            try:
+                family = await self.phrases.family_phrases()
+            except Exception:
+                logger.warning("could not load family phrases", exc_info=True)
+        now = datetime.now(UTC) + timedelta(hours=settings.luna_utc_offset_hours)
+        return Waiting(kind, now.replace(tzinfo=None), family)
+
+    async def _react(self, chat_id: int, message_id: int | None, emoji: str | None) -> None:
+        """A reaction on the person's message; None takes it away. Purely decorative, so failures are ignored."""
+        if message_id is None:
+            return
+        reaction: list[ReactionTypeEmoji | ReactionTypeCustomEmoji | ReactionTypePaid] = (
+            [ReactionTypeEmoji(emoji=emoji)] if emoji else []
+        )
+        try:
+            await self._bot.set_message_reaction(chat_id, message_id, reaction)
+        except (TelegramAPIError, ClientError, TimeoutError) as exc:
+            logger.info("could not set a reaction: %s", type(exc).__name__)
 
     async def _planner(self, user_id: int) -> str:
         """Timetable, tasks and calendar for the model; a failure only loses this context, not the answer."""

@@ -15,6 +15,7 @@ from lunagpt.config import settings
 from lunagpt.db import Base
 from lunagpt.models import (
     AssistantApplication,
+    AssistantCatPhrase,
     AssistantFamilyMemory,
     AssistantMember,
     AssistantMemory,
@@ -35,6 +36,7 @@ TABLES = [
         AssistantTask,
         AssistantReminder,
         AssistantSchedule,
+        AssistantCatPhrase,
     )
 ]
 

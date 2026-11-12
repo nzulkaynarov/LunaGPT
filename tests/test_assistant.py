@@ -20,7 +20,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import Document, Message, Update
 
-from lunagpt.assistant import access, audio, bot, llm, speech
+from lunagpt.assistant import access, audio, bot, llm, phrases, speech
 from lunagpt.assistant.monitor import AvailabilityTracker
 from lunagpt.assistant.pi_client import PiClient, PiConflictError, PiNotFoundError, PiUnavailableError
 from lunagpt.assistant.telegram import split_message
@@ -64,7 +64,7 @@ def _hearing(instance: bot.LunaBot, words: str | None) -> AsyncMock:
 
 @pytest.fixture
 def harness(monkeypatch: pytest.MonkeyPatch) -> tuple[bot.LunaBot, AsyncMock, AsyncMock]:
-    telegram = MagicMock(send_message=AsyncMock(), send_chat_action=AsyncMock())
+    telegram = MagicMock(send_message=AsyncMock(), send_chat_action=AsyncMock(), set_message_reaction=AsyncMock())
 
     async def shown_like_text(chat_id: int, rich: Any, reply_markup: Any = None) -> None:
         await telegram.send_message(chat_id, rich.markdown, reply_markup=reply_markup)
@@ -1505,3 +1505,61 @@ async def test_calendar_phrase_goes_to_the_calendar_and_chat_sees_it(
     instance.calendar.planner_text = AsyncMock(return_value="Календарь на неделю:\n- завтра 15:00–16:00: Стоматолог")
     await instance.on_message(_message("что у меня завтра?", 5))
     assert "Стоматолог" in answer.call_args.args[5].planner
+
+
+@pytest.mark.asyncio
+async def test_a_search_is_reported_to_the_waiting_cat(monkeypatch: pytest.MonkeyPatch) -> None:
+    replies = iter(
+        [
+            {
+                "tool_calls": [
+                    {"id": "1", "function": {"name": "web_search", "arguments": '{"query": "Hot Wheels цены"}'}}
+                ]
+            },
+            {"content": "от 40 000 сумов"},
+        ]
+    )
+    monkeypatch.setattr(llm, "_chat", AsyncMock(side_effect=lambda *a, **k: next(replies)))
+    monkeypatch.setattr(llm, "web_search", AsyncMock(return_value="[]"))
+    searched: list[str] = []
+    options = llm.ReplyOptions(on_search=searched.append)
+    assert await llm.generate_reply("kid", 1, [], "сколько стоят хот вилс", options=options) == "от 40 000 сумов"
+    assert searched == ["Hot Wheels цены"]
+
+
+@pytest.mark.asyncio
+async def test_kid_sees_eyes_while_luna_thinks_and_a_hug_after(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, _, _ = harness
+    _as_member(monkeypatch, _member("kid", 5))
+    message = _message("сколько будет 12 * 7", 5)
+    message.message_id = 42
+    await instance.on_message(message)
+    reactions = [c.args[2] for c in instance._bot.set_message_reaction.await_args_list]
+    assert [r[0].emoji for r in reactions] == [bot.THINKING_REACTION, bot.DONE_REACTION]
+
+    _as_member(monkeypatch, _member("adult", 6))
+    message = _message("привет", 6)
+    message.message_id = 43
+    await instance.on_message(message)
+    assert instance._bot.set_message_reaction.await_args.args[2] == []  # adults: the eyes just go away
+
+
+@pytest.mark.asyncio
+async def test_phrase_button_is_for_kids_and_a_reply_becomes_a_suggestion(
+    harness: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance, send, answer = harness
+    instance.phrases.ask = AsyncMock()
+    instance.phrases.suggest = AsyncMock()
+    _as_member(monkeypatch, _member("kid", 5))
+    assert any(bot.BTN_PHRASE in [b.text for b in row] for row in bot.main_keyboard("kid").keyboard)
+    await instance.on_message(_message(bot.BTN_PHRASE, 5))
+    instance.phrases.ask.assert_awaited_once()
+
+    reply = _message("🐾 Ловлю ответ за хвост…", 5)
+    reply.reply_to_message.from_user.is_bot = True
+    reply.reply_to_message.text = phrases.PROMPT
+    await instance.on_message(reply)
+    instance.phrases.suggest.assert_awaited_once()
+    answer.assert_not_awaited()
+    assert not bot.LunaBot._callback_allowed("kid", "cpy") and bot.LunaBot._callback_allowed("adult", "cpy")

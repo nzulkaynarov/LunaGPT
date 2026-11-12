@@ -265,3 +265,17 @@ class AssistantTask(Base):
     done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     google_event_id: Mapped[str | None] = mapped_column(String(1024), nullable=True)  # its copy in Google Calendar
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class AssistantCatPhrase(Base):
+    """A waiting phrase a child made up: shown to the family only after a parent approves it."""
+
+    __tablename__ = "assistant_cat_phrases"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
+    author_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("assistant_members.telegram_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    text: Mapped[str] = mapped_column(String(120), nullable=False)
+    status: Mapped[str] = mapped_column(String(10), nullable=False, server_default="pending")  # pending|approved
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

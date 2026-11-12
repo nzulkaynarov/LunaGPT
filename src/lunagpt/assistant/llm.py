@@ -28,6 +28,7 @@ MODELS_BY_ROLE = {
     "guest": ["luna-local", "luna-fast", "luna-smart"],
 }
 LOCAL_ONLY_MODELS = ["luna-local"]
+MODELS_DOWN = "😿 Кот уронил интернет со стола: модели сейчас недоступны. Попробуй через минутку."
 # The local model invented a fact in the quiz benchmark, and a quiz both teaches and awards minutes.
 QUIZ_MODELS = ["luna-fast", "luna-smart"]
 # Photos go to the cloud first: in the photo benchmark the local model added a deadline that was not on the
@@ -192,6 +193,7 @@ class ReplyOptions:
     image_type: str = "image/jpeg"
     earlier_photo: bool = False  # the image is the one sent a few minutes ago, attached again for a follow-up
     planner: str = ""
+    on_search: Callable[[str], None] | None = None  # shows the search in the waiting phrases
 
 
 def age_band(age: int | None) -> str:
@@ -281,6 +283,8 @@ async def _run_model(
             if call["function"]["name"] != "web_search" or query in seen_queries:
                 raise ValueError("model produced an invalid or repeated tool call")
             seen_queries.add(query)
+            if options.on_search is not None:
+                options.on_search(query)
             content = await web_search(client, query, strict_search)
             conversation.append({"role": "tool", "tool_call_id": call["id"], "content": content})
     raise ValueError("model did not finish within the tool round limit")
@@ -468,4 +472,4 @@ async def generate_reply(
                 continue
             if reply:
                 return reply
-    return "Сейчас не могу ответить: модели недоступны. Попробуй чуть позже."
+    return MODELS_DOWN
