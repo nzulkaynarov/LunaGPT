@@ -659,8 +659,8 @@ def test_every_role_is_answered_in_the_language_it_writes(role: str) -> None:
     assert "по-русски, коротко" not in llm.system_prompt(role, 11)
 
 
-def test_kids_use_the_same_models_as_adults_with_strict_search() -> None:
-    assert llm.MODELS_BY_ROLE["kid"] == llm.MODELS_BY_ROLE["adult"]
+def test_kids_get_the_cloud_model_first_with_strict_search() -> None:
+    assert llm.MODELS_BY_ROLE["kid"][0] == "luna-fast" and "luna-local" in llm.MODELS_BY_ROLE["kid"]
     assert "kid" in llm.SEARCH_ROLES
 
 

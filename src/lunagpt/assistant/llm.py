@@ -22,7 +22,9 @@ logger = logging.getLogger("lunagpt.assistant.llm")
 MODELS_BY_ROLE = {
     "owner": ["luna-local", "luna-fast", "luna-smart"],
     "adult": ["luna-local", "luna-fast", "luna-smart"],
-    "kid": ["luna-local", "luna-fast", "luna-smart"],
+    # Children mostly dictate, and the local model misreads them: "Хот вилс машинки" was understood as
+    # Hot Wheels in 3 of 10 runs locally and 3 of 3 on luna-fast. The local model stays as the fallback.
+    "kid": ["luna-fast", "luna-smart", "luna-local"],
     "guest": ["luna-local", "luna-fast", "luna-smart"],
 }
 LOCAL_ONLY_MODELS = ["luna-local"]
