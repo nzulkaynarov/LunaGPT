@@ -186,3 +186,19 @@ async def test_a_ticked_line_nobody_cleared_goes_away_by_itself(db_sessions: asy
         )
         await db.commit()
         assert [item.text for item, _ in await desk._items(db, shopping.id)] == ["хлеб"]
+
+
+@pytest.mark.asyncio
+async def test_the_chat_tool_adds_to_a_list_and_reports_what_was_there(
+    db_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    people = await _family(db_sessions)
+    desk = list_desk.ListDesk(_telegram(), db_sessions)
+    assert await desk.add_from_chat(people["mom"], "дела", ["Повесить карниз ", "прикрутить полки"]) == (
+        "Добавлено в «Дела»: Повесить карниз, прикрутить полки."
+    )
+    assert await desk.add_from_chat(people["kid"], "Дела", ["повесить карниз", "разобрать сумки"]) == (
+        "Добавлено в «Дела»: разобрать сумки. Уже были в списке: повесить карниз."
+    )
+    assert await desk.add_from_chat(people["mom"], "Дела", ["  "]) == "Нечего добавлять."
+    assert "Дела: Повесить карниз, прикрутить полки, разобрать сумки" in await desk.planner_text()

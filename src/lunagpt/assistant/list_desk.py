@@ -265,6 +265,21 @@ class ListDesk:
             return f"Не нашла в списке «{target.name}»: {', '.join(wanted)}"
         return f"✅ Вычеркнула: {', '.join(ticked)}"
 
+    async def add_from_chat(self, member: AssistantMember, name: str, items: list[str]) -> str:
+        """What the chat model adds with its tool; the answer tells the model what happened, as data."""
+        wanted = lists.clean_items(items)
+        name = lists.list_name(name) or lists.CHORES
+        if not wanted:
+            return "Нечего добавлять."
+        async with self._sessions() as db:
+            target = await self._named(db, name, create=True)
+            if target is None:
+                return f"Не добавлено: списков уже {MAX_LISTS}, новый список не создать."
+            added = await self._add(db, target, wanted, member.telegram_id)
+        already = [item for item in wanted if item not in added]
+        result = f"Добавлено в «{target.name}»: {', '.join(added)}." if added else f"Ничего нового в «{target.name}»."
+        return result + (f" Уже были в списке: {', '.join(already)}." if already else "")
+
     async def add_from_reply(self, member: AssistantMember, message: Message, text: str) -> None:
         """The answer to "what to add?": the list is the one named in the prompt."""
         prompt = (message.reply_to_message.text if message.reply_to_message else "") or ""

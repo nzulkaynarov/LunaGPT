@@ -852,6 +852,7 @@ class LunaBot:
                     planner=await self._planner(current),
                     on_search=waiting.searching,
                     about=await self._about(current, text),
+                    **await self._list_options(current),
                 )
                 reply = await self._answer(member.role, user_id, history, text, facts, options)
             # Later turns keep only a mark of the photo: its bytes are never stored or sent again.
@@ -871,6 +872,22 @@ class LunaBot:
             task = asyncio.create_task(self._memory.remember(user_id, member.role, text))
             self._background.add(task)  # the event loop keeps only weak references to tasks
             task.add_done_callback(self._background.discard)
+
+    async def _list_options(self, member: AssistantMember) -> dict[str, Any]:
+        """The list tool for the family; guests have no lists, and a failure only leaves the tool out."""
+        if member.role not in access.FAMILY_ROLES:
+            return {}
+        try:
+            names = tuple(await self.lists.names())
+        except Exception:
+            logger.warning("could not load the family lists", exc_info=True)
+            return {}
+
+        async def add(name: str, items: list[str]) -> str:
+            result: str = await self.lists.add_from_chat(member, name, items)
+            return result
+
+        return {"list_names": names, "on_list": add}
 
     async def _about(self, member: AssistantMember, text: str) -> str:
         """Luna's facts about herself, only for a question about her; a failure just leaves them out."""

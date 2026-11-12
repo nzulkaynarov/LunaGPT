@@ -1647,3 +1647,82 @@ async def test_guests_have_no_family_lists(harness: Any, monkeypatch: pytest.Mon
     assert answer.await_count == 2  # both went to the chat as ordinary messages
     assert not bot.LunaBot._callback_allowed("guest", "flo") and bot.LunaBot._callback_allowed("kid", "flt")
     assert bot.BTN_LISTS not in str(bot.main_keyboard("guest")) and bot.BTN_LISTS in str(bot.main_keyboard("kid"))
+
+
+def _list_call(items: list[str], list_name: str = "Дела") -> dict[str, Any]:
+    arguments = json.dumps({"list": list_name, "items": items}, ensure_ascii=False)
+    return {
+        "role": "assistant",
+        "tool_calls": [{"id": "c1", "function": {"name": "add_to_family_list", "arguments": arguments}}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_the_chat_model_adds_a_bare_todo_list_to_the_family_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    replies = [
+        _list_call(["повесить карниз", "прикрутить полки"]),
+        {"role": "assistant", "content": "Добавила в «Дела»."},
+    ]
+    payloads: list[dict[str, Any]] = []
+
+    async def fake_chat(_client: Any, payload: dict[str, Any], *_args: Any) -> dict[str, Any]:
+        payloads.append(json.loads(json.dumps(payload)))
+        return replies.pop(0)
+
+    added: list[tuple[str, list[str]]] = []
+
+    async def on_list(name: str, items: list[str]) -> str:
+        added.append((name, items))
+        return "Добавлено в «Дела»: повесить карниз, прикрутить полки."
+
+    monkeypatch.setattr(llm, "_chat", fake_chat)
+    options = llm.ReplyOptions(list_names=("Покупки", "Дела"), on_list=on_list)
+    assert (
+        await llm.generate_reply("adult", 1, [], "повесить карниз, прикрутить полки", options=options)
+        == "Добавила в «Дела»."
+    )
+    assert added == [("Дела", ["повесить карниз", "прикрутить полки"])]
+    assert payloads[0]["model"] == "luna-smart" and [t["function"]["name"] for t in payloads[0]["tools"]] == [
+        "web_search",
+        "add_to_family_list",
+    ]
+    assert "add_to_family_list" in payloads[0]["messages"][0]["content"]
+    assert payloads[1]["messages"][-1] == {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "content": "Добавлено в «Дела»: повесить карниз, прикрутить полки.",
+    }
+
+
+def test_the_local_model_only_suggests_the_phrase_and_guests_hear_nothing_of_lists() -> None:
+    async def on_list(_name: str, _items: list[str]) -> str:
+        return ""
+
+    options = llm.ReplyOptions(list_names=("Покупки",), on_list=on_list)
+    messages = [{"role": "system", "content": "база"}, {"role": "user", "content": "молоко, хлеб"}]
+    local = llm.with_lists(messages, "luna-local", options)[0]["content"]
+    assert "добавь … в покупки" in local and "add_to_family_list" not in local and "«Покупки»" in local
+    assert "add_to_family_list" in llm.with_lists(messages, "luna-fast", options)[0]["content"]
+    assert llm.with_lists(messages, "luna-smart", llm.ReplyOptions()) == messages
+    assert messages[0]["content"] == "база"
+
+
+@pytest.mark.asyncio
+async def test_a_list_call_without_items_or_without_the_tool_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_chat(_client: Any, payload: dict[str, Any], *_args: Any) -> dict[str, Any]:
+        return _list_call([])
+
+    async def on_list(_name: str, _items: list[str]) -> str:
+        raise AssertionError("must not be called")
+
+    monkeypatch.setattr(llm, "_chat", fake_chat)
+    with pytest.raises(ValueError):
+        await llm._run_model(MagicMock(), "luna-smart", [], {}, True, options=llm.ReplyOptions(on_list=on_list))
+    with pytest.raises(ValueError):  # a guest has no list tool, so the call is not run
+        await llm._run_model(MagicMock(), "luna-local", [], {}, True)
+
+
+@pytest.mark.parametrize("role", ["owner", "adult", "kid", "guest"])
+def test_every_role_knows_how_to_set_a_reminder(role: str) -> None:
+    prompt = llm.system_prompt(role, 11)
+    assert "«напомни" in prompt and "не умеешь напоминать" in prompt and "в конце ответа, а не в начале" in prompt
