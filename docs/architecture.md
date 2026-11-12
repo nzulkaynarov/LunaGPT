@@ -31,9 +31,9 @@
 │  • Langfuse v2 Compatibility Logger (/api/public/ingestion)            │
 │                                                                        │
 │  Виртуальные модели:                                                   │
-│   ├── luna-smart → Anthropic Claude Sonnet 4.6 (Флагманский интеллект) │
+│   ├── luna-smart → Anthropic Claude Sonnet 5.5 (Флагманский интеллект) │
 │   ├── luna-fast  → Google Gemini 3.5 Flash Lite (Сверхбыстро, 1M+ ctx) │
-│   ├── luna-pro   → Anthropic Claude Opus 4.6 (Архитектура и аудит)     │
+│   ├── luna-pro   → Anthropic Claude Opus 5.5 (Архитектура и аудит)     │
 │   ├── luna-coder → Ollama (qwen2.5-coder:7b на AMD RX 580 GPU, $0)     │
 │   ├── luna-embed → Ollama bge-m3 (Мультиязычные эмбеддинги 1024-dim, $0)│
 │   └── luna-auto  → Авто-роутер с каскадной эскалацией                   │
@@ -63,9 +63,9 @@
 
 | Модель | Назначение | Провайдер | Стоимость |
 | :--- | :--- | :--- | :--- |
-| **`luna-smart`** | Универсальный интеллект: аналитика, код, логика (по умолчанию) | Anthropic Claude Sonnet 4.6 | Тариф Anthropic |
+| **`luna-smart`** | Универсальный интеллект: аналитика, код, логика (по умолчанию) | Anthropic Claude Sonnet 5.5 | Тариф Anthropic |
 | **`luna-fast`** | Большие документы, перевод RU/UZ/EN, суммаризация, фоновые задачи | Google Gemini 3.5 Flash Lite | Доли цента ($) |
-| **`luna-pro`** | Долгие рассуждения, системный дизайн, авто-эскалация при критике | Anthropic Claude Opus 4.6 | Тариф Anthropic |
+| **`luna-pro`** | Долгие рассуждения, системный дизайн, авто-эскалация при критике | Anthropic Claude Opus 5.5 | Тариф Anthropic |
 | **`luna-coder`** | Локальные фоновые воркеры, автокомплит и тесты | Локальная **AMD RX 580 (8 ГБ)** | **$0.00** |
 | **`luna-embed`** | Индексация документов и RAG базы знаний (1024 dim) | Локальная Ollama (`bge-m3`) | **$0.00** |
 | **`luna-auto`** | Авто-выбор с каскадной эскалацией | Smart $\to$ Fast $\to$ Pro | Оптимизированная |

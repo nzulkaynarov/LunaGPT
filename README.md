@@ -28,8 +28,8 @@ LunaGPT — суверенная персональная ИИ-лаборато�
 │  Виртуальные модели:                                                   │
 │   ├── luna-coder → Ollama (qwen2.5-coder:7b на AMD RX 580 GPU, $0)     │
 │   ├── luna-fast  → Google Gemini 3.5 Flash Lite (Сверхбыстро, 1M+ ctx) │
-│   ├── luna-smart → Anthropic Claude Sonnet 4.6 (Архитектура и логика)  │
-│   ├── luna-pro   → Anthropic Claude Opus 4.6 (Глубокий анализ и аудит) │
+│   ├── luna-smart → Anthropic Claude Sonnet 5.5 (Архитектура и логика)  │
+│   ├── luna-pro   → Anthropic Claude Opus 5.5 (Глубокий анализ и аудит) │
 │   ├── luna-embed → Ollama bge-m3 (Мультиязычный RAG на GPU, 1024-dim)  │
 │   └── luna-auto  → Каскадный роутер с авто-эскалацией при ошибках      │
 └─────────────────┬───────────────────┬───────────────────┬──────────────┘
@@ -60,8 +60,8 @@ LunaGPT — суверенная персональная ИИ-лаборато�
 | :--- | :--- | :--- | :--- |
 | **`luna-coder`** | Tab-автокомплит, тесты, генерация функций и скриптов | Локальная **AMD RX 580 (8 ГБ)** | **$0.00** (34.2 tok/s) |
 | **`luna-fast`** | Большие документы, перевод RU/UZ/EN, суммаризация | Google Gemini 3.5 Flash Lite | Доли цента |
-| **`luna-smart`** | Архитектура монорепо, безопасность, дизайн-документы, баги | Anthropic Claude Sonnet 4.6 | По тарифу Anthropic |
-| **`luna-pro`** | Долгие рассуждения, комплексный аудит всей кодовой базы | Anthropic Claude Opus 4.6 | По тарифу Anthropic |
+| **`luna-smart`** | Архитектура монорепо, безопасность, дизайн-документы, баги | Anthropic Claude Sonnet 5.5 | По тарифу Anthropic |
+| **`luna-pro`** | Долгие рассуждения, комплексный аудит всей кодовой базы | Anthropic Claude Opus 5.5 | По тарифу Anthropic |
 | **`luna-embed`** | Индексация документов и RAG базы знаний | Локальная Ollama (`bge-m3`) | **$0.00** |
 | **`luna-auto`** | Авто-выбор с эскалацией при повторных ошибках | Ollama $\to$ Claude Sonnet $\to$ Gemini | Оптимизированная |
 
@@ -69,7 +69,7 @@ LunaGPT — суверенная персональная ИИ-лаборато�
 
 ## 🔄 4-Уровневый контур самообучения (Active Learning)
 
-1. **Level 1 (Realtime Reflection & Self-Correction):** Детектор критики пользователя в промптах (*«не работает», «ошибка», «TypeError»*) автоматически эскалирует задачу на `luna-smart` (Claude Sonnet 4.6) с включением протокола пошаговой рефлексии причин сбоя.
+1. **Level 1 (Realtime Reflection & Self-Correction):** Детектор критики пользователя в промптах (*«не работает», «ошибка», «TypeError»*) автоматически эскалирует задачу на `luna-smart` (Claude Sonnet 5.5) с включением протокола пошаговой рефлексии причин сбоя.
 2. **Level 2 (Langfuse Observability & Scoring):** Фиксация оценок 👍 (1.0) / 👎 (0.0) и комментариев пользователя к каждому `trace_id`.
 3. **Level 3 (pgvector Mistake Memory):** Сохранение пар «запрос — отвергнутый ответ — правильный ответ» в таблицу `feedback_memories` с HNSW косинусным поиском через локальную `bge-m3`. При повторении схожей задачи модель получает блок «Past Lessons» и не наступает на те же грабли.
 4. **Level 4 (Fine-Tuning Dataset Export):** Выгрузка накопленных троек (Prompt, Rejected, Chosen) в формате DPO для периодического локального дообучения модели `qwen2.5-coder:7b`.
@@ -122,7 +122,7 @@ models:
     apiKey: YOUR_LITELLM_MASTER_KEY
     roles: [chat, autocomplete, edit]
 
-  - name: Luna Smart (Claude Sonnet 4.6)
+  - name: Luna Smart (Claude Sonnet 5.5)
     provider: openai
     model: luna-smart
     apiBase: http://localhost:4000/v1

@@ -146,14 +146,14 @@ def detect_criticism_and_model(prompt: Any, has_history: bool = True) -> tuple[s
     if is_criticism:
         return (
             "luna-pro",
-            "Детекция критики/ошибки: авто-эскалация на Claude Opus 4.6 (luna-pro) с глубокой рефлексией",
+            "Детекция критики/ошибки: авто-эскалация на Claude Opus 5.5 (luna-pro) с глубокой рефлексией",
             True,
         )
 
     if any(k in prompt_lower for k in PRO_KEYWORDS):
         return (
             "luna-pro",
-            "Сложная архитектурная задача / глубокий системный аудит (Claude Opus 4.6)",
+            "Сложная архитектурная задача / глубокий системный аудит (Claude Opus 5.5)",
             False,
         )
 
@@ -166,7 +166,7 @@ def detect_criticism_and_model(prompt: Any, has_history: bool = True) -> tuple[s
 
     return (
         "luna-smart",
-        "Универсальный интеллект: аналитика, код, логика (Claude Sonnet 4.6)",
+        "Универсальный интеллект: аналитика, код, логика (Claude Sonnet 5.5)",
         False,
     )
 
@@ -322,7 +322,7 @@ async def execute_openai_chat_completion(
     """
     OpenAI-compatible chat completion handler with:
     1. Robust extraction for text, lists, dicts, tool calls, and user metadata.
-    2. Criticism detection and automatic escalation to luna-pro (Claude Opus 4.6).
+    2. Criticism detection and automatic escalation to luna-pro (Claude Opus 5.5).
     3. Dynamic injection of past lessons (feedback_memories) and RAG from pgvector.
     4. Safe single-pass vector embedding for both feedback and documents.
     5. User and session attribution extracted from Open WebUI forwarded headers.
@@ -358,7 +358,7 @@ async def execute_openai_chat_completion(
         decision_source = "alias_fallback"
     elif requested_model == "luna-smart" and is_criticism:
         target_model = "luna-pro"
-        applied_reason = "Авто-эскалация на Claude Opus 4.6 (luna-pro) из-за обнаруженной ошибки/критики"
+        applied_reason = "Авто-эскалация на Claude Opus 5.5 (luna-pro) из-за обнаруженной ошибки/критики"
         decision_source = "criticism_escalation"
     elif requested_model in ("luna-fast", "luna-smart", "luna-pro", "luna-coder"):
         target_model = requested_model

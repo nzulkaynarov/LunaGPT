@@ -55,27 +55,30 @@ model_list:
       output_cost_per_token: 0.000002500
 
   # ----------------------------------------------------------------------------
-  # 3. Интеллектуальные архитектурные модели (Anthropic Claude 4.6 Sonnet & Opus)
+  # 3. Интеллектуальные архитектурные модели (Anthropic Claude Sonnet 5.5 и Opus 5.5)
   # ----------------------------------------------------------------------------
   - model_name: luna-smart
     litellm_params:
-      model: anthropic/claude-sonnet-4-6
+      model: anthropic/claude-sonnet-5-5
       api_key: os.environ/ANTHROPIC_API_KEY
+      # Sonnet 5.5 thinks before almost every reply from "medium" up; "low" keeps a chat answer quick
+      # (3.3 s against 5.2 s on the same question) and a request can still ask for more.
+      reasoning_effort: low
     model_info:
-      description: "Флагманский Claude Sonnet 4.6 для сложной архитектуры, рефакторинга и логики"
+      description: "Claude Sonnet 5.5: разговор со взрослыми, аналитика, код и логика"
       mode: chat
-      input_cost_per_token: 0.000003000
-      output_cost_per_token: 0.000015000
+      input_cost_per_token: 0.000002000
+      output_cost_per_token: 0.000010000
 
   - model_name: luna-pro
     litellm_params:
-      model: anthropic/claude-opus-4-6
+      model: anthropic/claude-opus-5-5
       api_key: os.environ/ANTHROPIC_API_KEY
     model_info:
-      description: "Максимальный интеллект Claude Opus 4.6 для комплексного аудита"
+      description: "Claude Opus 5.5: самые сложные задачи и комплексный аудит"
       mode: chat
-      input_cost_per_token: 0.000005000
-      output_cost_per_token: 0.000025000
+      input_cost_per_token: 0.000004000
+      output_cost_per_token: 0.000020000
 
   # ----------------------------------------------------------------------------
   # 4. Логический роутер с отказоустойчивостью (Failover / Routing Group)
