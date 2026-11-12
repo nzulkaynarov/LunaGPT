@@ -54,6 +54,23 @@ model_list:
       input_cost_per_token: 0.000000300
       output_cost_per_token: 0.000002500
 
+  # Голос Luna (Gemini TTS): владелец выбрал его вместо локального Piper 13.11.2026.
+  - model_name: luna-voice
+    litellm_params:
+      model: gemini/gemini-3.8-flash-tts
+      api_key: os.environ/GEMINI_API_KEY
+    model_info:
+      description: "Голос Luna: озвучка ответов"
+      mode: audio_speech
+
+  - model_name: luna-voice-lite
+    litellm_params:
+      model: gemini/gemini-3.8-flash-lite-tts
+      api_key: os.environ/GEMINI_API_KEY
+    model_info:
+      description: "Запасной голос Luna, если основной недоступен"
+      mode: audio_speech
+
   # ----------------------------------------------------------------------------
   # 3. Интеллектуальные архитектурные модели (Anthropic Claude Sonnet 5.5 и Opus 5.5)
   # ----------------------------------------------------------------------------

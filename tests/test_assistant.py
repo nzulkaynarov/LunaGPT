@@ -325,9 +325,42 @@ def test_synthesised_speech_becomes_a_telegram_voice_note() -> None:
     assert not audio.is_silent(decoded)
 
 
+def _wav(pcm: bytes, rate: int = 24_000) -> bytes:
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(rate)
+        output.writeframes(pcm)
+    return buffer.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_gemini_speaks_and_the_lighter_voice_stands_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    pcm = array("h", (int(8000 * math.sin(i * 0.1)) for i in range(48_000))).tobytes()
+    asked: list[dict[str, Any]] = []
+
+    async def post(_self: Any, url: str, json: dict[str, Any], **_kwargs: Any) -> httpx.Response:
+        asked.append({"url": url, **json})
+        request = httpx.Request("POST", url)
+        if json["model"] == "luna-voice":
+            return httpx.Response(503, request=request)
+        return httpx.Response(200, content=_wav(pcm), request=request)
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    spoken = await speech.speak_reply("Привет! Завтра прохладно.")
+    assert spoken is not None and spoken.seconds == 2 and spoken.ogg[:4] == b"OggS"
+    assert [a["model"] for a in asked] == ["luna-voice", "luna-voice-lite"]
+    assert asked[0]["url"].endswith("/audio/speech") and asked[0]["voice"] == speech.VOICE_NAME
+    assert asked[0]["input"] == "Привет! Завтра прохладно."
+
+
 @pytest.mark.asyncio
 async def test_voicing_failure_is_quiet(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(speech, "_synthesize", MagicMock(side_effect=OSError("no model file")))
+    async def post(_self: Any, url: str, **_kwargs: Any) -> httpx.Response:
+        return httpx.Response(200, content=b"not audio", request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", post)
     assert await speech.speak_reply("привет") is None
 
 

@@ -1,20 +1,25 @@
-"""Luna's voice: short replies spoken by a local model, free and without leaving the PC."""
+"""Luna's voice: replies spoken by Gemini through the gateway.
 
-import asyncio
-import functools
+The owner chose Gemini over the local Piper voices on 2026-11-13 ("локальная ужасная"); the lighter Gemini
+voice model stands in when the main one fails, and with neither the text reply stays on its own."""
+
+import io
 import logging
 import re
+import uuid
+import wave
 from dataclasses import dataclass
-from pathlib import Path
 
-from piper import PiperVoice
+import httpx
 
 from lunagpt.assistant.audio import SAMPLE_BYTES, encode_voice
+from lunagpt.config import settings
 
 logger = logging.getLogger("lunagpt.assistant.speech")
 
-VOICES_DIR = Path("/app/voices")
-VOICE_FILES = {"ru": "ru_RU-irina-medium.onnx", "en": "en_US-lessac-medium.onnx"}
+VOICE_MODELS = ("luna-voice", "luna-voice-lite")
+VOICE_NAME = "Leda"  # a light, young-sounding voice the owner heard on 2026-11-10; it reads Russian and English
+SPEECH_TIMEOUT_SECONDS = 90.0
 MAX_SPOKEN_CHARS = 3000  # about three and a half minutes, enough for a bedtime story
 # Links, code, tables and formulas make no sense read aloud, so those replies stay text only.
 NOT_SPEAKABLE = re.compile(r"https?://|www\.|```|\$\$|\\\(|\\\[|^\s*\|", re.MULTILINE)
@@ -120,16 +125,47 @@ def reply_language(text: str) -> str:
     return "ru" if len(CYRILLIC.findall(text)) >= len(LATIN.findall(text)) else "en"
 
 
-@functools.cache
-def _voice(language: str) -> PiperVoice:
-    return PiperVoice.load(VOICES_DIR / VOICE_FILES[language])
+def speech_endpoint() -> str:
+    chat: str = settings.litellm_endpoint
+    return chat.replace("/chat/completions", "/audio/speech")
 
 
-def _synthesize(text: str) -> SpokenReply:
-    voice = _voice(reply_language(text))
-    pcm = b"".join(chunk.audio_int16_bytes for chunk in voice.synthesize(text))
-    rate = voice.config.sample_rate
+def from_wav(data: bytes) -> SpokenReply:
+    """Gemini answers with 16-bit mono WAV; Telegram wants OGG/Opus."""
+    with wave.open(io.BytesIO(data)) as source:
+        if source.getsampwidth() != SAMPLE_BYTES or source.getnchannels() != 1:
+            raise ValueError("unexpected audio format")
+        rate = source.getframerate()
+        pcm = source.readframes(source.getnframes())
+    if not pcm:
+        raise ValueError("empty audio")
     return SpokenReply(encode_voice(pcm, rate), max(1, round(len(pcm) / SAMPLE_BYTES / rate)))
+
+
+async def _synthesize(text: str) -> SpokenReply:
+    async with httpx.AsyncClient() as client:
+        for model in VOICE_MODELS:
+            try:
+                response = await client.post(
+                    speech_endpoint(),
+                    json={
+                        "model": model,
+                        "input": text,
+                        "voice": VOICE_NAME,
+                        "metadata": {
+                            "trace_id": str(uuid.uuid4()),
+                            "source": "luna_assistant",
+                            "tags": ["client:luna-assistant", "feature:voice-reply", f"lang:{reply_language(text)}"],
+                        },
+                    },
+                    headers={"Authorization": f"Bearer {settings.litellm_assistant_key}"},
+                    timeout=SPEECH_TIMEOUT_SECONDS,
+                )
+                response.raise_for_status()
+                return from_wav(response.content)
+            except (httpx.HTTPError, ValueError, wave.Error, EOFError) as exc:
+                logger.warning("voice model %s failed: %s", model, type(exc).__name__)
+    raise RuntimeError("no voice model answered")
 
 
 async def speak_reply(reply: str) -> SpokenReply | None:
@@ -138,7 +174,7 @@ async def speak_reply(reply: str) -> SpokenReply | None:
     if text is None:
         return None
     try:
-        return await asyncio.to_thread(_synthesize, text)
+        return await _synthesize(text)
     except Exception:
         logger.warning("could not voice a reply", exc_info=True)
         return None
