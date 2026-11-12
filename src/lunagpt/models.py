@@ -279,3 +279,19 @@ class AssistantCatPhrase(Base):
     text: Mapped[str] = mapped_column(String(120), nullable=False)
     status: Mapped[str] = mapped_column(String(10), nullable=False, server_default="pending")  # pending|approved
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class AssistantCatStory(Base):
+    """A habit or a funny moment of the family's cat Luna, told by a family member; Luna treats approved
+    ones as her own memories. Guests never see them."""
+
+    __tablename__ = "assistant_cat_stories"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
+    author_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("assistant_members.telegram_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    text: Mapped[str] = mapped_column(String(600), nullable=False)
+    photo_file_id: Mapped[str | None] = mapped_column(String(255), nullable=True)  # Telegram's id, no bytes kept
+    status: Mapped[str] = mapped_column(String(10), nullable=False, server_default="pending")  # pending|approved
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

@@ -20,7 +20,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import Document, Message, Update
 
-from lunagpt.assistant import access, audio, bot, llm, phrases, speech
+from lunagpt.assistant import access, audio, bot, llm, phrases, speech, stories
 from lunagpt.assistant.monitor import AvailabilityTracker
 from lunagpt.assistant.pi_client import PiClient, PiConflictError, PiNotFoundError, PiUnavailableError
 from lunagpt.assistant.telegram import split_message
@@ -1563,3 +1563,27 @@ async def test_phrase_button_is_for_kids_and_a_reply_becomes_a_suggestion(
     instance.phrases.suggest.assert_awaited_once()
     answer.assert_not_awaited()
     assert not bot.LunaBot._callback_allowed("kid", "cpy") and bot.LunaBot._callback_allowed("adult", "cpy")
+
+
+@pytest.mark.asyncio
+async def test_story_button_reply_and_photo_reach_the_story_desk(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, _, answer = harness
+    instance.stories.view = AsyncMock()
+    instance.stories.tell = AsyncMock()
+    _as_member(monkeypatch, _member("kid", 5))
+    await instance.on_message(_message(bot.BTN_STORY, 5))
+    instance.stories.view.assert_awaited_once()
+
+    reply = _photo_message("Луна спит на батарее")
+    reply.reply_to_message.from_user.is_bot = True
+    reply.reply_to_message.text = stories.PROMPT
+    await instance.on_message(reply)
+    assert instance.stories.tell.await_args.args[1] == "Луна спит на батарее"
+    assert instance.stories.tell.await_args.args[2] is reply.photo[-1].file_id
+    answer.assert_not_awaited()
+
+    _as_member(monkeypatch, _member("guest", 7))
+    await instance.on_message(_message(bot.BTN_STORY, 7))
+    instance.stories.view.assert_awaited_once()  # guests have no stories
+    assert not bot.LunaBot._callback_allowed("kid", "csy") and bot.LunaBot._callback_allowed("kid", "csa")
+    assert not bot.LunaBot._callback_allowed("guest", "csl")

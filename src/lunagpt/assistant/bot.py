@@ -54,6 +54,7 @@ from lunagpt.assistant.speech import (
     without_voice_refusals,
     without_voice_words,
 )
+from lunagpt.assistant.stories import ADULT_STORY_PREFIXES, STORY_PREFIXES, StoryDesk
 from lunagpt.assistant.telegram import is_reply_to_prompt, send_long, send_model_reply
 from lunagpt.assistant.waiting import Waiting, cat_is_thinking
 from lunagpt.config import settings
@@ -76,7 +77,9 @@ BTN_MEMORY = "🧠 Что ты помнишь"
 BTN_HELP = "❓ Помощь"
 BTN_REMINDERS = "🔔 Напоминания"
 BTN_PHRASE = "😺 Фраза для Луны"
+BTN_STORY = "🐈 Про Луну"
 MENU_BUTTONS = {
+    BTN_STORY,
     BTN_PHRASE,
     BTN_REMINDERS,
     BTN_MY_TIME,
@@ -118,6 +121,13 @@ def describe_restriction(restriction: dict[str, Any] | None) -> str:
 
 
 BEDTIME_GOODNIGHT = " Утром всё заработает само.\n\n😴 Луна уже спит клубочком, и тебе пора. Спокойной ночи!"
+# First, and asking for the first person: placed after the facts, the local model told 2 of 8 stories as
+# Luna's own; placed before them, 7 of 8.
+STORY_MEMORIES = (
+    "Мои воспоминания. Их рассказала семья про настоящую домашнюю кошку Луну, это и есть я. "
+    "Когда просят историю обо мне или спрашивают, помню ли я что-то, расскажи подходящую историю отсюда "
+    "от первого лица («я залезла…»), а не со стороны, и можешь сказать, кто напомнил:\n{stories}\n\n"
+)
 HISTORY_MESSAGES = 8
 RATE_LIMIT = 10
 RATE_WINDOW_SECONDS = 60
@@ -160,6 +170,7 @@ ADULT_HELP = (
     f"{BTN_SHARED} — телевизор и другое домашнее\n"
     f"{BTN_INVITE} — отправить приглашение\n"
     f"{BTN_REMINDERS} — напоминания и утренняя сводка\n"
+    f"{BTN_STORY} — истории и повадки нашей кошки\n"
     f"{BTN_MEMORY} — личная и общая память\n\n" + MEMORY_NOTICE.strip() + FAMILY_NOTICE
 )
 HELP_TEXT = {
@@ -172,6 +183,7 @@ HELP_TEXT = {
         f"{BTN_ASK_TIME} — написать родителям\n"
         f"{BTN_QUIZ} — ответить и заработать время\n"
         f"{BTN_PHRASE} — придумать, что я пишу, пока думаю\n"
+        f"{BTN_STORY} — рассказать про повадки и смешные случаи Луны\n"
         f"{BTN_REMINDERS} — напоминания и утренняя сводка\n"
         f"{BTN_MEMORY} — личная и общая память\n\n" + MEMORY_NOTICE.strip() + FAMILY_NOTICE
     ),
@@ -241,11 +253,16 @@ def needs_adult_attention(text: str) -> bool:
 
 def main_keyboard(role: str) -> ReplyKeyboardMarkup:
     """The persistent menu; server-side checks still decide what each role may do."""
-    adults = [[BTN_SHARED, BTN_PEOPLE], [BTN_INVITE, BTN_MEMORY], [BTN_REMINDERS, BTN_HELP]]
+    adults = [[BTN_SHARED, BTN_PEOPLE], [BTN_INVITE, BTN_MEMORY], [BTN_REMINDERS, BTN_STORY], [BTN_HELP]]
     layouts = {
         "owner": adults,
         "adult": adults,
-        "kid": [[BTN_MY_TIME, BTN_ASK_TIME], [BTN_QUIZ, BTN_PHRASE], [BTN_REMINDERS, BTN_MEMORY], [BTN_HELP]],
+        "kid": [
+            [BTN_MY_TIME, BTN_ASK_TIME],
+            [BTN_QUIZ, BTN_PHRASE],
+            [BTN_STORY, BTN_REMINDERS],
+            [BTN_MEMORY, BTN_HELP],
+        ],
         "guest": [[BTN_REMINDERS, BTN_MEMORY], [BTN_HELP]],
     }
     return ReplyKeyboardMarkup(
@@ -313,6 +330,7 @@ class LunaBot:
         self.school = SchoolDesk(bot, session_factory, mirror=self.calendar)
         self.reminders = ReminderDesk(bot, session_factory, extra_brief=self._brief_extra)
         self.phrases = PhraseDesk(bot, session_factory)
+        self.stories = StoryDesk(bot, session_factory)
         self._history_loaded: set[int] = set()
         self._background: set[asyncio.Task[None]] = set()
         self._history: dict[int, deque[dict[str, str]]] = defaultdict(lambda: deque(maxlen=HISTORY_MESSAGES))
@@ -359,6 +377,9 @@ class LunaBot:
             await self._people.search(user_id, message)
             return
         picture = photo_of(message)
+        if picture is not None and member.role in access.FAMILY_ROLES and self.stories.is_reply(message):
+            await self.stories.tell(member, (message.caption or "").strip(), picture.file_id)
+            return
         if picture is not None:
             await self._photo(member, (message.caption or "").strip(), picture, message.message_id)
             return
@@ -375,6 +396,9 @@ class LunaBot:
             return
         if member.role in access.FAMILY_ROLES and self.phrases.is_reply(message):
             await self.phrases.suggest(member, text)
+            return
+        if member.role in access.FAMILY_ROLES and self.stories.is_reply(message):
+            await self.stories.tell(member, text)
             return
         if self.reminders.is_city_reply(message):
             await self.reminders.set_city(member, text)
@@ -432,6 +456,8 @@ class LunaBot:
             await self._ask_time(member, "")
         elif member.role == "kid" and text == BTN_QUIZ:
             await self._start_quiz(member)
+        elif member.role in access.FAMILY_ROLES and text == BTN_STORY:
+            await self.stories.view(member)
         elif member.role == "kid" and text == BTN_PHRASE:
             await self.phrases.ask(member)
         else:
@@ -483,6 +509,8 @@ class LunaBot:
             await self.calendar.handle(callback, member, prefix, args)
         elif prefix in PHRASE_PREFIXES:
             await self.phrases.handle(callback, member, prefix, args)
+        elif prefix in STORY_PREFIXES:
+            await self.stories.handle(callback, member, prefix, args)
 
     @staticmethod
     def _callback_allowed(role: str, prefix: str) -> bool:
@@ -494,6 +522,10 @@ class LunaBot:
         ):
             return role in access.ROLES
         if prefix in ("fam", "fama", "famd", "famy"):
+            return role in access.FAMILY_ROLES
+        if prefix in ADULT_STORY_PREFIXES:
+            return role in access.ADULT_ROLES
+        if prefix in STORY_PREFIXES:
             return role in access.FAMILY_ROLES
         if prefix in PEOPLE_PREFIXES or prefix in PHRASE_PREFIXES or prefix in ("sh", "shs", "shl"):
             return role in access.ADULT_ROLES
@@ -831,6 +863,14 @@ class LunaBot:
             except Exception:
                 logger.warning("could not look up the owner", exc_info=True)
         facts: str = about_luna(member.role, owner)
+        if member.role in access.FAMILY_ROLES:
+            try:
+                memories = await self.stories.memories()
+            except Exception:
+                logger.warning("could not load the cat stories", exc_info=True)
+                memories = ""
+            if memories:
+                facts = STORY_MEMORIES.format(stories=memories) + facts
         return facts
 
     async def _waiting(self, member: AssistantMember, text: str, speak: bool, photo: bool) -> Waiting:
@@ -839,7 +879,7 @@ class LunaBot:
         family: list[str] = []
         if member.role in access.FAMILY_ROLES:
             try:
-                family = await self.phrases.family_phrases()
+                family = await self.phrases.family_phrases() + await self.stories.phrases()
             except Exception:
                 logger.warning("could not load family phrases", exc_info=True)
         now = datetime.now(UTC) + timedelta(hours=settings.luna_utc_offset_hours)
@@ -874,6 +914,13 @@ class LunaBot:
                 lines += await source(user_id, today)
             except Exception:
                 logger.warning("could not load brief lines", exc_info=True)
+        try:
+            async with self._sessions() as db:
+                member = await access.get_member(db, user_id)
+            if member is not None:
+                lines += await self.stories.brief_lines(member, today)
+        except Exception:
+            logger.warning("could not load a cat story for the brief", exc_info=True)
         return lines
 
     async def _may_ask(self, member: AssistantMember) -> bool:
