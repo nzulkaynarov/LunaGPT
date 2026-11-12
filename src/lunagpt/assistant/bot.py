@@ -121,6 +121,10 @@ PHOTO_FAILED = "Не получилось открыть фото. Пришли 
 PHOTO_TOO_BIG = "Слишком большой файл. Пришли фото обычным способом, не файлом."
 MAX_PHOTO_BYTES = 10 * 1024 * 1024
 PHOTO_TYPES = ("image/jpeg", "image/png", "image/webp")
+# Telegram sends "what cat is this?" and the photo as two messages, in either order: a question a minute
+# before a captionless photo becomes its caption, and the photo stays attached to follow-up questions.
+QUESTION_BEFORE_PHOTO_SECONDS = 60.0
+PHOTO_KEPT_SECONDS = 600.0
 NO_VIDEO = "Видео я не смотрю. Пришли голосовое или кружок, или напиши текстом."
 MAX_VOICE_SECONDS = 120
 VOICE_TOO_LONG = "Слишком длинное голосовое. Запиши покороче, до двух минут."
@@ -300,6 +304,8 @@ class LunaBot:
         self._locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._request_times: dict[int, deque[float]] = defaultdict(lambda: deque(maxlen=RATE_LIMIT))
         self._quizzes: dict[int, QuizQuestion] = {}
+        self._last_question: dict[int, tuple[str, float]] = {}
+        self._last_photo: dict[int, tuple[bytes, str, float]] = {}  # in memory only, never stored
 
     async def _send(
         self,
@@ -638,7 +644,8 @@ class LunaBot:
         image_type = picture.mime_type if isinstance(picture, Document) and picture.mime_type else "image/jpeg"
         kind = photo_kind(caption)
         if kind is None:
-            await self._chat(member, caption or PHOTO_DEFAULT, image=data.read(), image_type=image_type)
+            question = caption or self._recent_question(user_id) or PHOTO_DEFAULT
+            await self._chat(member, question, image=data.read(), image_type=image_type)
             return
         if not await self._may_ask(member):
             return
@@ -687,6 +694,20 @@ class LunaBot:
         await self._send(user_id, f"🗣 «{words}»")  # a misheard word is visible before the answer
         return words
 
+    def _recent_question(self, user_id: int) -> str | None:
+        """The text sent just before a captionless photo, which is usually a question about it."""
+        said, at = self._last_question.pop(user_id, ("", 0.0))
+        return said if said and time.monotonic() - at < QUESTION_BEFORE_PHOTO_SECONDS else None
+
+    def _recent_photo(self, user_id: int) -> tuple[bytes, str] | None:
+        kept = self._last_photo.get(user_id)
+        if kept is None:
+            return None
+        if time.monotonic() - kept[2] >= PHOTO_KEPT_SECONDS:
+            del self._last_photo[user_id]
+            return None
+        return kept[0], kept[1]
+
     @staticmethod
     def _today() -> date:
         return (datetime.now(UTC) + timedelta(hours=settings.luna_utc_offset_hours)).date()
@@ -722,6 +743,16 @@ class LunaBot:
             return
         today = self._today()
         costs: list[float] = []
+        earlier_photo = False
+        if image is None:
+            self._last_question[user_id] = (text, time.monotonic())
+            recent = self._recent_photo(user_id)
+            if recent is not None:
+                image, image_type = recent
+                earlier_photo = True
+        else:
+            self._last_question.pop(user_id, None)
+            self._last_photo[user_id] = (image, image_type, time.monotonic())
         async with self._locks[user_id]:
             async with (
                 ChatActionSender.typing(chat_id=user_id, bot=self._bot),  # repeats while the model works
@@ -737,11 +768,12 @@ class LunaBot:
                     spoken=speak,
                     image=image,
                     image_type=image_type,
+                    earlier_photo=earlier_photo,
                     planner=await self._planner(user_id),
                 )
                 reply = await self._answer(member.role, user_id, history, text, facts, options)
             # Later turns keep only a mark of the photo: its bytes are never stored or sent again.
-            said = f"[фото] {text}" if image is not None else text
+            said = f"[фото] {text}" if image is not None and not earlier_photo else text
             self._history[user_id].append({"role": "user", "content": said})
             self._history[user_id].append({"role": "assistant", "content": reply})
             if self._memory:
@@ -752,7 +784,7 @@ class LunaBot:
         await send_model_reply(self._bot, user_id, reply)
         if speak:
             await self._send_voice_reply(user_id, reply)
-        if self._memory and (image is None or text != PHOTO_DEFAULT):
+        if self._memory and text != PHOTO_DEFAULT:
             task = asyncio.create_task(self._memory.remember(user_id, member.role, text))
             self._background.add(task)  # the event loop keeps only weak references to tasks
             task.add_done_callback(self._background.discard)

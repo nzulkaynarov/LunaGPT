@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import math
+import time
 import uuid
 import wave
 from array import array
@@ -1395,6 +1396,35 @@ async def test_photo_without_caption_gets_a_default_question(harness: Any, monke
     instance._bot.download = AsyncMock(return_value=io.BytesIO(b"x"))
     await instance.on_message(_photo_message(None))
     assert answer.call_args.args[3] == bot.PHOTO_DEFAULT
+
+
+@pytest.mark.asyncio
+async def test_question_sent_just_before_a_photo_becomes_its_caption(
+    harness: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance, _, answer = harness
+    _as_member(monkeypatch, _member("kid", 5))
+    instance._bot.download = AsyncMock(return_value=io.BytesIO(b"cat"))
+    await instance.on_message(_message("Это что за кошка?", 5))
+    await instance.on_message(_photo_message(None))
+    assert answer.call_args.args[3] == "Это что за кошка?" and answer.call_args.args[5].image == b"cat"
+
+
+@pytest.mark.asyncio
+async def test_photo_stays_attached_to_follow_ups_for_a_while(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, _, answer = harness
+    _as_member(monkeypatch, _member("kid", 5))
+    instance._bot.download = AsyncMock(return_value=io.BytesIO(b"cat"))
+    await instance.on_message(_photo_message("кто это?"))
+    await instance.on_message(_message("что это за порода?", 5))
+    options = answer.call_args.args[5]
+    assert options.image == b"cat" and options.earlier_photo
+    assert instance._history[5][-2]["content"] == "что это за порода?"  # no second photo mark
+
+    clock = time.monotonic() + bot.PHOTO_KEPT_SECONDS + 1
+    monkeypatch.setattr(bot.time, "monotonic", lambda: clock)
+    await instance.on_message(_message("а теперь про футбол", 5))
+    assert answer.call_args.args[5].image is None
 
 
 @pytest.mark.asyncio
