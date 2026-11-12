@@ -18,7 +18,7 @@ from lunagpt.config import settings
 logger = logging.getLogger("lunagpt.assistant.speech")
 
 VOICE_MODELS = ("luna-voice", "luna-voice-lite")
-VOICE_NAME = "Leda"  # a light, young-sounding voice the owner heard on 2026-11-10; it reads Russian and English
+VOICE_NAME = "Capella"  # the owner's choice on 2026-11-13; it reads Russian and English
 SPEECH_TIMEOUT_SECONDS = 90.0
 MAX_SPOKEN_CHARS = 3000  # about three and a half minutes, enough for a bedtime story
 # Links, code, tables and formulas make no sense read aloud, so those replies stay text only.
