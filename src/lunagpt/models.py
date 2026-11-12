@@ -295,3 +295,30 @@ class AssistantCatStory(Base):
     photo_file_id: Mapped[str | None] = mapped_column(String(255), nullable=True)  # Telegram's id, no bytes kept
     status: Mapped[str] = mapped_column(String(10), nullable=False, server_default="pending")  # pending|approved
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class AssistantFamilyList(Base):
+    """A list the whole family keeps together: shopping, chores or one they named. Guests never see them."""
+
+    __tablename__ = "assistant_family_lists"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
+    name: Mapped[str] = mapped_column(String(30), nullable=False, unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class AssistantFamilyListItem(Base):
+    """One line of a family list; a ticked line stays until someone clears the list."""
+
+    __tablename__ = "assistant_family_list_items"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
+    list_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("assistant_family_lists.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    text: Mapped[str] = mapped_column(String(120), nullable=False)
+    added_by: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("assistant_members.telegram_id", ondelete="SET NULL"), nullable=True
+    )
+    done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

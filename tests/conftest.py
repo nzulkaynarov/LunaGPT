@@ -17,6 +17,8 @@ from lunagpt.models import (
     AssistantApplication,
     AssistantCatPhrase,
     AssistantCatStory,
+    AssistantFamilyList,
+    AssistantFamilyListItem,
     AssistantFamilyMemory,
     AssistantMember,
     AssistantMemory,
@@ -39,6 +41,8 @@ TABLES = [
         AssistantSchedule,
         AssistantCatPhrase,
         AssistantCatStory,
+        AssistantFamilyList,
+        AssistantFamilyListItem,
     )
 ]
 

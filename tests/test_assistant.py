@@ -20,7 +20,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import Document, Message, Update
 
-from lunagpt.assistant import access, audio, bot, llm, phrases, speech, stories
+from lunagpt.assistant import access, audio, bot, list_desk, llm, phrases, speech, stories
 from lunagpt.assistant.monitor import AvailabilityTracker
 from lunagpt.assistant.pi_client import PiClient, PiConflictError, PiNotFoundError, PiUnavailableError
 from lunagpt.assistant.telegram import split_message
@@ -1606,3 +1606,44 @@ async def test_story_button_reply_and_photo_reach_the_story_desk(harness: Any, m
     instance.stories.view.assert_awaited_once()  # guests have no stories
     assert not bot.LunaBot._callback_allowed("kid", "csy") and bot.LunaBot._callback_allowed("kid", "csa")
     assert not bot.LunaBot._callback_allowed("guest", "csl")
+
+
+@pytest.mark.asyncio
+async def test_list_button_phrase_and_reply_reach_the_list_desk(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, _, answer = harness
+    instance.lists.view = AsyncMock()
+    instance.lists.request = AsyncMock(return_value=True)
+    instance.lists.add_from_reply = AsyncMock()
+    _as_member(monkeypatch, _member("kid", 5))
+    await instance.on_message(_message(bot.BTN_LISTS, 5))
+    instance.lists.view.assert_awaited_once()
+
+    await instance.on_message(_message("добавь сок в покупки", 5))
+    assert instance.lists.request.await_args.args[1] == "добавь сок в покупки"
+    answer.assert_not_awaited()
+
+    reply = _message("сок, печенье", 5)
+    reply.reply_to_message.from_user.is_bot = True
+    reply.reply_to_message.text = list_desk.ADD_PROMPT.format(name="Покупки")
+    await instance.on_message(reply)
+    assert instance.lists.add_from_reply.await_args.args[2] == "сок, печенье"
+    answer.assert_not_awaited()
+
+    instance.lists.request = AsyncMock(return_value=False)  # "составь список дел…" is a chat question
+    await instance.on_message(_message("составь список дел на отпуск", 5))
+    answer.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_guests_have_no_family_lists(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, _, answer = harness
+    instance.lists.view = AsyncMock()
+    instance.lists.request = AsyncMock(return_value=True)
+    _as_member(monkeypatch, _member("guest", 7))
+    await instance.on_message(_message(bot.BTN_LISTS, 7))
+    await instance.on_message(_message("добавь сок в покупки", 7))
+    instance.lists.view.assert_not_awaited()
+    instance.lists.request.assert_not_awaited()
+    assert answer.await_count == 2  # both went to the chat as ordinary messages
+    assert not bot.LunaBot._callback_allowed("guest", "flo") and bot.LunaBot._callback_allowed("kid", "flt")
+    assert bot.BTN_LISTS not in str(bot.main_keyboard("guest")) and bot.BTN_LISTS in str(bot.main_keyboard("kid"))

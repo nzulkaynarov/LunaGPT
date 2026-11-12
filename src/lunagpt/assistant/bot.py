@@ -38,6 +38,8 @@ from lunagpt.assistant import access
 from lunagpt.assistant.about import about_luna, is_about_question, owner_name
 from lunagpt.assistant.calendar_desk import CALENDAR_PREFIXES, CalendarDesk, is_calendar_request
 from lunagpt.assistant.gcal import GoogleCalendar
+from lunagpt.assistant.list_desk import LIST_PREFIXES, ListDesk
+from lunagpt.assistant.lists import is_list_request
 from lunagpt.assistant.llm import QuizQuestion, ReplyOptions, transcribe_voice
 from lunagpt.assistant.memories import FAMILY_DUPLICATE, FAMILY_FAILED, FAMILY_FULL, FAMILY_SAVED, Memory
 from lunagpt.assistant.people import PEOPLE_PREFIXES, PeopleDesk
@@ -78,8 +80,10 @@ BTN_HELP = "❓ Помощь"
 BTN_REMINDERS = "🔔 Напоминания"
 BTN_PHRASE = "😺 Фраза для Луны"
 BTN_STORY = "🐈 Про Луну"
+BTN_LISTS = "🛒 Списки"
 MENU_BUTTONS = {
     BTN_STORY,
+    BTN_LISTS,
     BTN_PHRASE,
     BTN_REMINDERS,
     BTN_MY_TIME,
@@ -170,6 +174,7 @@ ADULT_HELP = (
     f"{BTN_SHARED} — телевизор и другое домашнее\n"
     f"{BTN_INVITE} — отправить приглашение\n"
     f"{BTN_REMINDERS} — напоминания и утренняя сводка\n"
+    f"{BTN_LISTS} — общие покупки и дела: «добавь молоко в покупки»\n"
     f"{BTN_STORY} — истории и повадки нашей кошки\n"
     f"{BTN_MEMORY} — личная и общая память\n\n" + MEMORY_NOTICE.strip() + FAMILY_NOTICE
 )
@@ -184,6 +189,7 @@ HELP_TEXT = {
         f"{BTN_QUIZ} — ответить и заработать время\n"
         f"{BTN_PHRASE} — придумать, что я пишу, пока думаю\n"
         f"{BTN_STORY} — рассказать про повадки и смешные случаи Луны\n"
+        f"{BTN_LISTS} — общие покупки и дела семьи: «добавь сок в покупки»\n"
         f"{BTN_REMINDERS} — напоминания и утренняя сводка\n"
         f"{BTN_MEMORY} — личная и общая память\n\n" + MEMORY_NOTICE.strip() + FAMILY_NOTICE
     ),
@@ -253,15 +259,16 @@ def needs_adult_attention(text: str) -> bool:
 
 def main_keyboard(role: str) -> ReplyKeyboardMarkup:
     """The persistent menu; server-side checks still decide what each role may do."""
-    adults = [[BTN_SHARED, BTN_PEOPLE], [BTN_INVITE, BTN_MEMORY], [BTN_REMINDERS, BTN_STORY], [BTN_HELP]]
+    adults = [[BTN_SHARED, BTN_PEOPLE], [BTN_INVITE, BTN_MEMORY], [BTN_REMINDERS, BTN_LISTS], [BTN_STORY, BTN_HELP]]
     layouts = {
         "owner": adults,
         "adult": adults,
         "kid": [
             [BTN_MY_TIME, BTN_ASK_TIME],
             [BTN_QUIZ, BTN_PHRASE],
-            [BTN_STORY, BTN_REMINDERS],
-            [BTN_MEMORY, BTN_HELP],
+            [BTN_STORY, BTN_LISTS],
+            [BTN_REMINDERS, BTN_MEMORY],
+            [BTN_HELP],
         ],
         "guest": [[BTN_REMINDERS, BTN_MEMORY], [BTN_HELP]],
     }
@@ -331,6 +338,7 @@ class LunaBot:
         self.reminders = ReminderDesk(bot, session_factory, extra_brief=self._brief_extra)
         self.phrases = PhraseDesk(bot, session_factory)
         self.stories = StoryDesk(bot, session_factory)
+        self.lists = ListDesk(bot, session_factory)
         self._history_loaded: set[int] = set()
         self._background: set[asyncio.Task[None]] = set()
         self._history: dict[int, deque[dict[str, str]]] = defaultdict(lambda: deque(maxlen=HISTORY_MESSAGES))
@@ -400,6 +408,9 @@ class LunaBot:
         if member.role in access.FAMILY_ROLES and self.stories.is_reply(message):
             await self.stories.tell(member, text)
             return
+        if member.role in access.FAMILY_ROLES and self.lists.is_add_reply(message):
+            await self.lists.add_from_reply(member, message, text)
+            return
         if self.reminders.is_city_reply(message):
             await self.reminders.set_city(member, text)
             return
@@ -427,6 +438,12 @@ class LunaBot:
                 async with ChatActionSender.typing(chat_id=user_id, bot=self._bot):
                     await self.school.handle_text(member, text)
             return
+        if member.role in access.FAMILY_ROLES and is_list_request(text) and not self._over_rate_limit(user_id):
+            async with ChatActionSender.typing(chat_id=user_id, bot=self._bot):
+                handled = await self.lists.request(member, text)
+            if handled:
+                self._allow_request(user_id)  # counts like a chat turn; anything else goes on to the chat
+                return
         if spoken_note is None and is_bare_voice_request(text):
             await self._say_last_reply(member)
             return
@@ -458,6 +475,8 @@ class LunaBot:
             await self._start_quiz(member)
         elif member.role in access.FAMILY_ROLES and text == BTN_STORY:
             await self.stories.view(member)
+        elif member.role in access.FAMILY_ROLES and text == BTN_LISTS:
+            await self.lists.view(member)
         elif member.role == "kid" and text == BTN_PHRASE:
             await self.phrases.ask(member)
         else:
@@ -511,6 +530,8 @@ class LunaBot:
             await self.phrases.handle(callback, member, prefix, args)
         elif prefix in STORY_PREFIXES:
             await self.stories.handle(callback, member, prefix, args)
+        elif prefix in LIST_PREFIXES:
+            await self.lists.handle(callback, member, prefix, args)
 
     @staticmethod
     def _callback_allowed(role: str, prefix: str) -> bool:
@@ -525,7 +546,7 @@ class LunaBot:
             return role in access.FAMILY_ROLES
         if prefix in ADULT_STORY_PREFIXES:
             return role in access.ADULT_ROLES
-        if prefix in STORY_PREFIXES:
+        if prefix in STORY_PREFIXES or prefix in LIST_PREFIXES:
             return role in access.FAMILY_ROLES
         if prefix in PEOPLE_PREFIXES or prefix in PHRASE_PREFIXES or prefix in ("sh", "shs", "shl"):
             return role in access.ADULT_ROLES
@@ -828,7 +849,7 @@ class LunaBot:
                     image=image,
                     image_type=image_type,
                     earlier_photo=earlier_photo,
-                    planner=await self._planner(user_id),
+                    planner=await self._planner(current),
                     on_search=waiting.searching,
                     about=await self._about(current, text),
                 )
@@ -897,14 +918,19 @@ class LunaBot:
         except (TelegramAPIError, ClientError, TimeoutError) as exc:
             logger.info("could not set a reaction: %s", type(exc).__name__)
 
-    async def _planner(self, user_id: int) -> str:
-        """Timetable, tasks and calendar for the model; a failure only loses this context, not the answer."""
+    async def _planner(self, member: AssistantMember) -> str:
+        """Timetable, tasks, calendar and the family's lists for the model; a failure only loses this context."""
         parts: list[str] = []
         for source in (self.school.planner_block, self.calendar.planner_text):
             try:
-                parts.append(await source(user_id))
+                parts.append(await source(member.telegram_id))
             except Exception:
                 logger.warning("could not load planner context", exc_info=True)
+        if member.role in access.FAMILY_ROLES:
+            try:
+                parts.append(await self.lists.planner_text())
+            except Exception:
+                logger.warning("could not load the family lists", exc_info=True)
         return "\n\n".join(part for part in parts if part)
 
     async def _brief_extra(self, user_id: int, today: date) -> list[str]:
@@ -918,9 +944,10 @@ class LunaBot:
             async with self._sessions() as db:
                 member = await access.get_member(db, user_id)
             if member is not None:
+                lines += await self.lists.brief_lines(member, today)
                 lines += await self.stories.brief_lines(member, today)
         except Exception:
-            logger.warning("could not load a cat story for the brief", exc_info=True)
+            logger.warning("could not load the lists or a cat story for the brief", exc_info=True)
         return lines
 
     async def _may_ask(self, member: AssistantMember) -> bool:
