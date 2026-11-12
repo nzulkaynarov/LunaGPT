@@ -130,6 +130,7 @@ class AssistantMember(Base):
     brief_lon: Mapped[float | None] = mapped_column(Float, nullable=True)
     brief_sent_on: Mapped[date | None] = mapped_column(Date, nullable=True)
     google_calendar_id: Mapped[str | None] = mapped_column(String(254), nullable=True)
+    seen_version: Mapped[str | None] = mapped_column(String(16), nullable=True)  # the update this person was told of
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 

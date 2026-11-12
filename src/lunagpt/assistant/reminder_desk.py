@@ -233,7 +233,8 @@ class ReminderDesk:
         lines.append("\n" + self._brief_status(member))
         numbers = [_button(f"✖ {n}", f"rmd:{row.id}") for n, row in enumerate(rows[:LIST_LIMIT], start=1)]
         keyboard = [numbers[i : i + 5] for i in range(0, len(numbers), 5)]
-        keyboard.append([_button("📚 Расписание", "sk"), _button("📝 Задания", "tk")])
+        if member.role == "kid":  # the school timetable and homework are children's
+            keyboard.append([_button("📚 Расписание", "sk"), _button("📝 Задания", "tk")])
         keyboard.append([_button("📅 Календарь", "cal")])
         keyboard.append([_button("☀️ Утренняя сводка", "rb")])
         return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard)

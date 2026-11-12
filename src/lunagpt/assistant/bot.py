@@ -32,9 +32,10 @@ from aiogram.types import (
 )
 from aiogram.utils.chat_action import ChatActionSender
 from aiohttp import ClientError
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from lunagpt.assistant import access
+from lunagpt.assistant import access, updates
 from lunagpt.assistant.about import about_luna, is_about_question, owner_name
 from lunagpt.assistant.calendar_desk import CALENDAR_PREFIXES, CalendarDesk, is_calendar_request
 from lunagpt.assistant.gcal import GoogleCalendar
@@ -146,6 +147,8 @@ STORY_MEMORIES = (
 )
 HISTORY_MESSAGES = 8
 RATE_LIMIT = 10
+UPDATE_CHECK_SECONDS = 600
+RESTARTED_TEXT = updates.RESTARTED
 RATE_WINDOW_SECONDS = 60
 ACCESS_ENDED = "Срок доступа закончился. Попроси взрослого из семьи его продлить."
 TOO_FAST = "🐾 Помедленнее, я не успеваю за мышкой! Подожди минутку."
@@ -176,10 +179,8 @@ MEMORY_NOTICE = (
 )
 FAMILY_NOTICE = " Чтобы запомнить для всех в семье, напиши: «запомни для семьи, что…»."
 ASK_ANYTHING = "Просто напиши или скажи голосом, что нужно: вопрос, идея, перевод, свежие новости."
-PHOTO_HINT = (
-    "📸 Пришли фото задачи, чека или текста, и я разберу. "
-    "Фото расписания с подписью «расписание» или «задали …» запомню и напомню вовремя.\n\n"
-)
+PHOTO_HINT = "📸 Пришли фото задачи, чека или текста, и я разберу.\n\n"
+SCHOOL_HINT = "📚 Фото расписания с подписью «расписание» или «задали …» запомню и напомню вовремя.\n\n"
 ADULT_HELP = (
     f"{ASK_ANYTHING}\n\n{PHOTO_HINT}"
     f"{BTN_PEOPLE} — семья, гости и заявки\n"
@@ -196,6 +197,7 @@ HELP_TEXT = {
     "kid": (
         "Спрашивай что угодно: уроки, игры, код, идеи, свежие новости.\n\n"
         + PHOTO_HINT
+        + SCHOOL_HINT
         + f"{BTN_MY_TIME} — сколько осталось интернета\n"
         f"{BTN_ASK_TIME} — написать родителям\n"
         f"{BTN_QUIZ} — ответить и заработать время\n"
@@ -277,8 +279,7 @@ def number_of(args: dict[str, Any]) -> int | None:
         return None
 
 
-def main_keyboard(role: str) -> ReplyKeyboardMarkup:
-    """The persistent menu; server-side checks still decide what each role may do."""
+def menu_layout(role: str) -> list[list[str]]:
     adults = [[BTN_SHARED, BTN_PEOPLE], [BTN_INVITE, BTN_MEMORY], [BTN_REMINDERS, BTN_LISTS], [BTN_STORY, BTN_HELP]]
     layouts = {
         "owner": adults,
@@ -292,8 +293,13 @@ def main_keyboard(role: str) -> ReplyKeyboardMarkup:
         ],
         "guest": [[BTN_REMINDERS, BTN_MEMORY], [BTN_HELP]],
     }
+    return layouts[role]
+
+
+def main_keyboard(role: str) -> ReplyKeyboardMarkup:
+    """The persistent menu; server-side checks still decide what each role may do."""
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=text) for text in row] for row in layouts[role]],
+        keyboard=[[KeyboardButton(text=text) for text in row] for row in menu_layout(role)],
         resize_keyboard=True,
         is_persistent=True,
         input_field_placeholder="Напиши Luna…",
@@ -376,6 +382,49 @@ class LunaBot:
     ) -> None:
         await send_long(self._bot, chat_id, text, reply_markup)
 
+    async def announce_update(self) -> int:
+        """Tell everyone whose menu or news changed, in the daytime; returns how many were told."""
+        if not updates.is_daytime():
+            return 0
+        async with self._sessions() as db:
+            people = list(await db.scalars(select(AssistantMember)))
+        told = 0
+        for member in people:
+            current = updates.version(member.role, menu_layout(member.role))
+            if member.seen_version == current or access.access_ended(member):
+                continue
+            restart = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="🔄 Перезапустить Луну", callback_data=updates.UPDATE_PREFIX)]
+                ]
+            )
+            try:
+                await self._bot.send_message(member.telegram_id, updates.notice(member.role), reply_markup=restart)
+                told += 1
+            except TelegramAPIError as exc:
+                logger.warning("could not announce an update: %s", type(exc).__name__)
+            await self._mark_seen(member.telegram_id, current)  # one notice per update, even if this one failed
+        return told
+
+    async def _mark_seen(self, telegram_id: int, version: str) -> None:
+        async with self._sessions() as db:
+            await db.execute(
+                update(AssistantMember).where(AssistantMember.telegram_id == telegram_id).values(seen_version=version)
+            )
+            await db.commit()
+
+    async def watch_updates(self) -> None:
+        while True:
+            try:
+                await self.announce_update()
+            except Exception:
+                logger.exception("could not announce the update")
+            await asyncio.sleep(UPDATE_CHECK_SECONDS)
+
+    async def _restart(self, callback: CallbackQuery, member: AssistantMember) -> None:
+        await remove_menu(callback)
+        await self._send(member.telegram_id, RESTARTED_TEXT, main_keyboard(member.role))
+
     async def _welcome(self, telegram_id: int, name: str, role: str) -> None:
         try:
             await self._bot.send_message(
@@ -386,6 +435,10 @@ class LunaBot:
             )
         except TelegramAPIError as exc:
             logger.warning("could not welcome a new member: %s", type(exc).__name__)
+        try:  # the welcome carries today's menu, so no update notice should follow it
+            await self._mark_seen(telegram_id, updates.version(role, menu_layout(role)))
+        except Exception:
+            logger.warning("could not mark the welcome as seen", exc_info=True)
 
     async def on_message(self, message: Message) -> None:
         if message.chat.type != "private" or message.from_user is None:
@@ -462,7 +515,7 @@ class LunaBot:
                 async with ChatActionSender.typing(chat_id=user_id, bot=self._bot):
                     await self.calendar.request_event(member, text)
             return
-        if is_school_text(text):
+        if member.role == "kid" and is_school_text(text):
             if await self._may_ask(member):
                 async with ChatActionSender.typing(chat_id=user_id, bot=self._bot):
                     await self.school.handle_text(member, text)
@@ -534,7 +587,9 @@ class LunaBot:
             return
         await callback.answer()
         args = data.split(":")[1:]
-        if prefix == "quiz":
+        if prefix == updates.UPDATE_PREFIX:
+            await self._restart(callback, member)
+        elif prefix == "quiz":
             await self._answer_quiz(member, int(args[0]))
         elif prefix == "shl":
             await self._edit_shared_list(callback)
@@ -576,6 +631,8 @@ class LunaBot:
 
     @staticmethod
     def _callback_allowed(role: str, prefix: str) -> bool:
+        if prefix == updates.UPDATE_PREFIX:
+            return role in access.ROLES
         if prefix == "quiz":
             return role == "kid"
         if (
@@ -760,7 +817,7 @@ class LunaBot:
             await self._send(user_id, PHOTO_FAILED)
             return
         image_type = picture.mime_type if isinstance(picture, Document) and picture.mime_type else "image/jpeg"
-        kind = photo_kind(caption)
+        kind = photo_kind(caption) if member.role == "kid" else None  # timetables and homework are for children
         if kind is None:
             question = caption or self._recent_question(user_id) or PHOTO_DEFAULT
             await self._chat(member, question, image=data.read(), image_type=image_type, message_id=message_id)

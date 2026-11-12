@@ -36,6 +36,7 @@ async def main() -> None:
         watch_family(pi, async_session_factory),
         watch_time_requests(bot, pi, async_session_factory),
         luna.reminders.watch(),
+        luna.watch_updates(),
     )
 
 
