@@ -34,7 +34,8 @@ async def test_quick_answer_shows_no_phrase() -> None:
 @pytest.mark.asyncio
 async def test_slow_answer_rotates_different_phrases_in_one_draft() -> None:
     bot = _bot()
-    async with waiting.cat_is_thinking(bot, 1):
+    midday = waiting.Waiting(now=datetime(2026, 6, 1, 14))  # no morning, night or holiday phrases
+    async with waiting.cat_is_thinking(bot, 1, midday):
         await asyncio.sleep(0.1)
     calls = bot.send_message_draft.await_args_list
     phrases = [call.kwargs["text"] for call in calls]

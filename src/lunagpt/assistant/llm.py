@@ -19,9 +19,12 @@ from lunagpt.config import settings
 
 logger = logging.getLogger("lunagpt.assistant.llm")
 
+# The owner's choice (2026-11-13): adults talk to Claude, children to Gemini, and the local model serves
+# guests and background work. Each list falls through to the next model when one fails.
+ADULT_MODELS = ["luna-smart", "luna-fast", "luna-local"]
 MODELS_BY_ROLE = {
-    "owner": ["luna-local", "luna-fast", "luna-smart"],
-    "adult": ["luna-local", "luna-fast", "luna-smart"],
+    "owner": ADULT_MODELS,
+    "adult": ADULT_MODELS,
     # Children mostly dictate, and the local model misreads them: "Хот вилс машинки" was understood as
     # Hot Wheels in 3 of 10 runs locally and 3 of 3 on luna-fast. The local model stays as the fallback.
     "kid": ["luna-fast", "luna-smart", "luna-local"],
@@ -32,7 +35,8 @@ MODELS_DOWN = "😿 Кот уронил интернет со стола: мод
 # The local model invented a fact in the quiz benchmark, and a quiz both teaches and awards minutes.
 QUIZ_MODELS = ["luna-fast", "luna-smart"]
 # Photos go to the cloud first: in the photo benchmark the local model added a deadline that was not on the
-# page in 2 of 3 runs and luna-fast in none, and homework answers must match the page.
+# page in 2 of 3 runs and luna-fast in none, and homework answers must match the page. Adults' photos go to
+# Claude like their chat: luna-smart read the same seven benchmark photos as well as luna-fast.
 PHOTO_MODELS = ["luna-fast", "luna-smart", "luna-local"]
 # Fact extraction scored 12 of 12 on the local model, so it stays free unless the local model is down.
 MEMORY_MODELS = ["luna-local", "luna-fast"]
@@ -469,7 +473,8 @@ async def generate_reply(
         if options.local_only:
             models = LOCAL_ONLY_MODELS
         else:
-            models = PHOTO_MODELS if options.image is not None else MODELS_BY_ROLE[role]
+            adult = MODELS_BY_ROLE[role] is ADULT_MODELS
+            models = PHOTO_MODELS if options.image is not None and not adult else MODELS_BY_ROLE[role]
         for model in models:
             try:
                 reply = await _run_model(

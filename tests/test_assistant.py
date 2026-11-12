@@ -683,13 +683,32 @@ async def test_failed_model_falls_through(monkeypatch: pytest.MonkeyPatch) -> No
 
     async def fake_run(client: Any, model: str, *args: Any) -> str:
         calls.append(model)
-        if model == "luna-local":
+        if model == "luna-smart":
             raise ValueError("bad tool call")
         return "готово"
 
     monkeypatch.setattr(llm, "_run_model", fake_run)
     assert await llm.generate_reply("adult", 1, [], "вопрос") == "готово"
-    assert calls == ["luna-local", "luna-fast"]
+    assert calls == ["luna-smart", "luna-fast"]
+
+
+@pytest.mark.parametrize("role", ["owner", "adult"])
+def test_adults_talk_to_claude_first_with_the_local_model_last(role: str) -> None:
+    assert llm.MODELS_BY_ROLE[role] == ["luna-smart", "luna-fast", "luna-local"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("role", "first"), [("adult", "luna-smart"), ("kid", "luna-fast"), ("guest", "luna-fast")])
+async def test_a_photo_goes_to_claude_only_for_adults(monkeypatch: pytest.MonkeyPatch, role: str, first: str) -> None:
+    calls: list[str] = []
+
+    async def fake_run(client: Any, model: str, *args: Any) -> str:
+        calls.append(model)
+        return "готово"
+
+    monkeypatch.setattr(llm, "_run_model", fake_run)
+    await llm.generate_reply(role, 1, [], "что на фото?", options=llm.ReplyOptions(image=b"jpeg"))
+    assert calls == [first]
 
 
 def _kid_with_pi(harness: Any, monkeypatch: pytest.MonkeyPatch) -> tuple[bot.LunaBot, AsyncMock, MagicMock]:
