@@ -12,7 +12,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import access
-from lunagpt.assistant.telegram import is_reply_to_prompt
+from lunagpt.assistant.telegram import is_reply_to_prompt, remove_menu
 from lunagpt.models import AssistantCatStory, AssistantMember
 
 logger = logging.getLogger("lunagpt.assistant.stories")
@@ -169,6 +169,7 @@ class StoryDesk:
     async def handle(self, callback: CallbackQuery, member: AssistantMember, prefix: str, args: list[str]) -> None:
         if prefix == "csa":
             await self.ask(member.telegram_id)
+            await remove_menu(callback)
             return
         if prefix == "csl":
             await self._list(callback, member, int(args[0]))

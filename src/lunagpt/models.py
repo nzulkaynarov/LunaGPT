@@ -20,6 +20,7 @@ from sqlalchemy import (
     Text,
     func,
 )
+from sqlalchemy import text as sql_text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -231,6 +232,8 @@ class AssistantReminder(Base):
     text: Mapped[str] = mapped_column(Text, nullable=False)
     due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     repeat: Mapped[str] = mapped_column(String(10), nullable=False, server_default="none")
+    # "remind" rings the text; "do" has Luna carry the text out at that time ("присылай пять новых слов")
+    kind: Mapped[str] = mapped_column(String(10), nullable=False, server_default="remind")
     done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     task_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("assistant_tasks.id", ondelete="CASCADE"), nullable=True, index=True
@@ -298,12 +301,22 @@ class AssistantCatStory(Base):
 
 
 class AssistantFamilyList(Base):
-    """A list the whole family keeps together: shopping, chores or one they named. Guests never see them."""
+    """A list: the family's own (no owner), which every family member sees and changes, or a personal one
+    that only its owner sees. Guests never see the family's lists."""
 
     __tablename__ = "assistant_family_lists"
+    __table_args__ = (
+        Index("uq_family_list_name", "name", unique=True, postgresql_where=sql_text("owner_id IS NULL")),
+        Index(
+            "uq_personal_list_name", "owner_id", "name", unique=True, postgresql_where=sql_text("owner_id IS NOT NULL")
+        ),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
-    name: Mapped[str] = mapped_column(String(30), nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(String(30), nullable=False)
+    owner_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("assistant_members.telegram_id", ondelete="CASCADE"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 

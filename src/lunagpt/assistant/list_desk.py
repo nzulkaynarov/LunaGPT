@@ -1,6 +1,8 @@
-"""Family lists in Telegram: the family adds lines by voice, text or a button and ticks them off with a tap.
+"""Lists in Telegram: the family's shared ones and each person's own. Lines are added by voice, text or a
+button and ticked off with a tap.
 
-Every family member, children included, sees and changes the same lists; guests never see them."""
+Every family member, children included, sees and changes the family's lists; a personal list is seen only by
+its owner. Guests never see the family's lists. Every screen checks who may see the list it shows."""
 
 import logging
 import re
@@ -9,26 +11,28 @@ from datetime import date, datetime, timedelta
 
 from aiogram import Bot
 from aiogram.types import CallbackQuery, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Message
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import access, lists
-from lunagpt.assistant.telegram import is_reply_to_prompt
+from lunagpt.assistant.telegram import is_reply_to_prompt, remove_menu
 from lunagpt.models import AssistantFamilyList, AssistantFamilyListItem, AssistantMember
 
 logger = logging.getLogger("lunagpt.assistant.lists")
 
-LIST_PREFIXES = {"flo", "flt", "fla", "flc", "flb"}
-MAX_LISTS = 12
+LIST_PREFIXES = {"flo", "flt", "fla", "flc", "flb", "flm"}
+MAX_LISTS = 12  # for the family, and again for each person
 MAX_OPEN_ITEMS = 100
 MAX_SHOWN = 40
 MAX_IN_PROMPT = 40
 MAX_BUTTON_CHARS = 24
 DONE_KEPT = timedelta(days=2)  # a ticked line nobody cleared goes away by itself
 ICONS = {lists.SHOPPING: "🛒", lists.CHORES: "🧹"}
+LOCK = "🔒"
 OVERVIEW = (
-    "📋 Семейные списки. Их видит и меняет вся семья.\n"
-    "Скажи или напиши: «добавь молоко и хлеб в покупки», «вычеркни молоко», «добавь шланг в список Дача»."
+    "📋 Списки. Семейные видит и меняет вся семья, личные 🔒 — только ты.\n"
+    "Скажи или напиши: «добавь молоко и хлеб в покупки», «вычеркни молоко», «добавь шланг в список Дача», "
+    "«добавь в мой список записаться к врачу»."
 )
 ADD_PROMPT_HEAD = "➕ Что добавить в список"
 ADD_PROMPT = ADD_PROMPT_HEAD + " «{name}»? Можно несколько: через запятую или с новой строки.\nОтветь на это сообщение."
@@ -39,8 +43,13 @@ LIST_FULL = f"В списке уже {MAX_OPEN_ITEMS} пунктов. Снача
 LIST_GONE = "Этого списка уже нет."
 
 
-def icon(name: str) -> str:
-    return ICONS.get(name, "📝")
+def icon(target: AssistantFamilyList) -> str:
+    return LOCK if target.owner_id is not None else ICONS.get(target.name, "📝")
+
+
+def label(target: AssistantFamilyList) -> str:
+    """How a list is named on screen and in prompts: a personal one carries the lock."""
+    return f"{LOCK} {target.name}" if target.owner_id is not None else target.name
 
 
 def short(text: str, limit: int = MAX_BUTTON_CHARS) -> str:
@@ -59,27 +68,53 @@ class ListDesk:
 
     # ---------- storage ----------
 
-    async def _all(self, db: AsyncSession) -> list[AssistantFamilyList]:
-        """Every list, the two standing ones first; they are created on first use."""
-        found = list(await db.scalars(select(AssistantFamilyList).order_by(AssistantFamilyList.id)))
-        missing = [name for name in lists.DEFAULT_LISTS if name not in {one.name for one in found}]
-        if missing:
-            db.add_all(AssistantFamilyList(name=name) for name in missing)
-            await db.commit()
-            found = list(await db.scalars(select(AssistantFamilyList).order_by(AssistantFamilyList.id)))
-        return found
+    @staticmethod
+    def _family(member: AssistantMember) -> bool:
+        return member.role in access.FAMILY_ROLES
 
-    async def _named(self, db: AsyncSession, name: str, create: bool) -> AssistantFamilyList | None:
-        every = await self._all(db)
+    async def _all(self, db: AsyncSession, member: AssistantMember) -> list[AssistantFamilyList]:
+        """The lists this person sees: the family's (the two standing ones are made on first use), then their own."""
+        family = self._family(member)
+        if family:
+            names = set(
+                await db.scalars(select(AssistantFamilyList.name).where(AssistantFamilyList.owner_id.is_(None)))
+            )
+            missing = [name for name in lists.DEFAULT_LISTS if name not in names]
+            if missing:
+                db.add_all(AssistantFamilyList(name=name) for name in missing)
+                await db.commit()
+        mine = AssistantFamilyList.owner_id == member.telegram_id
+        seen = or_(AssistantFamilyList.owner_id.is_(None), mine) if family else mine
+        rows = await db.scalars(
+            select(AssistantFamilyList)
+            .where(seen)
+            .order_by(AssistantFamilyList.owner_id.is_not(None), AssistantFamilyList.id)
+        )
+        return list(rows)
+
+    async def _named(
+        self, db: AsyncSession, member: AssistantMember, name: str, personal: bool, create: bool
+    ) -> AssistantFamilyList | None:
+        personal = personal or not self._family(member)
+        owner = member.telegram_id if personal else None
+        every = [one for one in await self._all(db, member) if one.owner_id == owner]
         for one in every:
             if one.name.lower() == name.lower():
                 return one
         if not create or len(every) >= MAX_LISTS:
             return None
-        made = AssistantFamilyList(name=name)
+        made = AssistantFamilyList(name=name, owner_id=owner)
         db.add(made)
         await db.commit()
         return made
+
+    async def _visible(self, db: AsyncSession, member: AssistantMember, list_id: int) -> AssistantFamilyList | None:
+        target = await db.get(AssistantFamilyList, list_id)
+        if target is None:
+            return None
+        if target.owner_id is None:
+            return target if self._family(member) else None
+        return target if target.owner_id == member.telegram_id else None
 
     @staticmethod
     async def _items(db: AsyncSession, list_id: int) -> list[tuple[AssistantFamilyListItem, str | None]]:
@@ -118,70 +153,81 @@ class ListDesk:
 
     # ---------- what Luna knows ----------
 
-    async def names(self) -> list[str]:
+    async def names(self, member: AssistantMember) -> tuple[list[str], list[str]]:
+        """The family's list names and this person's own."""
         async with self._sessions() as db:
-            return [one.name for one in await self._all(db)]
+            every = await self._all(db, member)
+        return [one.name for one in every if one.owner_id is None], [one.name for one in every if one.owner_id]
 
-    async def planner_text(self) -> str:
-        """The open lines of every list for the model, as data."""
+    async def planner_text(self, member: AssistantMember) -> str:
+        """The open lines of every list this person sees, for the model, as data."""
         async with self._sessions() as db:
+            seen = [one.id for one in await self._all(db, member)]
             rows = await db.execute(
-                select(AssistantFamilyList.name, AssistantFamilyListItem.text)
+                select(AssistantFamilyList, AssistantFamilyListItem.text)
                 .join(AssistantFamilyListItem, AssistantFamilyListItem.list_id == AssistantFamilyList.id)
-                .where(AssistantFamilyListItem.done_at.is_(None))
-                .order_by(AssistantFamilyList.id, AssistantFamilyListItem.id)
+                .where(AssistantFamilyListItem.done_at.is_(None), AssistantFamilyList.id.in_(seen))
+                .order_by(AssistantFamilyList.owner_id.is_not(None), AssistantFamilyList.id, AssistantFamilyListItem.id)
                 .limit(MAX_IN_PROMPT)
             )
             by_list: dict[str, list[str]] = {}
-            for name, text in rows:
-                by_list.setdefault(name, []).append(text)
+            for target, text in rows:
+                kind = "личный" if target.owner_id is not None else "общий"
+                by_list.setdefault(f"{target.name} ({kind})", []).append(text)
         if not by_list:
             return ""
         lines = [f"- {name}: {', '.join(items)}" for name, items in by_list.items()]
-        return "Общие списки семьи (что ещё не куплено и не сделано):\n" + "\n".join(lines)
+        return "Списки (что ещё не куплено и не сделано):\n" + "\n".join(lines)
 
     async def brief_lines(self, member: AssistantMember, _day: date) -> list[str]:
-        """Adults see what is left to buy in the morning brief."""
-        if member.role not in access.ADULT_ROLES:
-            return []
+        """Adults see what is left to buy for the family; everyone sees what is left in their own lists."""
+        found: list[str] = []
         async with self._sessions() as db:
-            shopping = await self._named(db, lists.SHOPPING, create=False)
-            if shopping is None:
-                return []
-            left = [item.text for item, _ in await self._items(db, shopping.id) if item.done_at is None]
-        if not left:
-            return []
-        more = f" и ещё {len(left) - 5}" if len(left) > 5 else ""
-        return [f"\n🛒 В покупках {len(left)}: {', '.join(left[:5])}{more}"]
+            for target in await self._all(db, member):
+                personal = target.owner_id is not None
+                if not personal and (target.name != lists.SHOPPING or member.role not in access.ADULT_ROLES):
+                    continue
+                left = [item.text for item, _ in await self._items(db, target.id) if item.done_at is None]
+                if not left:
+                    continue
+                shown = ", ".join(left[:5]) + (f" и ещё {len(left) - 5}" if len(left) > 5 else "")
+                where = label(target) if personal else f"{icon(target)} В покупках {len(left)}"
+                found.append(f"\n{where}: {shown}")
+        return found
 
     # ---------- screens ----------
 
-    async def _overview(self) -> tuple[str, InlineKeyboardMarkup]:
+    async def _overview(self, member: AssistantMember) -> tuple[str, InlineKeyboardMarkup]:
         async with self._sessions() as db:
-            every = await self._all(db)
+            every = await self._all(db, member)
             counts = await self._open_counts(db)
         rows = [
             [
                 InlineKeyboardButton(
-                    text=f"{icon(one.name)} {one.name} · {counts.get(one.id, 0)}", callback_data=f"flo:{one.id}"
+                    text=f"{icon(one)} {one.name} · {counts.get(one.id, 0)}", callback_data=f"flo:{one.id}"
                 )
             ]
             for one in every
         ]
+        if not any(one.owner_id for one in every):
+            rows.append([InlineKeyboardButton(text=f"{LOCK} {lists.MY_LIST}", callback_data="flm")])
         return OVERVIEW, InlineKeyboardMarkup(inline_keyboard=rows)
 
-    async def _list_view(self, list_id: int) -> tuple[str, InlineKeyboardMarkup] | None:
+    async def _list_view(self, member: AssistantMember, list_id: int) -> tuple[str, InlineKeyboardMarkup] | None:
         async with self._sessions() as db:
-            target = await db.get(AssistantFamilyList, list_id)
+            target = await self._visible(db, member, list_id)
             if target is None:
                 return None
             items = await self._items(db, list_id)
         shown = items[:MAX_SHOWN]
         left = sum(1 for item, _ in items if item.done_at is None)
         ticked = len(items) - left
-        head = f"{icon(target.name)} {target.name}: осталось {left}" + (f", отмечено {ticked}" if ticked else "")
+        head = f"{icon(target)} {target.name}: осталось {left}" + (f", отмечено {ticked}" if ticked else "")
+        personal = target.owner_id is not None
         lines = [
-            ("✅ " if item.done_at else "▫️ ") + item.text + (f" — {author}" if author and not item.done_at else "")
+            ("✅ " if item.done_at else "▫️ ")
+            + item.text
+            + (f" — {author}" if author and not item.done_at and not personal else "")
             for item, author in shown
         ]
         if not items:
@@ -202,15 +248,17 @@ class ListDesk:
         return head + "\n\n" + "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 
     async def view(self, member: AssistantMember) -> None:
-        text, markup = await self._overview()
+        text, markup = await self._overview(member)
         await self._bot.send_message(member.telegram_id, text, reply_markup=markup)
 
-    async def _send_list(self, chat_id: int, list_id: int, note: str = "") -> None:
-        view = await self._list_view(list_id)
+    async def _send_list(self, member: AssistantMember, list_id: int, note: str = "") -> None:
+        view = await self._list_view(member, list_id)
         if view is None:
-            await self._bot.send_message(chat_id, LIST_GONE)
+            await self._bot.send_message(member.telegram_id, LIST_GONE)
             return
-        await self._bot.send_message(chat_id, (note + "\n\n" if note else "") + view[0], reply_markup=view[1])
+        await self._bot.send_message(
+            member.telegram_id, (note + "\n\n" if note else "") + view[0], reply_markup=view[1]
+        )
 
     # ---------- by voice or text ----------
 
@@ -224,24 +272,25 @@ class ListDesk:
             "source": "luna_assistant",
             "tags": ["client:luna-assistant", "feature:lists", f"role:{member.role}"],
         }
-        asked = await lists.parse_request(text, await self.names(), metadata)
+        family, personal = await self.names(member)
+        asked = await lists.parse_request(text, family, personal, metadata)
         if asked is None:
             return None
         async with self._sessions() as db:
-            target = await self._named(db, asked.name, create=asked.action == "add")
+            target = await self._named(db, member, asked.name, asked.personal, create=asked.action == "add")
             if target is None:
-                note = TOO_MANY_LISTS if asked.action == "add" else f"Списка «{asked.name}» у нас нет."
+                note = TOO_MANY_LISTS if asked.action == "add" else f"Списка «{asked.name}» нет."
                 await self._bot.send_message(member.telegram_id, note)
                 return note
             if asked.action == "add":
                 added = await self._add(db, target, asked.items, member.telegram_id)
-                note = self._added_note(target.name, asked.items, added)
+                note = self._added_note(label(target), asked.items, added)
             elif asked.action == "done":
                 note = await self._tick_named(db, target, asked.items)
             else:
                 note = ""
-        await self._send_list(member.telegram_id, target.id, note)
-        return note or f"Показала список «{target.name}»."
+        await self._send_list(member, target.id, note)
+        return note or f"Показала список «{label(target)}»."
 
     @staticmethod
     def _added_note(name: str, asked: list[str], added: list[str]) -> str:
@@ -263,22 +312,23 @@ class ListDesk:
                 ticked.append(item.text)
         await db.commit()
         if not ticked:
-            return f"Не нашла в списке «{target.name}»: {', '.join(wanted)}"
+            return f"Не нашла в списке «{label(target)}»: {', '.join(wanted)}"
         return f"✅ Вычеркнула: {', '.join(ticked)}"
 
-    async def add_from_chat(self, member: AssistantMember, name: str, items: list[str]) -> str:
+    async def add_from_chat(self, member: AssistantMember, name: str, items: list[str], personal: bool = False) -> str:
         """What the chat model adds with its tool; the answer tells the model what happened, as data."""
         wanted = lists.clean_items(items)
-        name = lists.list_name(name) or lists.CHORES
+        name = lists.list_name(name) or (lists.MY_LIST if personal else lists.CHORES)
         if not wanted:
             return "Нечего добавлять."
         async with self._sessions() as db:
-            target = await self._named(db, name, create=True)
+            target = await self._named(db, member, name, personal, create=True)
             if target is None:
                 return f"Не добавлено: списков уже {MAX_LISTS}, новый список не создать."
             added = await self._add(db, target, wanted, member.telegram_id)
         already = [item for item in wanted if item not in added]
-        result = f"Добавлено в «{target.name}»: {', '.join(added)}." if added else f"Ничего нового в «{target.name}»."
+        where = label(target)
+        result = f"Добавлено в «{where}»: {', '.join(added)}." if added else f"Ничего нового в «{where}»."
         return result + (f" Уже были в списке: {', '.join(already)}." if already else "")
 
     async def add_from_reply(self, member: AssistantMember, message: Message, text: str) -> None:
@@ -289,45 +339,55 @@ class ListDesk:
         if named is None or not items:
             await self._bot.send_message(member.telegram_id, NOTHING_TO_ADD)
             return
+        shown = named.group(1)
+        personal = shown.startswith(LOCK + " ")
         async with self._sessions() as db:
-            target = await self._named(db, named.group(1), create=False)
+            target = await self._named(db, member, shown.removeprefix(LOCK + " "), personal, create=False)
             if target is None:
                 await self._bot.send_message(member.telegram_id, LIST_GONE)
                 return
             added = await self._add(db, target, items, member.telegram_id)
-        await self._send_list(member.telegram_id, target.id, self._added_note(target.name, items, added))
+        await self._send_list(member, target.id, self._added_note(label(target), items, added))
 
     # ---------- buttons ----------
 
     async def handle(self, callback: CallbackQuery, member: AssistantMember, prefix: str, args: list[str]) -> None:
         if prefix == "flb":
-            await self._edit(callback, *await self._overview())
+            await self._edit(callback, *await self._overview(member))
             return
-        list_id = await self._toggle(int(args[0])) if prefix == "flt" else int(args[0])
-        if list_id is None:
+        if prefix == "flm":
+            async with self._sessions() as db:
+                mine = await self._named(db, member, lists.MY_LIST, personal=True, create=True)
+            list_id: int | None = mine.id if mine is not None else None
+        elif prefix == "flt":
+            list_id = await self._toggle(member, int(args[0]))
+        else:
+            list_id = int(args[0])
+        view = await self._list_view(member, list_id) if list_id is not None else None
+        if list_id is None or view is None:
             await self._edit(callback, LIST_GONE, None)
             return
         if prefix == "fla":
             async with self._sessions() as db:
-                target = await db.get(AssistantFamilyList, list_id)
+                target = await self._visible(db, member, list_id)
             if target is not None:
                 await self._bot.send_message(
-                    member.telegram_id, ADD_PROMPT.format(name=target.name), reply_markup=ForceReply()
+                    member.telegram_id, ADD_PROMPT.format(name=label(target)), reply_markup=ForceReply()
                 )
+                await remove_menu(callback)
             return
         if prefix == "flc" and await self._clear(list_id):
-            await self._edit(callback, *await self._overview())
+            await self._edit(callback, *await self._overview(member))
             return
-        view = await self._list_view(list_id)
-        if view is None:
-            await self._edit(callback, LIST_GONE, None)
-            return
-        await self._edit(callback, *view)
+        if prefix == "flc":
+            view = await self._list_view(member, list_id)
+        if view is not None:
+            await self._edit(callback, *view)
 
-    async def _toggle(self, item_id: int) -> int | None:
+    async def _toggle(self, member: AssistantMember, item_id: int) -> int | None:
         async with self._sessions() as db:
             item = await db.get(AssistantFamilyListItem, item_id)
-            if item is None:
+            if item is None or await self._visible(db, member, item.list_id) is None:
                 return None
             item.done_at = None if item.done_at else datetime.now().astimezone()
             list_id: int = item.list_id
@@ -348,7 +408,8 @@ class ListDesk:
                 .select_from(AssistantFamilyListItem)
                 .where(AssistantFamilyListItem.list_id == list_id)
             )
-            gone = target is not None and target.name not in lists.DEFAULT_LISTS and not left
+            standing = lists.DEFAULT_LISTS if target is None or target.owner_id is None else (lists.MY_LIST,)
+            gone = target is not None and target.name not in standing and not left
             if gone:
                 await db.delete(target)
             await db.commit()

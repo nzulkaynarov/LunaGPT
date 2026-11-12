@@ -1,6 +1,6 @@
 """Reminders changed from the chat: moved to a corrected time, cancelled, listed for the model."""
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -64,3 +64,60 @@ async def test_nobody_moves_or_cancels_another_persons_reminder(db_sessions: asy
     assert await desk.move(owner, 1, "как-нибудь") == "Не поняла новое время."
     assert await desk.cancel(owner, 1) == "Отменено №1: полить цветы."
     assert await desk.planner_text(OWNER) == ""
+
+
+@pytest.mark.asyncio
+async def test_a_task_is_carried_out_by_luna_and_rings_only_if_that_fails(
+    db_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    desk, owner = await _setup(db_sessions, _parts(task="пять новых английских слов", time="11:00", repeat="daily"))
+    said = await desk.create(owner, "напомни каждый день в 11 пять новых английских слов", kind="do")
+    assert said == "🗓 Сделаю сама каждый день в 11:00: пять новых английских слов"
+    assert "(это задание: в это время ты выполняешь его сама)" in await desk.planner_text(OWNER)
+
+    done: list[tuple[int, str]] = []
+
+    async def run_task(member: AssistantMember, task: str) -> None:
+        done.append((member.telegram_id, task))
+
+    desk.run_task = run_task
+    desk._bot.send_message.reset_mock()  # the confirmation card
+    async with db_sessions() as db:
+        row = await db.scalar(select(AssistantReminder))
+        assert row is not None and row.kind == "do"
+        row.due_at = datetime.now(UTC) - timedelta(minutes=1)
+        await db.commit()
+    assert await desk.ring_due() == 1
+    assert done == [(OWNER, "пять новых английских слов")]
+    desk._bot.send_message.assert_not_awaited()  # no "🔔" card: Luna did the task itself
+    assert await _due(db_sessions) > reminder_desk.local_now()  # and it moved to tomorrow
+
+    async def broken(_member: AssistantMember, _task: str) -> None:
+        raise RuntimeError("model down")
+
+    desk.run_task = broken
+    async with db_sessions() as db:
+        row = await db.scalar(select(AssistantReminder))
+        assert row is not None
+        row.due_at = datetime.now(UTC) - timedelta(minutes=1)
+        await db.commit()
+    assert await desk.ring_due() == 1
+    assert "🔔 пять новых английских слов" in desk._bot.send_message.await_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_a_task_replaces_a_plain_reminder_for_the_same_time(
+    db_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    desk, owner = await _setup(db_sessions, _parts(task="прислать пять слов", time="11:00", repeat="daily"))
+    await desk.create(owner, "напомни каждый день в 11 прислать пять слов")
+    desk._extract = _parts(task="пять новых слов", time="12:00", repeat="daily")
+    await desk.create(owner, "напомни каждый день в 12 пять новых слов")  # another time stays
+    desk._extract = _parts(task="пять новых слов", time="11:00", repeat="daily")
+    said = await desk.create(owner, "напомни каждый день в 11 пять новых слов", kind="do")
+    assert said.endswith("Обычное напоминание на это же время убрала.")
+    async with db_sessions() as db:
+        kinds = sorted(
+            (r.kind, reminder_desk.to_local(r.due_at).hour) for r in await db.scalars(select(AssistantReminder))
+        )
+    assert kinds == [("do", 11), ("remind", 12)]

@@ -1,11 +1,12 @@
 """Telegram helpers built on aiogram."""
 
 import re
+from contextlib import suppress
 from typing import Any
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import InputRichMessage, Message
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
+from aiogram.types import CallbackQuery, InputRichMessage, Message
 
 MESSAGE_LIMIT = 4000  # Telegram rejects messages above 4096 characters
 RICH_MESSAGE_LIMIT = 32000  # Telegram rejects rich messages above 32768 characters
@@ -68,3 +69,11 @@ def is_reply_to_prompt(message: Message, prompt: str) -> bool:
     """Only the bot can author its prompts, so a reply to one is an answer to it and never a chat turn."""
     reply = message.reply_to_message
     return bool(reply and reply.from_user and reply.from_user.is_bot and prompt in (reply.text or ""))
+
+
+async def remove_menu(callback: CallbackQuery) -> None:
+    """The menu whose button opened a "reply to this message" prompt goes away: the answer brings a fresh one."""
+    if not isinstance(callback.message, Message):
+        return
+    with suppress(TelegramAPIError):  # too old to delete, or already gone
+        await callback.message.delete()

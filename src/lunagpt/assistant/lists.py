@@ -1,4 +1,4 @@
-"""Family lists (shopping, chores and the family's own): understand "добавь молоко и хлеб в покупки".
+"""Lists, the family's and personal ones: understand "добавь молоко и хлеб в покупки" or "в мой список".
 
 A cheap pattern decides whether a message may be about a list at all; the model then names the action, the
 list and the items, and anything it is unsure about stays an ordinary chat message."""
@@ -13,6 +13,7 @@ from lunagpt.assistant import llm
 SHOPPING = "Покупки"
 CHORES = "Дела"
 DEFAULT_LISTS = (SHOPPING, CHORES)
+MY_LIST = "Мои дела"  # the personal list a person gets with one tap
 MAX_NAME_CHARS = 30
 MAX_ITEM_CHARS = 120
 MAX_ITEMS_AT_ONCE = 30
@@ -20,7 +21,9 @@ MAX_ITEMS_AT_ONCE = 30
 LIST_MODELS = ["luna-local", "luna-fast"]
 
 LIST_REQUEST = re.compile(
-    r"\bв\s+(?:наш\s+|семейный\s+|общий\s+)?список\b"
+    r"\bв\s+(?:наш\s+|семейный\s+|общий\s+|мой\s+|личный\s+)?список\b"
+    r"|\bв\s+мои\s+(?:дела|покупки)\b"
+    r"|\b(?:мой|личный)\s+список\b"
     r"|\bв\s+покупки\b"
     r"|\bсписок\s+(?:покупок|продуктов|дел)\b"
     r"|\b(?:из|со?)\s+(?:списка|покупок)\b"
@@ -31,12 +34,15 @@ LIST_REQUEST = re.compile(
 )
 
 EXTRACT_PROMPT = (
-    "В семье есть общие списки. Сейчас есть списки: {names}. Разбери сообщение и верни строго JSON без пояснений:\n"
+    "Есть общие списки семьи: {family}. Личные списки этого человека: {personal}. "
+    "Разбери сообщение и верни строго JSON без пояснений:\n"
     '"action" — "add" (добавить пункты), "done" (вычеркнуть: куплено, сделано, убрать из списка), '
     '"show" (показать список) или "none";\n'
     '"list" — название списка. Если после слов «в список» или «из списка» стоит название («в список Аптека», '
     "«в список дача»), это и есть список, даже если такого ещё нет: дай его одним-двумя словами с большой буквы. "
     "Если список не назван: всё, что покупают, — «Покупки», домашние дела — «Дела»;\n"
+    '"personal" — true, если человек говорит о своём личном списке («в мой список», «в мои дела», «в личный '
+    "список», «себе в список»); тогда список, не названный по имени, — «Мои дела». Иначе false;\n"
     '"items" — пункты по одному, коротко, со строчной буквы, с количеством, если оно названо '
     "(«молоко 2 л», «батарейки АА»). Для show — пустой список.\n"
     '"none" ставь, когда человек не просит изменить или показать общий список: спрашивает совета, просит '
@@ -51,6 +57,7 @@ class ListRequest(BaseModel):
     action: Literal["add", "done", "show", "none"] = "none"
     name: str = Field(default=SHOPPING, alias="list")
     items: list[str] = Field(default_factory=list)
+    personal: bool = False
 
     @field_validator("name")
     @classmethod
@@ -94,12 +101,16 @@ def same_item(left: str, right: str) -> bool:
     return bool(a and b) and (a == b or a.startswith(b + " ") or b.startswith(a + " "))
 
 
-async def parse_request(text: str, names: list[str], metadata: dict[str, object]) -> ListRequest | None:
+def quoted(names: list[str]) -> str:
+    return ", ".join(f"«{name}»" for name in names) or "нет"
+
+
+async def parse_request(
+    text: str, family: list[str], personal: list[str], metadata: dict[str, object]
+) -> ListRequest | None:
     """The request the model heard, or None when it is not about a list or the model could not say."""
-    messages = [
-        {"role": "system", "content": EXTRACT_PROMPT.format(names=", ".join(f"«{name}»" for name in names))},
-        {"role": "user", "content": text},
-    ]
+    prompt = EXTRACT_PROMPT.format(family=quoted(family), personal=quoted(personal))
+    messages = [{"role": "system", "content": prompt}, {"role": "user", "content": text}]
     raw = await llm.complete_json_text(messages, dict(metadata), LIST_MODELS)
     if raw is None:
         return None

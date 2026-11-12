@@ -39,7 +39,7 @@ from lunagpt.assistant.about import about_luna, is_about_question, owner_name
 from lunagpt.assistant.calendar_desk import CALENDAR_PREFIXES, CalendarDesk, is_calendar_request
 from lunagpt.assistant.gcal import GoogleCalendar
 from lunagpt.assistant.list_desk import LIST_PREFIXES, ListDesk
-from lunagpt.assistant.lists import is_list_request
+from lunagpt.assistant.lists import is_list_request, quoted
 from lunagpt.assistant.llm import (
     LIST_TOOL,
     LISTS_BLOCK,
@@ -47,6 +47,7 @@ from lunagpt.assistant.llm import (
     REMINDER_HINT,
     REMINDER_TOOLS,
     REMINDERS_BLOCK,
+    SCHEDULED_TASK,
     Action,
     QuizQuestion,
     ReplyOptions,
@@ -68,7 +69,7 @@ from lunagpt.assistant.speech import (
     without_voice_words,
 )
 from lunagpt.assistant.stories import ADULT_STORY_PREFIXES, STORY_PREFIXES, StoryDesk
-from lunagpt.assistant.telegram import is_reply_to_prompt, send_long, send_model_reply
+from lunagpt.assistant.telegram import is_reply_to_prompt, remove_menu, send_long, send_model_reply
 from lunagpt.assistant.waiting import Waiting, cat_is_thinking
 from lunagpt.config import settings
 from lunagpt.models import AssistantMember
@@ -354,7 +355,7 @@ class LunaBot:
         self._people = PeopleDesk(bot, session_factory, pi, bot_username, self._welcome)
         self.calendar = CalendarDesk(bot, session_factory, google_calendar())
         self.school = SchoolDesk(bot, session_factory, mirror=self.calendar)
-        self.reminders = ReminderDesk(bot, session_factory, extra_brief=self._brief_extra)
+        self.reminders = ReminderDesk(bot, session_factory, extra_brief=self._brief_extra, run_task=self._run_task)
         self.phrases = PhraseDesk(bot, session_factory)
         self.stories = StoryDesk(bot, session_factory)
         self.lists = ListDesk(bot, session_factory)
@@ -399,13 +400,16 @@ class LunaBot:
             return
         if member.role in access.ADULT_ROLES and self._people.is_edit_reply(message):
             await self._people.apply_edit(member, message)
+            await self._drop_prompt(message)
             return
         if member.role in access.ADULT_ROLES and self._people.is_search_reply(message):
             await self._people.search(user_id, message)
+            await self._drop_prompt(message)
             return
         picture = photo_of(message)
         if picture is not None and member.role in access.FAMILY_ROLES and self.stories.is_reply(message):
             await self.stories.tell(member, (message.caption or "").strip(), picture.file_id)
+            await self._drop_prompt(message)
             return
         if picture is not None:
             await self._photo(member, (message.caption or "").strip(), picture, message.message_id)
@@ -420,21 +424,27 @@ class LunaBot:
             return
         if member.role in access.FAMILY_ROLES and is_reply_to_prompt(message, FAMILY_PROMPT):
             await self._chat(member, text, family_note=text)
+            await self._drop_prompt(message)
             return
         if member.role in access.FAMILY_ROLES and self.phrases.is_reply(message):
             await self.phrases.suggest(member, text)
+            await self._drop_prompt(message)
             return
         if member.role in access.FAMILY_ROLES and self.stories.is_reply(message):
             await self.stories.tell(member, text)
+            await self._drop_prompt(message)
             return
         if member.role in access.FAMILY_ROLES and self.lists.is_add_reply(message):
             await self.lists.add_from_reply(member, message, text)
+            await self._drop_prompt(message)
             return
         if self.reminders.is_city_reply(message):
             await self.reminders.set_city(member, text)
+            await self._drop_prompt(message)
             return
         if self.calendar.is_link_reply(message):
             await self.calendar.link(member, text)
+            await self._drop_prompt(message)
             return
         if await self._menu_action(member, text):
             return
@@ -471,6 +481,16 @@ class LunaBot:
             await self._chat(member, without_voice_words(text), speak=True)
             return
         await self._chat(member, text, speak=spoken_note is not None, message_id=message.message_id)
+
+    async def _drop_prompt(self, message: Message) -> None:
+        """A "reply to this message" prompt has done its job once answered, so it leaves the chat."""
+        prompt = message.reply_to_message
+        if prompt is None or prompt.from_user is None or not prompt.from_user.is_bot:
+            return
+        try:
+            await self._bot.delete_message(message.chat.id, prompt.message_id)
+        except TelegramAPIError as exc:
+            logger.info("could not remove an answered prompt: %s", type(exc).__name__)
 
     async def _menu_action(self, member: AssistantMember, text: str) -> bool:
         """Run the pressed menu button if this role is allowed to use it."""
@@ -534,6 +554,7 @@ class LunaBot:
             await self._edit(callback, *await self._family_view(member, int(args[0])))
         elif prefix == "fama":
             await self._bot.send_message(user_id, FAMILY_PROMPT, reply_markup=ForceReply())
+            await remove_menu(callback)
         elif prefix == "famd":
             await self._edit(callback, *await self._confirm_family_delete(member, args[0]))
         elif prefix == "famy":
@@ -818,16 +839,17 @@ class LunaBot:
         image: bytes | None = None,
         image_type: str = "image/jpeg",
         message_id: int | None = None,
+        scheduled: bool = False,
     ) -> None:
         user_id = member.telegram_id
-        if not self._allow_request(user_id):
+        if not scheduled and not self._allow_request(user_id):
             await self._send(user_id, TOO_FAST)
             return
-        if member.role == "kid" and needs_adult_attention(text):
+        if not scheduled and member.role == "kid" and needs_adult_attention(text):
             await self._alert_parents(member, text)
             await self._send(user_id, SAFETY_REPLY)
             return
-        if member.role in access.FAMILY_ROLES and image is None:
+        if member.role in access.FAMILY_ROLES and image is None and not scheduled:
             family_note = family_note or family_request(text)
         if family_note is not None:
             await self._save_family_note(member, family_note)
@@ -888,7 +910,7 @@ class LunaBot:
         await self._react(user_id, message_id, DONE_REACTION if member.role == "kid" else None)
         if speak:
             await self._send_voice_reply(user_id, reply)
-        if self._memory and text != PHOTO_DEFAULT:
+        if self._memory and text != PHOTO_DEFAULT and not scheduled:
             task = asyncio.create_task(self._memory.remember(user_id, member.role, text))
             self._background.add(task)  # the event loop keeps only weak references to tasks
             task.add_done_callback(self._background.discard)
@@ -903,6 +925,13 @@ class LunaBot:
             said = await self.reminders.create(member, f"напомни {request}")
             return f"Человеку показано: {said}"
 
+        async def schedule_task(args: dict[str, Any]) -> str:
+            request = str(args.get("request") or "").strip()
+            if not request:
+                return "Не сказано, что и когда делать."
+            said = await self.reminders.create(member, f"напомни {request}", kind="do")
+            return f"Человеку показано: {said}. В это время ты сама выполнишь задание и пришлёшь результат."
+
         async def move_reminder(args: dict[str, Any]) -> str:
             number = number_of(args)
             return (
@@ -915,14 +944,14 @@ class LunaBot:
             number = number_of(args)
             return "Нет номера напоминания." if number is None else await self.reminders.cancel(member, number)
 
-        runs = (set_reminder, move_reminder, cancel_reminder)
+        runs = (set_reminder, schedule_task, move_reminder, cancel_reminder)
         actions = [
             Action(schema, run, REMINDERS_BLOCK, REMINDER_HINT)
             for schema, run in zip(REMINDER_TOOLS, runs, strict=True)
         ]
         if member.role in access.FAMILY_ROLES:
             try:
-                names = ", ".join(f"«{name}»" for name in await self.lists.names())
+                family, personal = await self.lists.names(member)
             except Exception:
                 logger.warning("could not load the family lists", exc_info=True)
                 return tuple(actions)
@@ -932,14 +961,17 @@ class LunaBot:
                 if not isinstance(items, list):
                     return "Нет пунктов."
                 result: str = await self.lists.add_from_chat(
-                    member, str(args.get("list") or ""), [str(i) for i in items]
+                    member, str(args.get("list") or ""), [str(i) for i in items], args.get("personal") is True
                 )
                 return result
 
-            actions.append(
-                Action(LIST_TOOL, add_to_list, LISTS_BLOCK.format(names=names), LISTS_HINT.format(names=names))
-            )
+            names = {"names": quoted(family), "personal": quoted(personal)}
+            actions.append(Action(LIST_TOOL, add_to_list, LISTS_BLOCK.format(**names), LISTS_HINT.format(**names)))
         return tuple(actions)
+
+    async def _run_task(self, member: AssistantMember, task: str) -> None:
+        """A task Luna was given for this time: she carries it out in the person's chat, with its history."""
+        await self._chat(member, SCHEDULED_TASK.format(task=task), scheduled=True)
 
     async def _about(self, member: AssistantMember, text: str) -> str:
         """Luna's facts about herself, only for a question about her; a failure just leaves them out."""
@@ -998,7 +1030,7 @@ class LunaBot:
                 logger.warning("could not load planner context", exc_info=True)
         if member.role in access.FAMILY_ROLES:
             try:
-                parts.append(await self.lists.planner_text())
+                parts.append(await self.lists.planner_text(member))
             except Exception:
                 logger.warning("could not load the family lists", exc_info=True)
         return "\n\n".join(part for part in parts if part)

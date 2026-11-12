@@ -9,7 +9,7 @@ from datetime import UTC, date, datetime, timedelta
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import CallbackQuery, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Message
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import access, brief, reminders
@@ -36,6 +36,8 @@ ExtractFn = Callable[[str, datetime, dict[str, object]], Awaitable[reminders.Rem
 GeocodeFn = Callable[[str], Awaitable[brief.Place | None]]
 ForecastFn = Callable[[float, float], Awaitable[brief.Forecast | None]]
 ExtraBriefFn = Callable[[int, date], Awaitable[list[str]]]
+TaskFn = Callable[[AssistantMember, str], Awaitable[None]]  # Luna carries out a task she was given for this time
+DO = "do"
 
 
 def local_now() -> datetime:
@@ -78,6 +80,7 @@ class ReminderDesk:
         geocode: GeocodeFn = brief.find_city,
         weather: ForecastFn = brief.forecast,
         extra_brief: ExtraBriefFn | None = None,
+        run_task: TaskFn | None = None,
     ) -> None:
         self._bot = bot
         self._sessions = session_factory
@@ -85,6 +88,7 @@ class ReminderDesk:
         self._geocode = geocode
         self._weather = weather
         self._extra_brief = extra_brief
+        self.run_task = run_task  # set by the bot, which owns the chat that carries a task out
 
     # ---------- creating ----------
 
@@ -98,13 +102,17 @@ class ReminderDesk:
             "tags": ["client:luna-assistant", "feature:reminder", f"role:{member.role}"],
         }
 
-    async def create(self, member: AssistantMember, text: str) -> str:
-        """Set a reminder from a phrase and show it with a cancel button; return what the person was told."""
-        said, markup = await self._create(member, text)
+    async def create(self, member: AssistantMember, text: str, kind: str = "remind") -> str:
+        """Set a reminder from a phrase and show it with a cancel button; return what the person was told.
+
+        With kind "do" Luna herself carries the task out at that time instead of ringing it."""
+        said, markup = await self._create(member, text, kind)
         await send_long(self._bot, member.telegram_id, said, markup)
         return said
 
-    async def _create(self, member: AssistantMember, text: str) -> tuple[str, InlineKeyboardMarkup | None]:
+    async def _create(
+        self, member: AssistantMember, text: str, kind: str = "remind"
+    ) -> tuple[str, InlineKeyboardMarkup | None]:
         user_id = member.telegram_id
         now = local_now()
         parts = await self._extract(text, now, self._metadata(member))
@@ -121,13 +129,31 @@ class ReminderDesk:
             )
             if (active or 0) >= MAX_ACTIVE:
                 return TOO_MANY, None
-            row = AssistantReminder(member_id=user_id, text=parts.task, due_at=to_utc(due), repeat=parts.repeat)
+            row = AssistantReminder(
+                member_id=user_id, text=parts.task, due_at=to_utc(due), repeat=parts.repeat, kind=kind
+            )
             db.add(row)
+            replaced = 0
+            if kind == DO:
+                # Seen in a real chat: "присылай слова в 11" first became a plain reminder at 11, which only
+                # rings its text. A task for the same time and repeat takes its place.
+                result = await db.execute(
+                    delete(AssistantReminder).where(
+                        AssistantReminder.member_id == user_id,
+                        AssistantReminder.kind != DO,
+                        AssistantReminder.done_at.is_(None),
+                        AssistantReminder.due_at == to_utc(due),
+                        AssistantReminder.repeat == parts.repeat,
+                    )
+                )
+                replaced = int(getattr(result, "rowcount", 0) or 0)
             await db.commit()
             reminder_id = row.id
         what = f": {parts.task}" if parts.task else ""
         cancel = InlineKeyboardMarkup(inline_keyboard=[[_button("✖ Отменить", f"rmd:{reminder_id}")]])
-        return f"🔔 Напомню {reminders.when_text(due, now, parts.repeat)}{what}", cancel
+        verb = "🗓 Сделаю сама" if kind == DO else "🔔 Напомню"
+        note = "\nОбычное напоминание на это же время убрала." if replaced else ""
+        return f"{verb} {reminders.when_text(due, now, parts.repeat)}{what}{note}", cancel
 
     # ---------- from the chat ----------
 
@@ -139,9 +165,10 @@ class ReminderDesk:
         now = local_now()
         lines = [
             f"- №{row.id}: {reminders.when_text(to_local(row.due_at), now, row.repeat)} — {row.text or 'напоминание'}"
+            + (" (это задание: в это время ты выполняешь его сама)" if row.kind == DO else "")
             for row in rows[:LIST_LIMIT]
         ]
-        return "Напоминания этого человека:\n" + "\n".join(lines)
+        return "Напоминания и задания этого человека:\n" + "\n".join(lines)
 
     async def move(self, member: AssistantMember, reminder_id: int, when: str) -> str:
         """Move one of this person's reminders to a new time said in words ("в 8:30", "завтра в 10")."""
@@ -196,7 +223,8 @@ class ReminderDesk:
             lines = ["🔔 Твои напоминания:\n"]
             for number, row in enumerate(rows[:LIST_LIMIT], start=1):
                 when = reminders.when_text(to_local(row.due_at), now, row.repeat)
-                lines.append(f"{number}. {when} — {row.text or 'напоминание'}")
+                mark = "🗓 " if row.kind == DO else ""
+                lines.append(f"{number}. {mark}{when} — {row.text or 'напоминание'}")
             if len(rows) > LIST_LIMIT:
                 lines.append(f"…и ещё {len(rows) - LIST_LIMIT}")
             lines.append(f"\nНажми номер, чтобы удалить. {HOW_TO}")
@@ -331,7 +359,7 @@ class ReminderDesk:
                 )
             )
             members = {m.telegram_id: m for m in await db.scalars(select(AssistantMember))}
-            rings = [(row.id, row.member_id, row.text, row.due_at) for row in due]
+            rings = [(row.id, row.member_id, row.text, row.due_at, row.kind) for row in due]
             for row in due:
                 after = reminders.next_time(to_local(row.due_at), row.repeat, to_local(now))
                 # Moved or closed before sending: a Telegram failure loses one ring, never repeats it forever.
@@ -341,10 +369,17 @@ class ReminderDesk:
                     row.due_at = to_utc(after)
             await db.commit()
         sent = 0
-        for reminder_id, member_id, text, planned in rings:
+        for reminder_id, member_id, text, planned, kind in rings:
             member = members.get(member_id)
             if member is None or access.access_ended(member):
                 continue
+            if kind == DO and self.run_task is not None and now - planned <= LATE_NOTE_AFTER:
+                try:
+                    await self.run_task(member, text)
+                    sent += 1
+                    continue
+                except Exception:
+                    logger.warning("could not carry out a task, ringing it instead", exc_info=True)
             body = f"🔔 {text or 'Напоминание'}"
             if now - planned > LATE_NOTE_AFTER:
                 body += f"\n(должна была напомнить {to_local(planned):%d.%m в %H:%M}, я была выключена)"

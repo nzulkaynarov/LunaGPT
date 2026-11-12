@@ -64,7 +64,12 @@ def _hearing(instance: bot.LunaBot, words: str | None) -> AsyncMock:
 
 @pytest.fixture
 def harness(monkeypatch: pytest.MonkeyPatch) -> tuple[bot.LunaBot, AsyncMock, AsyncMock]:
-    telegram = MagicMock(send_message=AsyncMock(), send_chat_action=AsyncMock(), set_message_reaction=AsyncMock())
+    telegram = MagicMock(
+        send_message=AsyncMock(),
+        send_chat_action=AsyncMock(),
+        set_message_reaction=AsyncMock(),
+        delete_message=AsyncMock(),
+    )
 
     async def shown_like_text(chat_id: int, rich: Any, reply_markup: Any = None) -> None:
         await telegram.send_message(chat_id, rich.markdown, reply_markup=reply_markup)
@@ -1750,7 +1755,7 @@ def test_the_local_model_only_learns_the_phrases() -> None:
     options = llm.ReplyOptions(actions=reminders)
     messages = [{"role": "system", "content": "база"}, {"role": "user", "content": "молоко, хлеб"}]
     assert llm.with_actions(messages, "luna-local", options)[0]["content"] == "базаФРАЗА"  # one hint for three tools
-    assert llm.with_actions(messages, "luna-fast", options)[0]["content"].count("ИНСТРУМЕНТ") == 3
+    assert llm.with_actions(messages, "luna-fast", options)[0]["content"].count("ИНСТРУМЕНТ") == 4
     assert llm.with_actions(messages, "luna-smart", llm.ReplyOptions()) == messages
     assert messages[0]["content"] == "база"
     assert "не говори, что поставила" in llm.REMINDER_HINT and "move_reminder" in llm.REMINDERS_BLOCK
@@ -1779,3 +1784,37 @@ async def test_the_local_model_gets_no_tools_and_an_unknown_call_is_refused(monk
 @pytest.mark.parametrize("role", ["owner", "adult", "kid", "guest"])
 def test_corrections_go_at_the_end(role: str) -> None:
     assert "в конце ответа, а не в начале" in llm.system_prompt(role, 11)
+
+
+@pytest.mark.asyncio
+async def test_a_scheduled_task_runs_in_the_chat_without_limits_or_memory(
+    harness: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance, send, answer = harness
+    member = _member("kid", 5)
+    _as_member(monkeypatch, member)
+    monkeypatch.setattr(instance, "_allow_request", MagicMock(return_value=False))  # the rate limit is spent
+    instance._memory = None
+    await instance._run_task(member, "пять новых английских слов")
+    assert (
+        "пять новых английских слов" in answer.call_args.args[3] and "Задание по расписанию" in answer.call_args.args[3]
+    )
+    assert _sent(send) == "ответ"
+
+
+@pytest.mark.asyncio
+async def test_an_answered_prompt_leaves_the_chat(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, _, answer = harness
+    instance.lists.add_from_reply = AsyncMock()
+    _as_member(monkeypatch, _member("kid", 5))
+    reply = _message("сок", 5)
+    reply.reply_to_message.from_user.is_bot = True
+    reply.reply_to_message.message_id = 77
+    reply.reply_to_message.text = list_desk.ADD_PROMPT.format(name="Покупки")
+    await instance.on_message(reply)
+    instance._bot.delete_message.assert_awaited_once_with(reply.chat.id, 77)
+
+    instance._bot.delete_message.reset_mock()
+    await instance.on_message(_message("просто вопрос", 5))  # an ordinary message deletes nothing
+    instance._bot.delete_message.assert_not_awaited()
+    answer.assert_awaited_once()
