@@ -35,6 +35,7 @@ from aiohttp import ClientError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import access
+from lunagpt.assistant.about import about_luna, is_about_question, owner_name
 from lunagpt.assistant.calendar_desk import CALENDAR_PREFIXES, CalendarDesk, is_calendar_request
 from lunagpt.assistant.gcal import GoogleCalendar
 from lunagpt.assistant.llm import QuizQuestion, ReplyOptions, transcribe_voice
@@ -797,6 +798,7 @@ class LunaBot:
                     earlier_photo=earlier_photo,
                     planner=await self._planner(user_id),
                     on_search=waiting.searching,
+                    about=await self._about(current, text),
                 )
                 reply = await self._answer(member.role, user_id, history, text, facts, options)
             # Later turns keep only a mark of the photo: its bytes are never stored or sent again.
@@ -816,6 +818,20 @@ class LunaBot:
             task = asyncio.create_task(self._memory.remember(user_id, member.role, text))
             self._background.add(task)  # the event loop keeps only weak references to tasks
             task.add_done_callback(self._background.discard)
+
+    async def _about(self, member: AssistantMember, text: str) -> str:
+        """Luna's facts about herself, only for a question about her; a failure just leaves them out."""
+        if not is_about_question(text):
+            return ""
+        owner = None
+        if member.role != "guest":
+            try:
+                async with self._sessions() as db:
+                    owner = await owner_name(db)
+            except Exception:
+                logger.warning("could not look up the owner", exc_info=True)
+        facts: str = about_luna(member.role, owner)
+        return facts
 
     async def _waiting(self, member: AssistantMember, text: str, speak: bool, photo: bool) -> Waiting:
         """The cat's phrases for this answer; the family's own ones are never shown to guests."""
