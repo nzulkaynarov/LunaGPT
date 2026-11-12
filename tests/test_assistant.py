@@ -355,6 +355,16 @@ async def test_gemini_speaks_and_the_lighter_voice_stands_in(monkeypatch: pytest
     assert asked[0]["input"] == "Привет! Завтра прохладно."
 
 
+def test_a_wav_wrapped_in_a_wav_loses_its_header_and_provenance_bytes() -> None:
+    pcm = array("h", (int(8000 * math.sin(i * 0.1)) for i in range(24_000))).tobytes()
+    inner = _wav(pcm) + b"C2PA" + (7_655).to_bytes(4, "little") + b"\x7f" * 7_655 + b"\0"
+    inner = inner[:4] + (len(inner) - 8).to_bytes(4, "little") + inner[8:]
+    spoken = speech.from_wav(_wav(inner))
+    decoded = audio.decode_voice(spoken.ogg)
+    assert spoken.seconds == 1
+    assert abs(len(decoded) / audio.SAMPLE_BYTES - audio.SAMPLE_RATE) < 1000  # one second, not 1.17
+
+
 @pytest.mark.asyncio
 async def test_voicing_failure_is_quiet(monkeypatch: pytest.MonkeyPatch) -> None:
     async def post(_self: Any, url: str, **_kwargs: Any) -> httpx.Response:

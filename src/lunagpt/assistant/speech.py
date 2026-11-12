@@ -131,12 +131,18 @@ def speech_endpoint() -> str:
 
 
 def from_wav(data: bytes) -> SpokenReply:
-    """Gemini answers with 16-bit mono WAV; Telegram wants OGG/Opus."""
+    """Gemini answers with 16-bit mono WAV; Telegram wants OGG/Opus.
+
+    Gemini's own WAV carries a C2PA provenance chunk after the sound, and the gateway wraps that whole file
+    as if it were raw sound: the inner header clicked at the start and the C2PA bytes hissed at the end.
+    So a WAV found inside the sound is read as a file, which keeps only its data chunk."""
     with wave.open(io.BytesIO(data)) as source:
         if source.getsampwidth() != SAMPLE_BYTES or source.getnchannels() != 1:
             raise ValueError("unexpected audio format")
         rate = source.getframerate()
         pcm = source.readframes(source.getnframes())
+    if pcm[:4] == b"RIFF" and pcm[8:12] == b"WAVE":
+        return from_wav(pcm)
     if not pcm:
         raise ValueError("empty audio")
     return SpokenReply(encode_voice(pcm, rate), max(1, round(len(pcm) / SAMPLE_BYTES / rate)))
