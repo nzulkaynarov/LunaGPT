@@ -20,7 +20,19 @@ from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
 from aiogram.types import Document, Message, Update
 
-from lunagpt.assistant import access, audio, bot, internet_desk, list_desk, llm, monitor, phrases, speech, stories
+from lunagpt.assistant import (
+    access,
+    audio,
+    bot,
+    internet_desk,
+    list_desk,
+    llm,
+    memory_desk,
+    monitor,
+    phrases,
+    speech,
+    stories,
+)
 from lunagpt.assistant.monitor import AvailabilityTracker
 from lunagpt.assistant.pi_client import PiClient, PiConflictError, PiNotFoundError, PiUnavailableError
 from lunagpt.assistant.telegram import split_message
@@ -1104,7 +1116,7 @@ async def test_kid_danger_message_is_not_remembered(harness: Any, monkeypatch: p
 @pytest.mark.asyncio
 async def test_memory_view_pages_and_delete_buttons(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     instance, _ = _with_memory(harness, monkeypatch, "owner", count=10)
-    text, markup = await instance._memory_view(_member("owner"), 1)
+    text, markup = await instance.memories.view(_member("owner"), 1)
     assert "9. факт 8" in text and "(10)" in text
     data = [b.callback_data for row in markup.inline_keyboard for b in row]
     assert all(len(item.encode()) <= 64 for item in data)
@@ -1347,7 +1359,7 @@ async def test_family_request_is_saved_without_the_model(harness: Any, monkeypat
     memory.family.add.assert_awaited_once_with(1, "Тест", "кот боится пылесоса")
     answer.assert_not_awaited()
     memory.remember.assert_not_called()
-    assert _sent(send) == bot.FAMILY_REPLIES["saved"]
+    assert _sent(send) == memory_desk.FAMILY_REPLIES["saved"]
 
 
 @pytest.mark.asyncio
@@ -1411,9 +1423,9 @@ def _labels(markup: Any) -> list[str]:
 @pytest.mark.asyncio
 async def test_memory_view_offers_family_memory_only_to_family(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     instance, _ = _with_memory(harness, monkeypatch, "kid")
-    _, markup = await instance._memory_view(_member("kid"), 0)
+    _, markup = await instance.memories.view(_member("kid"), 0)
     assert "🏠 Общая память" in _labels(markup)
-    _, markup = await instance._memory_view(_member("guest"), 0)
+    _, markup = await instance.memories.view(_member("guest"), 0)
     assert markup is None
 
 
@@ -1425,9 +1437,9 @@ def _family_note(author: int, index: int = 1) -> Any:
 async def test_child_may_delete_only_own_family_notes(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     instance, memory = _with_memory(harness, monkeypatch, "kid")
     memory.family.list_facts = AsyncMock(return_value=[_family_note(1, 1), _family_note(2, 2)])
-    _, markup = await instance._family_view(_member("kid"), 0)
+    _, markup = await instance.memories.family_view(_member("kid"), 0)
     assert [label for label in _labels(markup) if label.startswith("🗑")] == ["🗑 1"]
-    _, markup = await instance._family_view(_member("adult"), 0)
+    _, markup = await instance.memories.family_view(_member("adult"), 0)
     assert [label for label in _labels(markup) if label.startswith("🗑")] == ["🗑 1", "🗑 2"]
 
 
@@ -1439,9 +1451,9 @@ async def test_old_button_cannot_delete_someone_elses_note(harness: Any, monkeyp
     memory.family.forget = AsyncMock()
     memory.family.list_facts = AsyncMock(return_value=[note])
     callback = MagicMock(message=MagicMock(spec=Message, edit_text=AsyncMock()))
-    await instance._forget_family_fact(callback, _member("kid"), note.id.hex)
+    await instance.memories.forget_family_fact(callback, _member("kid"), note.id.hex)
     memory.family.forget.assert_not_awaited()
-    await instance._forget_family_fact(callback, _member("adult"), note.id.hex)
+    await instance.memories.forget_family_fact(callback, _member("adult"), note.id.hex)
     memory.family.forget.assert_awaited_once_with(note.id)
 
 

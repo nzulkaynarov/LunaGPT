@@ -5,7 +5,6 @@ import html
 import logging
 import re
 import time
-import uuid
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime, timedelta
@@ -18,7 +17,6 @@ from aiogram.types import (
     CallbackQuery,
     Document,
     ErrorEvent,
-    ForceReply,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -62,7 +60,14 @@ from lunagpt.assistant.llm import (
     ReplyOptions,
     transcribe_voice,
 )
-from lunagpt.assistant.memories import FAMILY_DUPLICATE, FAMILY_FAILED, FAMILY_FULL, FAMILY_SAVED, Memory
+from lunagpt.assistant.memories import Memory
+from lunagpt.assistant.memory_desk import (
+    BTN_STORY,
+    FAMILY_MEMORY_PREFIXES,
+    FAMILY_PROMPT,
+    MEMORY_PREFIXES,
+    MemoryDesk,
+)
 from lunagpt.assistant.people import PEOPLE_PREFIXES, PeopleDesk
 from lunagpt.assistant.phrases import PHRASE_PREFIXES, PhraseDesk
 from lunagpt.assistant.pi_client import PiClient
@@ -101,7 +106,6 @@ MENU_BUTTONS = {BTN_DAY, BTN_LISTS, BTN_MEMORY, BTN_INTERNET, BTN_FAMILY, BTN_HE
 # Inside those menus. The texts are also accepted as typed buttons, since older menus carried them.
 BTN_PEOPLE = "👥 Люди"
 BTN_INVITE = "➕ Пригласить"
-BTN_STORY = "🐈 Истории про Луну"
 BTN_PHRASE = "😺 Фраза для Луны"
 # Menus stay on a phone until a message brings a new one, so the old buttons keep working until then.
 OLD_BUTTONS = {
@@ -131,7 +135,6 @@ SHARED_MOVED = (
     "📺 Общие устройства теперь в боте HomeSec, кнопка «📺 Общие устройства»: там те же действия. "
     "Я занимаюсь личными делами, а домашней сетью управляет HomeSec."
 )
-MEMORY_PAGE_SIZE = 8
 FAMILY_MENU = "🏠 Семья: люди и заявки, приглашения. Телевизор и другие общие устройства — в боте HomeSec."
 
 
@@ -220,16 +223,6 @@ FAMILY_REQUEST = re.compile(
     r"[\s:,—-]*(?:что\s+)?(?P<fact>\S.*)$",
     re.IGNORECASE | re.DOTALL,
 )
-FAMILY_PROMPT = (
-    "Напиши ответом на это сообщение, что запомнить для всей семьи. "
-    "Это увидят все в семье, включая детей, поэтому не пиши пароли и номера карт."
-)
-FAMILY_REPLIES = {
-    FAMILY_SAVED: "Запомнила для всей семьи 🏠",
-    FAMILY_DUPLICATE: "Это уже есть в общей памяти.",
-    FAMILY_FULL: "Общая память заполнена. Удали что-нибудь лишнее и попробуй снова.",
-    FAMILY_FAILED: "Не получилось сохранить, попробуй чуть позже.",
-}
 SAFETY_PATTERN = re.compile(
     r"суицид|покончить с собой|убить себя|не хочу жить|порезать себя|"
     r"меня бьют|меня бьёт|меня бьет|меня трогает|домогает|меня травят|буллят|шантажиру",
@@ -335,7 +328,6 @@ class LunaBot:
         self._answer = answer
         self._pi = pi
         self._username = bot_username
-        self._memory = memory
         self._people = PeopleDesk(bot, session_factory, pi, bot_username, self._welcome)
         calendar = google_calendar()
         self.calendar = CalendarDesk(bot, session_factory, calendar)
@@ -346,6 +338,7 @@ class LunaBot:
         self.phrases = PhraseDesk(bot, session_factory)
         self.stories = StoryDesk(bot, session_factory)
         self.lists = ListDesk(bot, session_factory)
+        self.memories = MemoryDesk(bot, memory, self._forget_conversation)
         self.internet = InternetDesk(bot, session_factory, pi, make_quiz, self._today)
         self._history_loaded: set[int] = set()
         self._background: set[asyncio.Task[None]] = set()
@@ -354,6 +347,17 @@ class LunaBot:
         self._request_times: dict[int, deque[float]] = defaultdict(lambda: deque(maxlen=RATE_LIMIT))
         self._last_question: dict[int, tuple[str, float]] = {}
         self._last_photo: dict[int, tuple[bytes, str, float]] = {}  # in memory only, never stored
+
+    @property
+    def _memory(self) -> Memory | None:
+        return self.memories.memory
+
+    @_memory.setter
+    def _memory(self, value: Memory | None) -> None:
+        self.memories.memory = value
+
+    def _forget_conversation(self, user_id: int) -> None:
+        self._history[user_id].clear()
 
     async def _send(
         self,
@@ -547,7 +551,7 @@ class LunaBot:
         elif text == BTN_DAY:
             await self._send(member.telegram_id, *await self.reminders.view(member))
         elif text == BTN_MEMORY:
-            await self._send(member.telegram_id, *await self._memory_view(member, 0))
+            await self._send(member.telegram_id, *await self.memories.view(member, 0))
         elif text == BTN_LISTS and family:
             await self.lists.view(member)
         elif text == BTN_FAMILY and adult:
@@ -604,23 +608,8 @@ class LunaBot:
             await remove_menu(callback)
         elif prefix in ("sh", "shs", "shl"):  # buttons of a device list sent before the move to HomeSec
             await self._edit(callback, SHARED_MOVED, None)
-        elif prefix == "mem":
-            await self._edit(callback, *await self._memory_view(member, int(args[0])))
-        elif prefix == "memd":
-            await self._forget_fact(callback, member, args[0], int(args[1]))
-        elif prefix == "memc":
-            await self._edit(callback, *self._confirm_forget_all())
-        elif prefix == "memy":
-            await self._forget_everything(callback, user_id)
-        elif prefix == "fam":
-            await self._edit(callback, *await self._family_view(member, int(args[0])))
-        elif prefix == "fama":
-            await self._bot.send_message(user_id, FAMILY_PROMPT, reply_markup=ForceReply())
-            await remove_menu(callback)
-        elif prefix == "famd":
-            await self._edit(callback, *await self._confirm_family_delete(member, args[0]))
-        elif prefix == "famy":
-            await self._forget_family_fact(callback, member, args[0])
+        elif prefix in MEMORY_PREFIXES or prefix in FAMILY_MEMORY_PREFIXES:
+            await self.memories.handle(callback, member, prefix, args)
         elif prefix in PEOPLE_PREFIXES:
             await self._people.handle(callback, member, prefix, args)
         elif prefix in REMINDER_PREFIXES:
@@ -646,12 +635,9 @@ class LunaBot:
             return role == "kid"
         if prefix in ("fhp", "fhi"):
             return role in access.ADULT_ROLES
-        if (
-            prefix in ("mem", "memd", "memc", "memy")
-            or prefix in REMINDER_PREFIXES | SCHOOL_PREFIXES | CALENDAR_PREFIXES
-        ):
+        if prefix in MEMORY_PREFIXES or prefix in REMINDER_PREFIXES | SCHOOL_PREFIXES | CALENDAR_PREFIXES:
             return role in access.ROLES
-        if prefix in ("fam", "fama", "famd", "famy"):
+        if prefix in FAMILY_MEMORY_PREFIXES:
             return role in access.FAMILY_ROLES
         if prefix in ADULT_STORY_PREFIXES:
             return role in access.ADULT_ROLES
@@ -783,7 +769,7 @@ class LunaBot:
         if member.role in access.FAMILY_ROLES and image is None and not scheduled:
             family_note = family_note or family_request(text)
         if family_note is not None:
-            await self._save_family_note(member, family_note)
+            await self.memories.save_family_note(member, family_note)
             return
         async with self._sessions() as db:
             current = await access.get_member(db, user_id)
@@ -1052,134 +1038,6 @@ class LunaBot:
             except Exception:
                 logger.warning("could not load the conversation", exc_info=True)
         return list(self._history[user_id])
-
-    async def _save_family_note(self, member: AssistantMember, note: str) -> None:
-        if self._memory is None:
-            await self._send(member.telegram_id, FAMILY_REPLIES[FAMILY_FAILED])
-            return
-        outcome = await self._memory.family.add(member.telegram_id, member.name, note)
-        await self._send(member.telegram_id, FAMILY_REPLIES[outcome])
-
-    @staticmethod
-    def _may_delete_family_note(member: AssistantMember, author_id: int) -> bool:
-        return member.role in access.ADULT_ROLES or member.telegram_id == author_id
-
-    async def _family_view(self, member: AssistantMember, page: int) -> tuple[str, InlineKeyboardMarkup | None]:
-        if self._memory is None:
-            return "Память сейчас недоступна.", None
-        facts = await self._memory.family.list_facts()
-        last_page = max(len(facts) - 1, 0) // MEMORY_PAGE_SIZE
-        page = max(0, min(page, last_page))
-        shown = facts[page * MEMORY_PAGE_SIZE : (page + 1) * MEMORY_PAGE_SIZE]
-        first = page * MEMORY_PAGE_SIZE + 1
-        lines = [f"{first + i}. {fact.content} ({fact.author_name})" for i, fact in enumerate(shown)]
-        text = (
-            f"🏠 Общая память семьи ({len(facts)}):\n\n" + "\n".join(lines) if facts else "🏠 Общая память пока пуста."
-        )
-        delete_buttons = [
-            InlineKeyboardButton(text=f"🗑 {first + i}", callback_data=f"famd:{fact.id.hex}")
-            for i, fact in enumerate(shown)
-            if self._may_delete_family_note(member, fact.author_id)
-        ]
-        rows = [delete_buttons[i : i + 4] for i in range(0, len(delete_buttons), 4)]
-        navigation = []
-        if page > 0:
-            navigation.append(InlineKeyboardButton(text="←", callback_data=f"fam:{page - 1}"))
-        if page < last_page:
-            navigation.append(InlineKeyboardButton(text="→", callback_data=f"fam:{page + 1}"))
-        if navigation:
-            rows.append(navigation)
-        rows.append([InlineKeyboardButton(text="➕ Добавить", callback_data="fama")])
-        rows.append([InlineKeyboardButton(text="← Назад", callback_data="mem:0")])
-        return text, InlineKeyboardMarkup(inline_keyboard=rows)
-
-    async def _confirm_family_delete(
-        self, member: AssistantMember, memory_hex: str
-    ) -> tuple[str, InlineKeyboardMarkup | None]:
-        fact = await self._memory.family.get(uuid.UUID(hex=memory_hex)) if self._memory else None
-        if fact is None or not self._may_delete_family_note(member, fact.author_id):
-            return await self._family_view(member, 0)
-        markup = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="Да, удалить", callback_data=f"famy:{memory_hex}", style="danger")],
-                [InlineKeyboardButton(text="← Назад", callback_data="fam:0")],
-            ]
-        )
-        return f"Удалить для всей семьи?\n\n{fact.content}", markup
-
-    async def _forget_family_fact(self, callback: CallbackQuery, member: AssistantMember, memory_hex: str) -> None:
-        """The right to delete is checked again here, since callback data can outlive a role change."""
-        memory_id = uuid.UUID(hex=memory_hex)
-        fact = await self._memory.family.get(memory_id) if self._memory else None
-        if self._memory is not None and fact is not None and self._may_delete_family_note(member, fact.author_id):
-            await self._memory.family.forget(memory_id)
-        await self._edit(callback, *await self._family_view(member, 0))
-
-    def _with_family_button(
-        self, member: AssistantMember, view: tuple[str, InlineKeyboardMarkup | None]
-    ) -> tuple[str, InlineKeyboardMarkup | None]:
-        if member.role not in access.FAMILY_ROLES:
-            return view
-        text, markup = view
-        rows = [*(markup.inline_keyboard if markup else [])]
-        rows.append(
-            [
-                InlineKeyboardButton(text="🏠 Общая память", callback_data="fam:0"),
-                InlineKeyboardButton(text=BTN_STORY, callback_data="csi"),
-            ]
-        )
-        return text, InlineKeyboardMarkup(inline_keyboard=rows)
-
-    async def _memory_view(self, member: AssistantMember, page: int) -> tuple[str, InlineKeyboardMarkup | None]:
-        return self._with_family_button(member, await self._personal_view(member.telegram_id, page))
-
-    async def _personal_view(self, user_id: int, page: int) -> tuple[str, InlineKeyboardMarkup | None]:
-        if self._memory is None:
-            return "Память сейчас недоступна.", None
-        facts = await self._memory.list_facts(user_id)
-        if not facts:
-            return "Пока ничего о тебе не запомнила. Расскажи о себе, и я учту это в разговорах.", None
-        last_page = (len(facts) - 1) // MEMORY_PAGE_SIZE
-        page = max(0, min(page, last_page))
-        shown = facts[page * MEMORY_PAGE_SIZE : (page + 1) * MEMORY_PAGE_SIZE]
-        first = page * MEMORY_PAGE_SIZE + 1
-        lines = [f"{first + i}. {fact.content}" for i, fact in enumerate(shown)]
-        text = f"👤 Что я о тебе помню ({len(facts)}):\n\n" + "\n".join(lines) + "\n\nНажми номер, чтобы удалить."
-        delete_buttons = [
-            InlineKeyboardButton(text=f"🗑 {first + i}", callback_data=f"memd:{fact.id.hex}:{page}")
-            for i, fact in enumerate(shown)
-        ]
-        rows = [delete_buttons[i : i + 4] for i in range(0, len(delete_buttons), 4)]
-        navigation = []
-        if page > 0:
-            navigation.append(InlineKeyboardButton(text="←", callback_data=f"mem:{page - 1}"))
-        if page < last_page:
-            navigation.append(InlineKeyboardButton(text="→", callback_data=f"mem:{page + 1}"))
-        if navigation:
-            rows.append(navigation)
-        rows.append([InlineKeyboardButton(text="Очистить всё", callback_data="memc", style="danger")])
-        return text, InlineKeyboardMarkup(inline_keyboard=rows)
-
-    async def _forget_fact(self, callback: CallbackQuery, member: AssistantMember, memory_hex: str, page: int) -> None:
-        if self._memory is not None:
-            await self._memory.forget(member.telegram_id, uuid.UUID(hex=memory_hex))
-        await self._edit(callback, *await self._memory_view(member, page))
-
-    @staticmethod
-    def _confirm_forget_all() -> tuple[str, InlineKeyboardMarkup]:
-        markup = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="Да, забыть всё", callback_data="memy", style="danger")],
-                [InlineKeyboardButton(text="← Назад", callback_data="mem:0")],
-            ]
-        )
-        return "Забыть всё, что я о тебе знаю, и наш последний разговор? Отменить будет нельзя.", markup
-
-    async def _forget_everything(self, callback: CallbackQuery, user_id: int) -> None:
-        if self._memory is not None:
-            await self._memory.forget_all(user_id)
-        self._history[user_id].clear()
-        await self._edit(callback, "Готово, всё забыла.", None)
 
     async def _raised_alarm(self, member: AssistantMember, text: str) -> bool:
         """A child's words that need an adult: tell the parents and answer gently; True when it happened."""
