@@ -1,7 +1,7 @@
 [project]
 name = "lunagpt"
-version = "0.2.0"
-description = "LunaGPT: Autonomous sovereign AI gateway, document RAG, and self-improving agent flywheel"
+version = "0.4.0"
+description = "LunaGPT: Luna, the family assistant in Telegram, on its own model gateway"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
@@ -14,14 +14,10 @@ dependencies = [
     "pgvector>=0.3.0",
     "alembic>=1.13.0",
     "httpx>=0.27.0",
-    "redis>=5.0.0",
     "python-multipart>=0.0.9",
-    "pypdf>=5.0.0",
-    "python-docx>=1.1.0",
     "aiogram>=3.13,<4",
     "phonenumberslite>=9,<10",
     "av>=14,<17",
-    "piper-tts>=1.4,<2",
     "google-auth[requests]>=2.35,<3",
 ]
 
@@ -31,7 +27,6 @@ dev = [
     "pytest-asyncio>=0.24.0",
     "ruff>=0.6.0",
     "mypy>=1.11.0",
-    "types-redis>=4.6.0",
 ]
 
 [build-system]

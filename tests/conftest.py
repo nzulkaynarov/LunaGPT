@@ -32,8 +32,6 @@ os.environ.update(
         "LUNA_PI_API_TOKEN": "test-pi-token",
         "LUNA_TELEGRAM_BOT_TOKEN": "",
         "LUNA_GOOGLE_SERVICE_ACCOUNT": "",
-        "OPENWEBUI_FEEDBACK_SYNC_INTERVAL_SECONDS": "0",
-        "OPENWEBUI_DATABASE_URL": "postgresql+psycopg://postgres:test@127.0.0.1:9/openwebui",
     }
 )
 

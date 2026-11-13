@@ -33,55 +33,6 @@ services:
       - langfuse-server
 
   # ============================================================================
-  # 3. LunaGPT Web UI (Open WebUI)
-  # ============================================================================
-  open-webui:
-    image: ghcr.io/open-webui/open-webui:main-slim
-    container_name: lunagpt-webui
-    restart: unless-stopped
-    # Unused since 2026-11-08; starts only with `docker compose --profile webui up`.
-    profiles: ["webui"]
-    ports:
-      - "127.0.0.1:${WEBUI_PORT:-3000}:8080"
-    environment:
-      - OPENAI_API_BASE_URL=http://core:8010/v1
-      - OPENAI_API_KEY=${LITELLM_MASTER_KEY}
-      - ENABLE_OLLAMA_API=False
-      - WEBUI_NAME=LunaGPT
-      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY}
-      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@langfuse-db:5432/openwebui
-      - ENABLE_FORWARD_USER_INFO_HEADERS=True
-      - FORWARD_USER_INFO_HEADERS=True
-      - FORWARD_SESSION_INFO_HEADERS=True
-      - RAG_EMBEDDING_ENGINE=openai
-      - RAG_OPENAI_API_BASE_URL=http://core:8010/v1
-      - RAG_OPENAI_API_KEY=${LITELLM_MASTER_KEY}
-      - RAG_EMBEDDING_MODEL=luna-embed
-      - CONTENT_EXTRACTION_ENGINE=external
-      - EXTERNAL_DOCUMENT_LOADER_URL=http://core:8010
-      - EXTERNAL_DOCUMENT_LOADER_API_KEY=${LITELLM_MASTER_KEY}
-      - VECTOR_DB=pgvector
-      - PGVECTOR_DB_URL=postgresql://postgres:${POSTGRES_PASSWORD}@langfuse-db:5432/openwebui
-      - PGVECTOR_INITIALIZE_MAX_VECTOR_LENGTH=1024
-      - BYPASS_MODEL_ACCESS_CONTROL=True
-      - BYPASS_RETRIEVAL_ACCESS_CONTROL=True
-      - DEFAULT_USER_ROLE=user
-      - DEFAULT_MODELS=luna-smart
-      - TASK_MODEL=luna-fast
-      - TASK_MODEL_EXTERNAL=luna-fast
-      - AUDIO_STT_ENGINE=web
-      - AUDIO_TTS_ENGINE=
-      - ENABLE_WEB_SEARCH=True
-      - WEB_SEARCH_ENGINE=searxng
-      - SEARXNG_QUERY_URL=http://searxng:8080/search?q=<query>
-    volumes:
-      - open-webui-data:/app/backend/data
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    depends_on:
-      - core
-
-  # ============================================================================
   # 4. Langfuse Server (LLM Observability, Metrics & Tracing)
   # ============================================================================
   langfuse-server:
@@ -163,28 +114,34 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:8010:8010"
-    volumes:
-      - ./src:/app/src:ro
-      - ./migrations:/app/migrations:ro
-      - ./alembic.ini:/app/alembic.ini:ro
-    command: ["sh", "-c", "alembic upgrade head && python3 -m uvicorn lunagpt.api:app --host 0.0.0.0 --port 8010"]
+    command: ["python3", "-m", "uvicorn", "lunagpt.api:app", "--host", "0.0.0.0", "--port", "8010"]
     environment:
       - CORE_API_KEY=${CORE_API_KEY:-}
       - LITELLM_ENDPOINT=http://litellm:4000/v1/chat/completions
       - LITELLM_EMBEDDINGS_ENDPOINT=http://litellm:4000/v1/embeddings
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
       - LUNAGPT_DATABASE_URL=postgresql+psycopg://postgres:${POSTGRES_PASSWORD}@langfuse-db:5432/lunagpt
-      - OPENWEBUI_DATABASE_URL=postgresql+psycopg://postgres:${POSTGRES_PASSWORD}@langfuse-db:5432/openwebui
-      - LANGFUSE_HOST=${LANGFUSE_HOST:-http://langfuse-server:3000}
-      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:?set LANGFUSE_PUBLIC_KEY in .env}
-      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:?set LANGFUSE_SECRET_KEY in .env}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
-      langfuse-db:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       litellm:
         condition: service_started
+
+  # ============================================================================
+  # Schema migrations: runs once on every `docker compose up`, the services wait for it.
+  # ============================================================================
+  migrate:
+    image: lunagpt-core:local
+    container_name: lunagpt-migrate
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      - LUNAGPT_DATABASE_URL=postgresql+psycopg://postgres:${POSTGRES_PASSWORD}@langfuse-db:5432/lunagpt
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
 
   # ============================================================================
   # 8. Luna AI Assistant (Telegram assistant for the family)
@@ -195,8 +152,6 @@ services:
     mem_limit: 768m
     oom_score_adj: -500
     restart: unless-stopped
-    volumes:
-      - ./src:/app/src:ro
     command: ["python3", "-m", "lunagpt.assistant"]
     healthcheck:
       disable: true
@@ -210,12 +165,11 @@ services:
       - LUNAGPT_DATABASE_URL=postgresql+psycopg://postgres:${POSTGRES_PASSWORD}@langfuse-db:5432/lunagpt
       - SEARXNG_URL=http://searxng:8080
     depends_on:
-      langfuse-db:
-        condition: service_healthy
-      core:
-        condition: service_started
+      migrate:
+        condition: service_completed_successfully
 
 volumes:
+  # Open WebUI was removed on 2026-11-13; its volume and the openwebui database keep the old chats.
   open-webui-data:
     name: lunagpt_open_webui_data
   langfuse-db-data:

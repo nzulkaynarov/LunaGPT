@@ -1,45 +1,29 @@
-"""FastAPI Application exposing LunaGPT Core endpoints."""
+"""LunaGPT Core: speech-to-text for the HomeSec bot, and nothing else.
 
-import asyncio
+Everything else the platform once served (smart routing, document RAG, Open WebUI feedback) had
+no users and was removed on 2026-11-13. This service goes away too once HomeSec sends voice notes
+straight to the gateway with its own key.
+"""
+
 import base64
 import json
 import logging
 import secrets
 import uuid
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from typing import Any
-from urllib.parse import unquote
 
 import httpx
-from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lunagpt.config import settings
-from lunagpt.db import async_session_factory, get_db_session
-from lunagpt.schemas import (
-    ChatCompletionRequest,
-    DeleteResponse,
-    DocumentIngestResponse,
-    DocumentItem,
-    DocumentListResponse,
-    FeedbackRequest,
-    FeedbackResponse,
-    ModelItem,
-    ModelListResponse,
-    PromptRequest,
-    PromptResponse,
-)
-from lunagpt.services.feedback_sync import sync_openwebui_feedback
-from lunagpt.services.ingestion import delete_document, extract_text, ingest_document, list_documents
-from lunagpt.services.memory import export_dpo_dataset, save_feedback_memory
-from lunagpt.services.router import execute_openai_chat_completion, execute_smart_routing
+from lunagpt.db import get_db_session
 
 logger = logging.getLogger("lunagpt.api")
 bearer_scheme = HTTPBearer(auto_error=False)
+VERSION = "0.4.0"
 
 
 async def verify_auth(
@@ -65,132 +49,24 @@ async def verify_auth(
         )
 
 
-async def _feedback_sync_loop(interval_seconds: int) -> None:
-    """Periodically forward new Open WebUI ratings to Langfuse."""
-    while True:
-        await asyncio.sleep(interval_seconds)
-        try:
-            async with async_session_factory() as db:
-                result = await sync_openwebui_feedback(db)
-            if result.get("synced_count"):
-                logger.info("Synced %s Open WebUI ratings", result["synced_count"])
-        except Exception:
-            logger.exception("Open WebUI feedback sync loop failed")
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Application lifespan manager."""
-    logger.info("LunaGPT Core API starting up...")
-    interval = settings.openwebui_feedback_sync_interval_seconds
-    sync_task = asyncio.create_task(_feedback_sync_loop(interval)) if interval > 0 else None
-    yield
-    if sync_task is not None:
-        sync_task.cancel()
-    logger.info("LunaGPT Core API shutting down...")
-
-
-app = FastAPI(
-    title="LunaGPT Core API",
-    description="Intelligent routing, document RAG, and self-improving memory engine",
-    version="0.3.0",
-    lifespan=lifespan,
-)
+app = FastAPI(title="LunaGPT Core", description="Speech-to-text for the HomeSec bot", version=VERSION)
 
 
 @app.get("/health")
 async def health_check() -> dict[str, str]:
     """Fast liveness probe."""
-    return {"status": "ok", "service": "lunagpt-core", "version": "0.3.0"}
+    return {"status": "ok", "service": "lunagpt-core", "version": VERSION}
 
 
 @app.get("/ready")
 async def readiness_check(db: AsyncSession = Depends(get_db_session)) -> dict[str, Any]:
-    """Readiness probe checking database connectivity and LiteLLM gateway status."""
-    db_ok = False
+    """Readiness: the database answers."""
     try:
-        res = await db.execute(text("SELECT 1"))
-        if res.scalar() == 1:
-            db_ok = True
-    except Exception as exc:
-        logger.warning("Readiness probe DB check failed: %s", exc)
-
-    gateway_ok = False
-    try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            resp = await client.get(settings.litellm_endpoint.replace("/chat/completions", "/health/readiness"))
-            gateway_ok = resp.status_code in (200, 404)
-    except Exception:
-        pass
-
-    status = "ok" if (db_ok and gateway_ok) else "degraded"
-    return {
-        "status": status,
-        "database": "connected" if db_ok else "unreachable",
-        "gateway": "reachable" if gateway_ok else "unreachable",
-    }
-
-
-@app.get("/v1/models", response_model=ModelListResponse)
-async def list_models(_: None = Depends(verify_auth)) -> ModelListResponse:
-    """Standard OpenAI /v1/models endpoint offering the 3-tier curated lineup."""
-    return ModelListResponse(
-        object="list",
-        data=[
-            ModelItem(id="luna-smart", owned_by="anthropic"),
-            ModelItem(id="luna-fast", owned_by="google"),
-            ModelItem(id="luna-pro", owned_by="anthropic"),
-        ],
-    )
-
-
-@app.post("/v1/chat/completions")
-async def openai_chat_completions(
-    req: ChatCompletionRequest,
-    request: Request,
-    db: AsyncSession = Depends(get_db_session),
-    _: None = Depends(verify_auth),
-) -> Response:
-    """OpenAI-compatible chat completions with dynamic memory, attribution, and streaming."""
-    try:
-        json_data, stream_gen, trace_id = await execute_openai_chat_completion(db, req, request=request)
-        if stream_gen is not None:
-            return StreamingResponse(
-                stream_gen,
-                media_type="text/event-stream",
-                headers={"X-Trace-Id": trace_id},
-            )
-        if json_data is not None:
-            json_data["x_lunagpt_trace_id"] = trace_id
-            json_data["trace_id"] = trace_id
-            return Response(
-                content=json.dumps(json_data),
-                media_type="application/json",
-                headers={"X-Trace-Id": trace_id},
-            )
-        return Response(content="{}", media_type="application/json", headers={"X-Trace-Id": trace_id})
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.post("/v1/embeddings")
-async def openai_embeddings(req: dict[str, Any] = Body(...), _: None = Depends(verify_auth)) -> Response:
-    """OpenAI-compatible embeddings endpoint forwarding to LiteLLM (bge-m3)."""
-    payload = dict(req)
-    payload["model"] = "luna-embed"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {settings.litellm_master_key}",
-    }
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(settings.litellm_embeddings_endpoint, json=payload, headers=headers)
-            resp.raise_for_status()
-            return Response(content=resp.content, media_type="application/json")
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        db_ok = (await db.execute(text("SELECT 1"))).scalar() == 1
+    except Exception as exc:  # noqa: BLE001 — a probe reports, never raises
+        logger.warning("Readiness probe DB check failed: %s", type(exc).__name__)
+        db_ok = False
+    return {"status": "ok" if db_ok else "degraded", "database": "connected" if db_ok else "unreachable"}
 
 
 MAX_AUDIO_SIZE_BYTES = 25 * 1024 * 1024  # 25 MB standard OpenAI limit
@@ -287,139 +163,3 @@ async def audio_transcriptions(
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Transcription failed: {exc}") from exc
-
-
-@app.api_route("/process", methods=["PUT", "POST"])
-async def process_external_document(request: Request, _: None = Depends(verify_auth)) -> dict[str, Any]:
-    """External document extractor endpoint compatible with Open WebUI ExternalDocumentLoader."""
-    raw_filename = request.headers.get("X-Filename") or request.headers.get("x-filename") or "document.txt"
-    filename = unquote(raw_filename)
-    content_bytes = await request.body()
-    if len(content_bytes) > settings.max_upload_size_bytes:
-        raise HTTPException(
-            status_code=413,
-            detail=f"Uploaded file exceeds {settings.max_upload_size_bytes // (1024 * 1024)}MB size limit",
-        )
-    try:
-        text = extract_text(filename, content_bytes)
-        if not text or not text.strip():
-            text = f"[Document: {filename}]"
-        return {
-            "page_content": text,
-            "metadata": {
-                "source": filename,
-                "content_type": request.headers.get("Content-Type", "application/octet-stream"),
-            },
-        }
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Document extraction failed: {exc}") from exc
-
-
-@app.post("/api/v1/chat", response_model=PromptResponse)
-async def chat_endpoint(
-    req: PromptRequest,
-    db: AsyncSession = Depends(get_db_session),
-    _: None = Depends(verify_auth),
-) -> PromptResponse:
-    """Execute routed chat prompt with memory and RAG injection."""
-    try:
-        return await execute_smart_routing(db, req)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.post("/api/v1/feedback", response_model=FeedbackResponse)
-async def feedback_endpoint(
-    req: FeedbackRequest,
-    db: AsyncSession = Depends(get_db_session),
-    _: None = Depends(verify_auth),
-) -> FeedbackResponse:
-    """Save user correction/mistake to pgvector memory."""
-    try:
-        mem_id = await save_feedback_memory(db, req)
-        return FeedbackResponse(
-            success=True,
-            memory_id=str(mem_id),
-            message="Feedback and correction successfully vectorized and stored in pgvector.",
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.post("/api/v1/feedback/sync-openwebui")
-async def sync_openwebui_feedback_endpoint(
-    db: AsyncSession = Depends(get_db_session),
-    _: None = Depends(verify_auth),
-) -> dict[str, Any]:
-    """Synchronize user ratings and evaluations from Open WebUI database to LunaGPT pgvector memory."""
-    try:
-        res = await sync_openwebui_feedback(db)
-        return dict(res)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.post("/api/v1/documents/ingest", response_model=DocumentIngestResponse)
-async def ingest_document_endpoint(
-    file: UploadFile = File(...),
-    db: AsyncSession = Depends(get_db_session),
-    _: None = Depends(verify_auth),
-) -> DocumentIngestResponse:
-    """Ingest document (PDF, TXT, MD), compute embeddings, and store in pgvector."""
-    try:
-        content = await file.read()
-        if len(content) > settings.max_upload_size_bytes:
-            raise HTTPException(
-                status_code=413,
-                detail=f"Document exceeds {settings.max_upload_size_bytes // (1024 * 1024)}MB size limit",
-            )
-        doc_id, chunks_count, duration = await ingest_document(db, file.filename or "unknown.txt", content)
-        return DocumentIngestResponse(
-            document_id=str(doc_id),
-            title=file.filename or "unknown.txt",
-            file_type=file.filename.split(".")[-1] if file.filename else "txt",
-            chunks_count=chunks_count,
-            duration_sec=duration,
-        )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.get("/api/v1/documents", response_model=DocumentListResponse)
-async def get_documents(
-    db: AsyncSession = Depends(get_db_session), _: None = Depends(verify_auth)
-) -> DocumentListResponse:
-    """List all ingested documents and their chunk counts."""
-    docs = await list_documents(db)
-    items = [DocumentItem(**d) for d in docs]
-    return DocumentListResponse(documents=items, total=len(items))
-
-
-@app.delete("/api/v1/documents/{document_id}", response_model=DeleteResponse)
-async def remove_document(
-    document_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db_session),
-    _: None = Depends(verify_auth),
-) -> DeleteResponse:
-    """Delete an ingested document and its chunks."""
-    deleted = await delete_document(db, document_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Document not found")
-    return DeleteResponse(success=True, message=f"Document {document_id} and associated chunks deleted successfully.")
-
-
-@app.get("/api/v1/feedback/export-dpo")
-async def export_dpo(
-    mode: str = "dpo",
-    db: AsyncSession = Depends(get_db_session),
-    _: None = Depends(verify_auth),
-) -> list[dict[str, Any]]:
-    """Export feedback memory pairs as training records (mode='dpo' for pairs with rejected, mode='sft' for all)."""
-    try:
-        require_rejected = mode.lower() != "sft"
-        data: list[dict[str, Any]] = await export_dpo_dataset(db, require_rejected=require_rejected)
-        return data
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc

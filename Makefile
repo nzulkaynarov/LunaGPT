@@ -1,5 +1,5 @@
 # LunaGPT Management Makefile
-.PHONY: help setup up down restart logs status test-router test lint clean
+.PHONY: help setup up down restart logs status test lint clean
 
 help: ## Показать список доступных команд
 	@grep -E '^[a-z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -36,17 +36,12 @@ status: ## Проверить статус контейнеров и локал�
 	@echo "\n--- Статус локальной Ollama (GPU RX 580) ---"
 	@curl -s http://127.0.0.1:11434/api/ps || echo "Ollama не отвечает"
 
-test-router: ## Протестировать логический роутер агентов
-	uv run python3 agents/router_agent.py "Спроектируй схему шины событий для ERP"
-	uv run python3 agents/router_agent.py "Напиши юнит-тест на Python для проверки авторизации"
-	uv run python3 agents/router_agent.py "Этот код не работает и возвращает ошибку"
-
 test: ## Запуск модульных тестов
 	uv run pytest tests/ -v
 
 lint: ## Проверка качества кода с ruff и mypy
-	uv run ruff check src/ tests/ agents/ config/
-	uv run ruff format --check src/ tests/ agents/ config/
+	uv run ruff check src/ tests/ config/
+	uv run ruff format --check src/ tests/ config/
 	uv run mypy src/ tests/
 
 clean: ## Удалить ВСЕ данные (память семьи, ключи шлюза, трассы); спросит подтверждение

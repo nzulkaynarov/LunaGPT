@@ -37,12 +37,6 @@ COPY README.md pyproject.toml alembic.ini /app/
 COPY src /app/src
 COPY migrations /app/migrations
 
-# Luna's local voices, pinned by revision and checksum
-ADD --checksum=sha256:8ff38212d23da300bbe3705c645e6e5b9475f0bfde01558eb17813e22acaaaaa https://huggingface.co/rhasspy/piper-voices/resolve/cf910fb59f1d79ab3b625a63993a108751c6c25d/ru/ru_RU/irina/medium/ru_RU-irina-medium.onnx /app/voices/ru_RU-irina-medium.onnx
-ADD --checksum=sha256:c2ec28bb38e2b59e93b959b3e40348c1afebbd272f30fed5d41205d08e98a9d7 https://huggingface.co/rhasspy/piper-voices/resolve/cf910fb59f1d79ab3b625a63993a108751c6c25d/ru/ru_RU/irina/medium/ru_RU-irina-medium.onnx.json /app/voices/ru_RU-irina-medium.onnx.json
-ADD --checksum=sha256:5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f https://huggingface.co/rhasspy/piper-voices/resolve/cf910fb59f1d79ab3b625a63993a108751c6c25d/en/en_US/lessac/medium/en_US-lessac-medium.onnx /app/voices/en_US-lessac-medium.onnx
-ADD --checksum=sha256:efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0 https://huggingface.co/rhasspy/piper-voices/resolve/cf910fb59f1d79ab3b625a63993a108751c6c25d/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json /app/voices/en_US-lessac-medium.onnx.json
-
 # Security: run as unprivileged user
 RUN groupadd -r lunagpt && useradd -r -g lunagpt -d /app -s /sbin/nologin lunagpt && \
     chown -R lunagpt:lunagpt /app

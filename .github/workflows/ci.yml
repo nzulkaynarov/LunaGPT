@@ -42,13 +42,13 @@ jobs:
         run: uv sync --all-groups
 
       - name: Run Ruff Linting
-        run: uv run ruff check src/ tests/ agents/ config/ migrations/
+        run: uv run ruff check src/ tests/ config/ migrations/
 
       - name: Run Ruff Formatting Check
-        run: uv run ruff format --check src/ tests/ agents/ config/ migrations/
+        run: uv run ruff format --check src/ tests/ config/ migrations/
 
       - name: Run Mypy Type Check
-        run: uv run mypy src/ tests/ agents/ config/
+        run: uv run mypy src/ tests/ config/
 
       - name: Apply database migrations
         run: uv run alembic upgrade head

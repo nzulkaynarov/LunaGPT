@@ -14,15 +14,8 @@ class Settings(BaseSettings):
     require_auth: bool = True
     max_upload_size_bytes: int = 50 * 1024 * 1024  # 50MB
 
-    # Langfuse Observability
-    langfuse_host: str = "http://localhost:3001"
-    langfuse_public_key: str = ""
-    langfuse_secret_key: str = ""
-
-    # Dedicated PostgreSQL with pgvector for LunaGPT Core & Open WebUI
+    # PostgreSQL with pgvector: Luna's data
     lunagpt_database_url: str = "postgresql+psycopg://postgres@localhost:5433/lunagpt"
-    openwebui_database_url: str = "postgresql+psycopg://postgres@localhost:5433/openwebui"
-    openwebui_feedback_sync_interval_seconds: int = 300  # 0 disables the background sync
 
     # Luna AI Assistant (Telegram bot for the family)
     luna_telegram_bot_token: str = ""
@@ -34,9 +27,6 @@ class Settings(BaseSettings):
     luna_phone_region: str = "UZ"
     # The service account's JSON key, on one line; empty keeps Google Calendar off.
     luna_google_service_account: str = ""
-
-    # Redis Cache
-    redis_url: str = "redis://localhost:6380/0"
 
     model_config = SettingsConfigDict(
         env_file=".env",
