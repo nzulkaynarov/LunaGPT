@@ -16,7 +16,7 @@ Telegram ──► luna-assistant (aiogram, long polling)
                 ├─► SearXNG (поиск в интернете)
                 └─► HomeSec на Pi (люди, время в интернете детей)
 
-HomeSec на Pi ──► LiteLLM gateway (свой ключ с лимитом) и core :8010 (распознавание голоса)
+HomeSec на Pi ──► LiteLLM gateway (свой ключ с лимитом: команды, голос, репетитор)
 ```
 
 | Сервис | Контейнер | Зачем |
@@ -26,7 +26,6 @@ HomeSec на Pi ──► LiteLLM gateway (свой ключ с лимитом) 
 | База | `lunagpt-postgres` | Базы `lunagpt`, `litellm`, `langfuse` и сохранённая `openwebui` |
 | Трассы | `lunagpt-langfuse` | Langfuse v2, логгер `config/langfuse_v2_logger.py` |
 | Поиск | `lunagpt-searxng` | Поиск для ответов Luna |
-| Core | `lunagpt-core` | Только распознавание голоса для HomeSec, уйдёт после перевода HomeSec на шлюз |
 | Миграции | `lunagpt-migrate` | Alembic при каждом запуске, остальные ждут его |
 
 Модели Luna и их порядок для каждой функции заданы в `src/lunagpt/assistant/llm.py`; запасных цепочек у моделей `luna-*` на шлюзе нет.
@@ -49,7 +48,7 @@ uv run pytest tests/
 git pull && scripts/deploy.sh
 ```
 
-Скрипт собирает образ текущего коммита, сохраняет работающий как `lunagpt-core:previous`, применяет миграции, перезапускает core и Luna и откатывается, если Luna не поднялась. Код берётся из образа, рабочая папка в контейнеры не подключается.
+Скрипт собирает образ текущего коммита, сохраняет работающий как `lunagpt-core:previous`, применяет миграции, перезапускает Luna и откатывается, если Luna не поднялась. Код берётся из образа, рабочая папка в контейнеры не подключается.
 
 ## Эксплуатация
 

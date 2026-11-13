@@ -7,7 +7,7 @@ help: ## Показать список доступных команд
 setup: ## Создать .env из .env.example (если не создан)
 	@if [ ! -f .env ]; then cp .env.example .env && echo "✓ Файл .env создан. Заполните API ключи в .env"; else echo "✓ Файл .env уже существует"; fi
 
-up: setup ## Запустить LunaGPT (шлюз, база, трассы, поиск, core, Luna)
+up: setup ## Запустить LunaGPT (шлюз, база, трассы, поиск, Luna)
 	docker compose up -d
 	@echo "Langfuse: http://localhost:3001  Шлюз: http://localhost:4000  Поиск: http://localhost:8082"
 

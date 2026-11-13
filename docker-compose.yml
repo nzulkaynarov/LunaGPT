@@ -102,37 +102,12 @@ services:
       - SEARXNG_BASE_URL=http://localhost:8082/
 
   # ============================================================================
-  # 7. LunaGPT Core Service (FastAPI Active Learning, Memory & RAG)
-  # ============================================================================
-  core:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: lunagpt-core:local
-    container_name: lunagpt-core
-    mem_limit: 512m
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:8010:8010"
-    command: ["python3", "-m", "uvicorn", "lunagpt.api:app", "--host", "0.0.0.0", "--port", "8010"]
-    environment:
-      - CORE_API_KEY=${CORE_API_KEY:-}
-      - LITELLM_ENDPOINT=http://litellm:4000/v1/chat/completions
-      - LITELLM_EMBEDDINGS_ENDPOINT=http://litellm:4000/v1/embeddings
-      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
-      - LUNAGPT_DATABASE_URL=postgresql+psycopg://postgres:${POSTGRES_PASSWORD}@langfuse-db:5432/lunagpt
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-      litellm:
-        condition: service_started
-
-  # ============================================================================
   # Schema migrations: runs once on every `docker compose up`, the services wait for it.
   # ============================================================================
   migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: lunagpt-core:local
     container_name: lunagpt-migrate
     restart: "no"

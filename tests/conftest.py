@@ -21,7 +21,6 @@ os.environ.update(
     {
         "LITELLM_MASTER_KEY": "test-master-key",
         "LITELLM_ASSISTANT_KEY": "test-assistant-key",
-        "CORE_API_KEY": "test-core-key",
         "LANGFUSE_HOST": NOWHERE,
         "LANGFUSE_PUBLIC_KEY": "pk-lf-test",
         "LANGFUSE_SECRET_KEY": "sk-lf-test",

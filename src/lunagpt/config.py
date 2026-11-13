@@ -10,7 +10,6 @@ class Settings(BaseSettings):
     litellm_endpoint: str = "http://localhost:4000/v1/chat/completions"
     litellm_embeddings_endpoint: str = "http://localhost:4000/v1/embeddings"
     litellm_master_key: str = ""
-    core_api_key: str = ""
     require_auth: bool = True
     max_upload_size_bytes: int = 50 * 1024 * 1024  # 50MB
 

@@ -98,50 +98,24 @@ model_list:
       output_cost_per_token: 0.000020000
 
   # ----------------------------------------------------------------------------
-  # 5. Совместимость с HomeSec (Алиасы claude-opus-4-8 и claude-haiku-4-5)
+  # 5. HomeSec: платная поддержка, когда luna-fast не справилась (HomeSec сам решает, когда переходить)
   # ----------------------------------------------------------------------------
-  - model_name: claude-opus-4-8
-    litellm_params:
-      model: anthropic/claude-opus-4-6
-      api_key: os.environ/ANTHROPIC_API_KEY
-    model_info:
-      description: "HomeSec Reasoning: маппинг на Claude Opus 4.6"
-      mode: chat
-      input_cost_per_token: 0.000005000
-      output_cost_per_token: 0.000025000
-      cache_read_input_token_cost: 0.000000500
-      cache_creation_input_token_cost: 0.000006250
-
   - model_name: claude-sonnet-4-6
     litellm_params:
       model: anthropic/claude-sonnet-4-6
       api_key: os.environ/ANTHROPIC_API_KEY
     model_info:
-      description: "HomeSec Tutor: Claude Sonnet 4.6 для детского репетитора"
+      description: "HomeSec support: Claude Sonnet 4.6 when luna-fast could not answer"
       mode: chat
       input_cost_per_token: 0.000003000
       output_cost_per_token: 0.000015000
       cache_read_input_token_cost: 0.000000300
       cache_creation_input_token_cost: 0.000003750
 
-  - model_name: claude-haiku-4-5
-    litellm_params:
-      model: gemini/gemini-3.5-flash-lite
-      api_key: os.environ/GEMINI_API_KEY
-    model_info:
-      description: "HomeSec Fast: маппинг на сверхбыстрый Gemini Flash Lite"
-      mode: chat
-      input_cost_per_token: 0.000000300
-      output_cost_per_token: 0.000002500
-
 router_settings:
   # Luna chooses its own order of models per feature (assistant/llm.py), so luna-* groups have no
   # gateway fallbacks: a text-only coder model answering a tool or audio request invents results.
-  # The claude-* aliases serve HomeSec and keep theirs.
-  fallbacks:
-    - claude-opus-4-8: ["claude-haiku-4-5", "luna-coder"]
-    - claude-sonnet-4-6: ["claude-haiku-4-5"]
-    - claude-haiku-4-5: ["claude-sonnet-4-6"]
+  # HomeSec climbs its own ladder too (luna-fast, then claude-sonnet-4-6), so no group has fallbacks here.
   allowed_fails: 2
   cooldown_time: 30
 

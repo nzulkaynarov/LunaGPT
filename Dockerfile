@@ -1,5 +1,5 @@
 # ============================================================================
-# LunaGPT Core API - Multi-stage Sovereign AI Service Container
+# LunaGPT image: Luna (the family assistant) and the schema migrations
 # ============================================================================
 FROM python:3.12-slim-bookworm AS builder
 
@@ -42,9 +42,4 @@ RUN groupadd -r lunagpt && useradd -r -g lunagpt -d /app -s /sbin/nologin lunagp
     chown -R lunagpt:lunagpt /app
 USER lunagpt
 
-EXPOSE 8010
-
-HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
-    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8010/health')" || exit 1
-
-CMD ["sh", "-c", "alembic upgrade head && python3 -m uvicorn lunagpt.api:app --host 0.0.0.0 --port 8010"]
+CMD ["python3", "-m", "lunagpt.assistant"]
