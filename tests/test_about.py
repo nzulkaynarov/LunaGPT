@@ -1,11 +1,12 @@
 """What Luna knows about herself: recognising the question, what each role may read, and the prompt."""
 
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from lunagpt.assistant import about, bot, llm
+from lunagpt.assistant import about, chat_context, internet_desk, llm, menu
+from lunagpt.models import AssistantMember
 
 
 @pytest.mark.parametrize(
@@ -25,16 +26,16 @@ def test_each_role_reads_only_its_sections() -> None:
     kid = about.about_luna("kid", "Хозяин")
     guest = about.about_luna("guest", "Хозяин")
     adult = about.about_luna("adult", None)
-    assert "собрал Хозяин" in kid and bot.BTN_QUIZ in kid and bot.BTN_PEOPLE not in kid
-    assert "Хозяин" not in guest and bot.BTN_QUIZ not in guest and "в гостях" in guest
-    assert about.UNKNOWN_OWNER in adult and bot.BTN_PEOPLE in adult and "{owner}" not in adult
+    assert "собрал Хозяин" in kid and internet_desk.BTN_QUIZ in kid and menu.BTN_PEOPLE not in kid
+    assert "Хозяин" not in guest and internet_desk.BTN_QUIZ not in guest and "в гостях" in guest
+    assert about.UNKNOWN_OWNER in adult and menu.BTN_PEOPLE in adult and "{owner}" not in adult
     assert "Образцы шуточных ответов" in guest and "Что нового" in guest
 
 
 def test_every_menu_button_is_described() -> None:
     """A new button without a line in about.md means Luna cannot tell anyone about it."""
     text = about.ABOUT_FILE.read_text(encoding="utf-8")
-    missing = [b for b in bot.MENU_BUTTONS - {bot.BTN_HELP} if b not in text]
+    missing = [b for b in menu.MENU_BUTTONS - {menu.BTN_HELP} if b not in text]
     assert missing == []
 
 
@@ -54,11 +55,12 @@ async def test_facts_reach_the_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.asyncio
 async def test_bot_adds_facts_only_for_questions_about_luna(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(bot, "owner_name", AsyncMock(return_value="Хозяин"))
-    instance = bot.LunaBot.__new__(bot.LunaBot)
+    monkeypatch.setattr(chat_context, "owner_name", AsyncMock(return_value="Хозяин"))
     session = AsyncMock()
     session.__aenter__.return_value = AsyncMock()
-    instance._sessions = lambda: session
-    member = bot.AssistantMember(telegram_id=1, name="Зарина", role="kid")
-    assert "собрал Хозяин" in await instance._about(member, "кто тебя создал?")
-    assert await instance._about(member, "который час?") == ""
+    desks: dict[str, Any] = {name: MagicMock() for name in ("reminders", "lists", "school", "calendar", "phrases")}
+    stories = MagicMock(memories=AsyncMock(return_value=""))
+    context = chat_context.ChatContext(lambda: session, stories=stories, **desks)
+    member = AssistantMember(telegram_id=1, name="Зарина", role="kid")
+    assert "собрал Хозяин" in await context.about(member, "кто тебя создал?")
+    assert await context.about(member, "который час?") == ""

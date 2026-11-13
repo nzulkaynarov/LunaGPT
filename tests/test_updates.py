@@ -9,13 +9,13 @@ from aiogram.types import Message
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from lunagpt.assistant import bot, updates
+from lunagpt.assistant import bot, menu, updates
 from lunagpt.models import AssistantMember
 
 
 def test_the_version_follows_the_menu_and_the_news() -> None:
-    adult, kid = bot.menu_layout("adult"), bot.menu_layout("kid")
-    assert updates.version("adult", adult) == updates.version("owner", bot.menu_layout("owner"))
+    adult, kid = menu.menu_layout("adult"), menu.menu_layout("kid")
+    assert updates.version("adult", adult) == updates.version("owner", menu.menu_layout("owner"))
     assert updates.version("adult", adult) != updates.version("kid", kid)
     assert updates.version("adult", adult) != updates.version("adult", adult + [["🆕"]])
     assert updates.newest_news() and all("2026" not in line for line in updates.newest_news())

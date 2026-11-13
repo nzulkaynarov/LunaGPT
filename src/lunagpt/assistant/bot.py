@@ -4,11 +4,9 @@ import asyncio
 import html
 import logging
 import re
-import time
-from collections import defaultdict, deque
+from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime, timedelta
-from typing import Any
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
@@ -19,7 +17,6 @@ from aiogram.types import (
     ErrorEvent,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    KeyboardButton,
     Message,
     PhotoSize,
     ReactionTypeCustomEmoji,
@@ -35,31 +32,14 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import access, updates, usage
-from lunagpt.assistant.about import about_luna, is_about_question, owner_name
 from lunagpt.assistant.calendar_desk import CALENDAR_PREFIXES, CalendarDesk, is_calendar_request
+from lunagpt.assistant.chat_context import ChatContext
+from lunagpt.assistant.dialogue import Dialogue
 from lunagpt.assistant.gcal import GoogleCalendar
-from lunagpt.assistant.internet_desk import (
-    BTN_ASK_TIME,
-    BTN_QUIZ,
-    INTERNET_PREFIXES,
-    InternetDesk,
-)
+from lunagpt.assistant.internet_desk import BTN_ASK_TIME, BTN_QUIZ, INTERNET_PREFIXES, InternetDesk
 from lunagpt.assistant.list_desk import LIST_PREFIXES, ListDesk
-from lunagpt.assistant.lists import is_list_request, quoted
-from lunagpt.assistant.llm import (
-    LIST_TOOL,
-    LISTS_BLOCK,
-    LISTS_HINT,
-    REMINDER_HINT,
-    REMINDER_TOOLS,
-    REMINDERS_BLOCK,
-    SCHEDULED_TASK,
-    SHOWN_PREFIX,
-    Action,
-    QuizQuestion,
-    ReplyOptions,
-    transcribe_voice,
-)
+from lunagpt.assistant.lists import is_list_request
+from lunagpt.assistant.llm import SCHEDULED_TASK, QuizQuestion, ReplyOptions, transcribe_voice
 from lunagpt.assistant.memories import Memory
 from lunagpt.assistant.memory_desk import (
     BTN_STORY,
@@ -67,6 +47,28 @@ from lunagpt.assistant.memory_desk import (
     FAMILY_PROMPT,
     MEMORY_PREFIXES,
     MemoryDesk,
+)
+from lunagpt.assistant.menu import (
+    BACK_AGAIN,
+    BTN_DAY,
+    BTN_FAMILY,
+    BTN_HELP,
+    BTN_INTERNET,
+    BTN_INVITE,
+    BTN_LISTS,
+    BTN_MEMORY,
+    BTN_PEOPLE,
+    BTN_PHRASE,
+    FAMILY_MENU,
+    HELP_TEXT,
+    MENU_FEATURES,
+    OLD_BUTTONS,
+    OLD_SHARED,
+    SHARED_MOVED,
+    WELCOME,
+    family_keyboard,
+    main_keyboard,
+    menu_layout,
 )
 from lunagpt.assistant.people import PEOPLE_PREFIXES, PeopleDesk
 from lunagpt.assistant.phrases import PHRASE_PREFIXES, PhraseDesk
@@ -84,7 +86,7 @@ from lunagpt.assistant.speech import (
 )
 from lunagpt.assistant.stories import ADULT_STORY_PREFIXES, PHRASE_ASK, STORY_PREFIXES, StoryDesk
 from lunagpt.assistant.telegram import is_reply_to_prompt, remove_menu, send_long, send_model_reply
-from lunagpt.assistant.waiting import Waiting, cat_is_thinking
+from lunagpt.assistant.waiting import cat_is_thinking
 from lunagpt.config import settings
 from lunagpt.models import AssistantMember
 
@@ -95,61 +97,6 @@ QuizFn = Callable[[int, int | None], Awaitable[QuizQuestion | None]]
 TranscribeFn = Callable[[str, int, bytes, Callable[[float], None] | None, bool], Awaitable[str | None]]
 SpeakFn = Callable[[str], Awaitable[SpokenReply | None]]
 
-# The menu: one button per part of life; what is inside opens as inline buttons.
-BTN_DAY = "🗓 Мой день"
-BTN_LISTS = "🛒 Списки"
-BTN_MEMORY = "🧠 Память"
-BTN_INTERNET = "⏳ Интернет"
-BTN_FAMILY = "🏠 Семья"
-BTN_HELP = "❓ Помощь"
-MENU_BUTTONS = {BTN_DAY, BTN_LISTS, BTN_MEMORY, BTN_INTERNET, BTN_FAMILY, BTN_HELP}
-# Inside those menus. The texts are also accepted as typed buttons, since older menus carried them.
-BTN_PEOPLE = "👥 Люди"
-BTN_INVITE = "➕ Пригласить"
-BTN_PHRASE = "😺 Фраза для Луны"
-# Menus stay on a phone until a message brings a new one, so the old buttons keep working until then.
-OLD_BUTTONS = {
-    "🔔 Напоминания": BTN_DAY,
-    "🧠 Что ты помнишь": BTN_MEMORY,
-    "⏳ Моё время": BTN_INTERNET,
-    "🧠 Викторина +15 мин": BTN_QUIZ,
-    "🐈 Про Луну": BTN_STORY,
-}
-OLD_SHARED = "📺 Общие устройства"
-# Which part of Luna a menu button opens, for the usage counts.
-MENU_FEATURES = {
-    BTN_DAY: "day",
-    BTN_LISTS: "lists",
-    BTN_MEMORY: "memory",
-    BTN_INTERNET: "internet",
-    BTN_FAMILY: "family",
-    BTN_HELP: "help",
-    BTN_ASK_TIME: "internet",
-    BTN_QUIZ: "quiz",
-    BTN_PEOPLE: "people",
-    BTN_INVITE: "people",
-    BTN_STORY: "stories",
-    BTN_PHRASE: "phrases",
-}
-SHARED_MOVED = (
-    "📺 Общие устройства теперь в боте HomeSec, кнопка «📺 Общие устройства»: там те же действия. "
-    "Я занимаюсь личными делами, а домашней сетью управляет HomeSec."
-)
-FAMILY_MENU = "🏠 Семья: люди и заявки, приглашения. Телевизор и другие общие устройства — в боте HomeSec."
-
-
-# First, and asking for the first person: placed after the facts, the local model told 2 of 8 stories as
-# Luna's own; placed before them, 7 of 8.
-STORY_MEMORIES = (
-    "Мои воспоминания. Их рассказала семья про настоящую домашнюю кошку Луну, это и есть я. "
-    "Когда просят историю обо мне или спрашивают, помню ли я что-то, расскажи подходящую историю отсюда "
-    "от первого лица («я залезла…»), а не со стороны, и можешь сказать, кто напомнил:\n{stories}\n\n"
-)
-HISTORY_MESSAGES = 8
-RATE_LIMIT = 10
-UPDATE_CHECK_SECONDS = 600
-RESTARTED_TEXT = updates.RESTARTED
-RATE_WINDOW_SECONDS = 60
 ACCESS_ENDED = "Срок доступа закончился. Попроси взрослого из семьи его продлить."
 TOO_FAST = "🐾 Помедленнее, я не успеваю за мышкой! Подожди минутку."
 TEXT_ONLY = "Пока я понимаю текст, голосовые, кружки и фото."
@@ -158,15 +105,8 @@ PHOTO_FAILED = "Не получилось открыть фото. Пришли 
 PHOTO_TOO_BIG = "Слишком большой файл. Пришли фото обычным способом, не файлом."
 MAX_PHOTO_BYTES = 10 * 1024 * 1024
 PHOTO_TYPES = ("image/jpeg", "image/png", "image/webp")
-MATH_TEXT = re.compile(
-    r"\d\s*[-+*/×÷:=]\s*\d|\b(?:задач\w*|уравнени\w*|пример\w*|реши\w*|посчитай|сколько будет)\b", re.I
-)
 THINKING_REACTION = "👀"
 DONE_REACTION = "🤗"  # Telegram allows only its own reaction set, which has no cat
-# Telegram sends "what cat is this?" and the photo as two messages, in either order: a question a minute
-# before a captionless photo becomes its caption, and the photo stays attached to follow-up questions.
-QUESTION_BEFORE_PHOTO_SECONDS = 60.0
-PHOTO_KEPT_SECONDS = 600.0
 NO_VIDEO = "Видео я не смотрю. Пришли голосовое или кружок, или напиши текстом."
 MAX_VOICE_SECONDS = 120
 VOICE_TOO_LONG = "Слишком длинное голосовое. Запиши покороче, до двух минут."
@@ -174,50 +114,8 @@ VOICE_FAILED = "Не получилось разобрать голосовое.
 NOTHING_TO_SAY = "Спроси что-нибудь, и я отвечу голосом."
 CANNOT_SAY = "Этот ответ вслух не прочитать: он длинный или со ссылками. Спроси покороче."
 VOICE_NOT_HEARD = "Не расслышала слов в этом голосовом. Попробуй ещё раз."
-MEMORY_NOTICE = " Запоминаю важное о тебе, посмотреть и удалить можно в «🧠 Память». Другие люди этого не видят."
-FAMILY_NOTICE = " Чтобы запомнить для всех в семье, напиши: «запомни для семьи, что…»."
-WHOSE = "👤 — видишь только ты, 🏠 — видит вся семья."
-ASK_ANYTHING = "Просто напиши или скажи голосом, что нужно: вопрос, идея, перевод, свежие новости."
-PHOTO_HINT = "📸 Пришли фото задачи, чека или текста, и я разберу.\n\n"
-SCHOOL_HINT = "📚 Фото расписания с подписью «расписание» или «задали …» запомню и напомню вовремя.\n\n"
-DAY_LINE = f"{BTN_DAY} — напоминания, поручения и утренняя сводка: «напомни завтра в 9…», «присылай каждый день…»\n"
-LISTS_LINE = f"{BTN_LISTS} — 🏠 семейные и 👤 личные: «добавь молоко в покупки», «добавь в мой список…»\n"
-MEMORY_LINE = f"{BTN_MEMORY} — 👤 что я помню о тебе, 🏠 общая память семьи и 🐈 истории про Луну\n"
-ADULT_HELP = (
-    f"{ASK_ANYTHING}\n\n{PHOTO_HINT}"
-    + DAY_LINE
-    + LISTS_LINE
-    + MEMORY_LINE
-    + f"{BTN_FAMILY} — люди и приглашения\n\n"
-    + WHOSE
-    + "\n\n"
-    + MEMORY_NOTICE.strip()
-    + FAMILY_NOTICE
-)
-HELP_TEXT = {
-    "owner": ADULT_HELP,
-    "adult": ADULT_HELP,
-    "kid": (
-        "Спрашивай что угодно: уроки, игры, код, идеи, свежие новости.\n\n"
-        + PHOTO_HINT
-        + SCHOOL_HINT
-        + f"{BTN_INTERNET} — сколько осталось, попросить минут у родителей и 🎯 викторина\n"
-        + f"{BTN_DAY} — напоминания, расписание уроков и домашка\n"
-        + LISTS_LINE
-        + MEMORY_LINE.rstrip("\n")
-        + ", там же 😺 фраза для Луны\n\n"
-        + WHOSE
-        + "\n\n"
-        + MEMORY_NOTICE.strip()
-        + FAMILY_NOTICE
-    ),
-    "guest": (
-        f"{ASK_ANYTHING}\n\n{PHOTO_HINT}{BTN_DAY} — напоминания и утренняя сводка\n"
-        f"{BTN_MEMORY} — что я о тебе помню\n\n" + MEMORY_NOTICE.strip()
-    ),
-}
-WELCOME = "<b>Добро пожаловать, {name}!</b> 🌙\n\n{help}"
-BACK_AGAIN = "Привет, {name}! Я на связи. Напиши, что нужно, или выбери кнопку внизу."
+UPDATE_CHECK_SECONDS = 600
+RESTARTED_TEXT = updates.RESTARTED
 FAMILY_REQUEST = re.compile(
     r"^\s*(?:запомни|запиши|сохрани)\s+(?:для\s+(?:всей\s+)?(?:семьи|всех)|в\s+(?:семейн\w+|общ\w+)\s+памят\w+)"
     r"[\s:,—-]*(?:что\s+)?(?P<fact>\S.*)$",
@@ -265,47 +163,6 @@ def needs_adult_attention(text: str) -> bool:
     return bool(SAFETY_PATTERN.search(text))
 
 
-def number_of(args: dict[str, Any]) -> int | None:
-    value = args.get("number")
-    try:
-        return int(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
-
-
-def menu_layout(role: str) -> list[list[str]]:
-    adults = [[BTN_DAY, BTN_LISTS], [BTN_MEMORY, BTN_FAMILY], [BTN_HELP]]
-    layouts = {
-        "owner": adults,
-        "adult": adults,
-        "kid": [[BTN_INTERNET, BTN_DAY], [BTN_LISTS, BTN_MEMORY], [BTN_HELP]],
-        "guest": [[BTN_DAY, BTN_MEMORY], [BTN_HELP]],
-    }
-    return layouts[role]
-
-
-def _inline(text: str, data: str) -> InlineKeyboardButton:
-    return InlineKeyboardButton(text=text, callback_data=data)
-
-
-def family_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [_inline(BTN_PEOPLE, "fhp"), _inline(BTN_INVITE, "fhi")],
-        ]
-    )
-
-
-def main_keyboard(role: str) -> ReplyKeyboardMarkup:
-    """The persistent menu; server-side checks still decide what each role may do."""
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=text) for text in row] for row in menu_layout(role)],
-        resize_keyboard=True,
-        is_persistent=True,
-        input_field_placeholder="Напиши Luna…",
-    )
-
-
 class LunaBot:
     """Routes each private message by the sender's membership and role."""
 
@@ -338,15 +195,20 @@ class LunaBot:
         self.phrases = PhraseDesk(bot, session_factory)
         self.stories = StoryDesk(bot, session_factory)
         self.lists = ListDesk(bot, session_factory)
-        self.memories = MemoryDesk(bot, memory, self._forget_conversation)
+        self.dialogue = Dialogue(lambda: self._memory)
+        self.memories = MemoryDesk(bot, memory, self.dialogue.forget)
         self.internet = InternetDesk(bot, session_factory, pi, make_quiz, self._today)
-        self._history_loaded: set[int] = set()
+        self.context: ChatContext = ChatContext(
+            session_factory,
+            reminders=self.reminders,
+            lists=self.lists,
+            school=self.school,
+            calendar=self.calendar,
+            stories=self.stories,
+            phrases=self.phrases,
+        )
         self._background: set[asyncio.Task[None]] = set()
-        self._history: dict[int, deque[dict[str, str]]] = defaultdict(lambda: deque(maxlen=HISTORY_MESSAGES))
         self._locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
-        self._request_times: dict[int, deque[float]] = defaultdict(lambda: deque(maxlen=RATE_LIMIT))
-        self._last_question: dict[int, tuple[str, float]] = {}
-        self._last_photo: dict[int, tuple[bytes, str, float]] = {}  # in memory only, never stored
 
     @property
     def _memory(self) -> Memory | None:
@@ -355,9 +217,6 @@ class LunaBot:
     @_memory.setter
     def _memory(self, value: Memory | None) -> None:
         self.memories.memory = value
-
-    def _forget_conversation(self, user_id: int) -> None:
-        self._history[user_id].clear()
 
     async def _send(
         self,
@@ -511,12 +370,12 @@ class LunaBot:
                 async with ChatActionSender.typing(chat_id=user_id, bot=self._bot):
                     await self.school.handle_text(member, text)
             return
-        if member.role in access.FAMILY_ROLES and is_list_request(text) and not self._over_rate_limit(user_id):
+        if member.role in access.FAMILY_ROLES and is_list_request(text) and not self.dialogue.over_rate_limit(user_id):
             async with ChatActionSender.typing(chat_id=user_id, bot=self._bot):
                 said = await self.lists.request(member, text)
             if said is not None:
                 await self._count(user_id, "lists")
-                self._allow_request(user_id)  # counts like a chat turn; anything else goes on to the chat
+                self.dialogue.allow_request(user_id)  # counts like a chat turn; anything else goes on to the chat
                 await self._keep_turn(member, text, said)
                 return
         if spoken_note is None and is_bare_voice_request(text):
@@ -652,16 +511,6 @@ class LunaBot:
         if isinstance(callback.message, Message):
             await callback.message.edit_text(text, reply_markup=markup)
 
-    def _over_rate_limit(self, user_id: int) -> bool:
-        times = self._request_times[user_id]
-        return len(times) == RATE_LIMIT and time.monotonic() - times[0] < RATE_WINDOW_SECONDS
-
-    def _allow_request(self, user_id: int) -> bool:
-        if self._over_rate_limit(user_id):
-            return False
-        self._request_times[user_id].append(time.monotonic())
-        return True
-
     async def _photo(
         self, member: AssistantMember, caption: str, picture: PhotoSize | Document, message_id: int | None = None
     ) -> None:
@@ -680,7 +529,7 @@ class LunaBot:
         image_type = picture.mime_type if isinstance(picture, Document) and picture.mime_type else "image/jpeg"
         kind = photo_kind(caption) if member.role == "kid" else None  # timetables and homework are for children
         if kind is None:
-            question = caption or self._recent_question(user_id) or PHOTO_DEFAULT
+            question = caption or self.dialogue.recent_question(user_id) or PHOTO_DEFAULT
             await self._chat(member, question, image=data.read(), image_type=image_type, message_id=message_id)
             return
         if not await self._may_ask(member):
@@ -694,7 +543,7 @@ class LunaBot:
         user_id = member.telegram_id
         today = self._today()
         refusal = None
-        if self._over_rate_limit(user_id):
+        if self.dialogue.over_rate_limit(user_id):
             refusal = TOO_FAST
         elif access.access_ended(member):
             refusal = ACCESS_ENDED
@@ -731,20 +580,6 @@ class LunaBot:
         await self._send(user_id, f"🗣 «{words}»")  # a misheard word is visible before the answer
         return words
 
-    def _recent_question(self, user_id: int) -> str | None:
-        """The text sent just before a captionless photo, which is usually a question about it."""
-        said, at = self._last_question.pop(user_id, ("", 0.0))
-        return said if said and time.monotonic() - at < QUESTION_BEFORE_PHOTO_SECONDS else None
-
-    def _recent_photo(self, user_id: int) -> tuple[bytes, str] | None:
-        kept = self._last_photo.get(user_id)
-        if kept is None:
-            return None
-        if time.monotonic() - kept[2] >= PHOTO_KEPT_SECONDS:
-            del self._last_photo[user_id]
-            return None
-        return kept[0], kept[1]
-
     @staticmethod
     def _today() -> date:
         return (datetime.now(UTC) + timedelta(hours=settings.luna_utc_offset_hours)).date()
@@ -763,7 +598,7 @@ class LunaBot:
         user_id = member.telegram_id
         if not scheduled and await self._raised_alarm(member, text):
             return
-        if not scheduled and not self._allow_request(user_id):
+        if not scheduled and not self.dialogue.allow_request(user_id):
             await self._send(user_id, TOO_FAST)
             return
         if member.role in access.FAMILY_ROLES and image is None and not scheduled:
@@ -782,22 +617,21 @@ class LunaBot:
         costs: list[float] = []
         earlier_photo = False
         if image is None:
-            self._last_question[user_id] = (text, time.monotonic())
-            recent = self._recent_photo(user_id)
+            self.dialogue.note_question(user_id, text)
+            recent = self.dialogue.recent_photo(user_id)
             if recent is not None:
                 image, image_type = recent
                 earlier_photo = True
         else:
-            self._last_question.pop(user_id, None)
-            self._last_photo[user_id] = (image, image_type, time.monotonic())
-        waiting = await self._waiting(member, text, speak, image is not None)
+            self.dialogue.keep_photo(user_id, image, image_type)
+        waiting = await self.context.waiting(member, text, speak, image is not None)
         await self._react(user_id, message_id, THINKING_REACTION)
         async with self._locks[user_id]:
             async with (
                 ChatActionSender.typing(chat_id=user_id, bot=self._bot),  # repeats while the model works
                 cat_is_thinking(self._bot, user_id, waiting),
             ):
-                history = without_voice_refusals(await self._conversation(member))
+                history = without_voice_refusals(await self.dialogue.turns(user_id))
                 facts = await self._memory.recall(user_id, member.role, text) if self._memory else []
                 options = ReplyOptions(
                     age=access.age_of(current, today),
@@ -808,18 +642,15 @@ class LunaBot:
                     image=image,
                     image_type=image_type,
                     earlier_photo=earlier_photo,
-                    planner=await self._planner(current),
+                    planner=await self.context.planner(current),
                     on_search=waiting.searching,
-                    about=await self._about(current, text),
-                    actions=await self._actions(current),
+                    about=await self.context.about(current, text),
+                    actions=await self.context.actions(current),
                 )
                 reply = await self._answer(member.role, user_id, history, text, facts, options)
             # Later turns keep only a mark of the photo: its bytes are never stored or sent again.
             said = f"[фото] {text}" if image is not None and not earlier_photo else text
-            self._history[user_id].append({"role": "user", "content": said})
-            self._history[user_id].append({"role": "assistant", "content": reply})
-            if self._memory:
-                await self._memory.save_exchange(user_id, said, reply, HISTORY_MESSAGES)
+            await self.dialogue.add(user_id, said, reply)
         if any(costs) and current.role == "guest":
             async with self._sessions() as db:
                 await access.record_spend(db, user_id, sum(costs), today)
@@ -833,97 +664,13 @@ class LunaBot:
             self._background.add(task)  # the event loop keeps only weak references to tasks
             task.add_done_callback(self._background.discard)
 
-    async def _actions(self, member: AssistantMember) -> tuple[Action, ...]:
-        """What the chat model may do for this person: reminders for everyone, the family's lists for family."""
-
-        async def set_reminder(args: dict[str, Any]) -> str:
-            request = str(args.get("request") or "").strip()
-            if not request:
-                return "Не сказано, о чём и когда напомнить."
-            said = await self.reminders.create(member, f"напомни {request}")
-            return f"{SHOWN_PREFIX} {said}"
-
-        async def schedule_task(args: dict[str, Any]) -> str:
-            request = str(args.get("request") or "").strip()
-            if not request:
-                return "Не сказано, что и когда делать."
-            said = await self.reminders.create(member, f"напомни {request}", kind="do")
-            return f"{SHOWN_PREFIX} {said}. В это время ты сама выполнишь задание и пришлёшь результат."
-
-        async def move_reminder(args: dict[str, Any]) -> str:
-            number = number_of(args)
-            return (
-                "Нет номера напоминания."
-                if number is None
-                else await self.reminders.move(member, number, str(args.get("when") or ""))
-            )
-
-        async def cancel_reminder(args: dict[str, Any]) -> str:
-            number = number_of(args)
-            return "Нет номера напоминания." if number is None else await self.reminders.cancel(member, number)
-
-        runs = (set_reminder, schedule_task, move_reminder, cancel_reminder)
-        actions = [
-            Action(schema, run, REMINDERS_BLOCK, REMINDER_HINT)
-            for schema, run in zip(REMINDER_TOOLS, runs, strict=True)
-        ]
-        if member.role in access.FAMILY_ROLES:
-            try:
-                family, personal = await self.lists.names(member)
-            except Exception:
-                logger.warning("could not load the family lists", exc_info=True)
-                return tuple(actions)
-
-            async def add_to_list(args: dict[str, Any]) -> str:
-                items = args.get("items")
-                if not isinstance(items, list):
-                    return "Нет пунктов."
-                result: str = await self.lists.add_from_chat(
-                    member, str(args.get("list") or ""), [str(i) for i in items], args.get("personal") is True
-                )
-                return result
-
-            names = {"names": quoted(family), "personal": quoted(personal)}
-            actions.append(Action(LIST_TOOL, add_to_list, LISTS_BLOCK.format(**names), LISTS_HINT.format(**names)))
-        return tuple(actions)
+    async def _brief_extra(self, user_id: int, today: date) -> list[str]:
+        lines: list[str] = await self.context.brief_extra(user_id, today)
+        return lines
 
     async def _run_task(self, member: AssistantMember, task: str) -> None:
         """A task Luna was given for this time: she carries it out in the person's chat, with its history."""
         await self._chat(member, SCHEDULED_TASK.format(task=task), scheduled=True)
-
-    async def _about(self, member: AssistantMember, text: str) -> str:
-        """Luna's facts about herself, only for a question about her; a failure just leaves them out."""
-        if not is_about_question(text):
-            return ""
-        owner = None
-        if member.role != "guest":
-            try:
-                async with self._sessions() as db:
-                    owner = await owner_name(db)
-            except Exception:
-                logger.warning("could not look up the owner", exc_info=True)
-        facts: str = about_luna(member.role, owner)
-        if member.role in access.FAMILY_ROLES:
-            try:
-                memories = await self.stories.memories()
-            except Exception:
-                logger.warning("could not load the cat stories", exc_info=True)
-                memories = ""
-            if memories:
-                facts = STORY_MEMORIES.format(stories=memories) + facts
-        return facts
-
-    async def _waiting(self, member: AssistantMember, text: str, speak: bool, photo: bool) -> Waiting:
-        """The cat's phrases for this answer; the family's own ones are never shown to guests."""
-        kind = "math" if MATH_TEXT.search(text) else "photo" if photo else "voice" if speak else "chat"
-        family: list[str] = []
-        if member.role in access.FAMILY_ROLES:
-            try:
-                family = await self.phrases.family_phrases() + await self.stories.phrases()
-            except Exception:
-                logger.warning("could not load family phrases", exc_info=True)
-        now = datetime.now(UTC) + timedelta(hours=settings.luna_utc_offset_hours)
-        return Waiting(kind, now.replace(tzinfo=None), family)
 
     async def _react(self, chat_id: int, message_id: int | None, emoji: str | None) -> None:
         """A reaction on the person's message; None takes it away. Purely decorative, so failures are ignored."""
@@ -937,42 +684,9 @@ class LunaBot:
         except (TelegramAPIError, ClientError, TimeoutError) as exc:
             logger.info("could not set a reaction: %s", type(exc).__name__)
 
-    async def _planner(self, member: AssistantMember) -> str:
-        """Timetable, tasks, calendar, reminders and the family's lists for the model; a failure only loses this
-        context."""
-        parts: list[str] = []
-        for source in (self.school.planner_block, self.calendar.planner_text, self.reminders.planner_text):
-            try:
-                parts.append(await source(member.telegram_id))
-            except Exception:
-                logger.warning("could not load planner context", exc_info=True)
-        if member.role in access.FAMILY_ROLES:
-            try:
-                parts.append(await self.lists.planner_text(member))
-            except Exception:
-                logger.warning("could not load the family lists", exc_info=True)
-        return "\n\n".join(part for part in parts if part)
-
-    async def _brief_extra(self, user_id: int, today: date) -> list[str]:
-        lines: list[str] = []
-        for source in (self.calendar.brief_lines, self.school.brief_lines):
-            try:
-                lines += await source(user_id, today)
-            except Exception:
-                logger.warning("could not load brief lines", exc_info=True)
-        try:
-            async with self._sessions() as db:
-                member = await access.get_member(db, user_id)
-            if member is not None:
-                lines += await self.lists.brief_lines(member, today)
-                lines += await self.stories.brief_lines(member, today)
-        except Exception:
-            logger.warning("could not load the lists or a cat story for the brief", exc_info=True)
-        return lines
-
     async def _may_ask(self, member: AssistantMember) -> bool:
         """The rate limit and guest access, for requests that skip the chat."""
-        if not self._allow_request(member.telegram_id):
+        if not self.dialogue.allow_request(member.telegram_id):
             await self._send(member.telegram_id, TOO_FAST)
             return False
         if access.access_ended(member):
@@ -991,14 +705,11 @@ class LunaBot:
         """A reminder or a list change done outside the chat still belongs to the conversation, so a follow-up
         such as "не в 8, а в 8:30" is understood."""
         user_id = member.telegram_id
-        await self._conversation(member)  # loads the stored turns first, so they are not lost behind this one
-        self._history[user_id].append({"role": "user", "content": text})
-        self._history[user_id].append({"role": "assistant", "content": said})
-        if self._memory:
-            try:
-                await self._memory.save_exchange(user_id, text, said, HISTORY_MESSAGES)
-            except Exception:
-                logger.warning("could not keep the turn", exc_info=True)
+        await self.dialogue.turns(user_id)  # loads the stored turns first, so they are not lost behind this one
+        try:
+            await self.dialogue.add(user_id, text, said)
+        except Exception:
+            logger.warning("could not keep the turn", exc_info=True)
 
     async def _send_voice_reply(self, user_id: int, reply: str) -> bool:
         """Say the reply after showing it; the text is already there if this fails."""
@@ -1015,29 +726,18 @@ class LunaBot:
     async def _say_last_reply(self, member: AssistantMember) -> None:
         """Answer "say it aloud" by voicing the last answer, with no model that could refuse."""
         user_id = member.telegram_id
-        if not self._allow_request(user_id):
+        if not self.dialogue.allow_request(user_id):
             await self._send(user_id, TOO_FAST)
             return
         if access.access_ended(member):
             await self._send(user_id, ACCESS_ENDED)
             return
-        history = without_voice_refusals(await self._conversation(member))
+        history = without_voice_refusals(await self.dialogue.turns(user_id))
         last = next((turn["content"] for turn in reversed(history) if turn["role"] == "assistant"), None)
         if last is None:
             await self._send(user_id, NOTHING_TO_SAY)
         elif not await self._send_voice_reply(user_id, last):
             await self._send(user_id, CANNOT_SAY)
-
-    async def _conversation(self, member: AssistantMember) -> list[dict[str, str]]:
-        """After a restart the last turns come back from the database once."""
-        user_id = member.telegram_id
-        if self._memory and user_id not in self._history_loaded:
-            self._history_loaded.add(user_id)
-            try:
-                self._history[user_id].extend(await self._memory.load_history(user_id, HISTORY_MESSAGES))
-            except Exception:
-                logger.warning("could not load the conversation", exc_info=True)
-        return list(self._history[user_id])
 
     async def _raised_alarm(self, member: AssistantMember, text: str) -> bool:
         """A child's words that need an adult: tell the parents and answer gently; True when it happened."""
