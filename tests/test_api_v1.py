@@ -173,7 +173,7 @@ async def test_audio_transcriptions_mocked(monkeypatch: pytest.MonkeyPatch) -> N
     orig_post = httpx.AsyncClient.post
 
     async def mock_post(self: Any, url: Any, *args: Any, **kwargs: Any) -> Any:
-        if ("4000" in str(url) or "litellm" in str(url)) and "chat/completions" in str(url):
+        if str(url) == settings.litellm_endpoint:
             mock_resp = MagicMock()
             mock_resp.status_code = 200
             mock_resp.raise_for_status = MagicMock()
@@ -284,7 +284,7 @@ async def test_chat_completions_trace_id_headers(monkeypatch: pytest.MonkeyPatch
     orig_post = httpx.AsyncClient.post
 
     async def mock_post(self: Any, url: Any, *args: Any, **kwargs: Any) -> Any:
-        if ("4000" in str(url) or "litellm" in str(url)) and "chat/completions" in str(url):
+        if str(url) == settings.litellm_endpoint:
             mock_resp = MagicMock()
             mock_resp.status_code = 200
             mock_resp.raise_for_status = MagicMock()
