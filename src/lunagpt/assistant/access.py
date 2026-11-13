@@ -1,6 +1,7 @@
 """Membership for Luna AI Assistant: everyone applies, and an adult decides."""
 
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -208,25 +209,59 @@ async def list_members(db: AsyncSession) -> Sequence[AssistantMember]:
     return (await db.execute(select(AssistantMember).order_by(AssistantMember.created_at))).scalars().all()
 
 
-async def reconcile_family(db: AsyncSession, people: list[dict[str, Any]]) -> list[tuple[int, int]]:
-    """Apply the Pi's family to linked members; return (person_id, telegram_id) pairs the Pi lacks."""
-    by_id = {int(p["id"]): p for p in people}
-    missing_links: list[tuple[int, int]] = []
-    for member in await list_members(db):
-        if member.homesec_person_id is None:
-            continue
-        person = by_id.get(member.homesec_person_id)
+@dataclass
+class FamilySync:
+    """What one comparison with the Pi changed, or why it changed nothing."""
+
+    missing_links: list[tuple[int, int]] = field(default_factory=list)
+    left_family: list[str] = field(default_factory=list)
+    refused: bool = False
+
+
+def _people_by_id(people: object) -> dict[int, dict[str, Any]] | None:
+    """Index the Pi's people by id; None when the answer does not look like a list of people."""
+    if not isinstance(people, list):
+        return None
+    by_id: dict[int, dict[str, Any]] = {}
+    for person in people:
+        if not isinstance(person, dict) or not isinstance(person.get("id"), int) or not person.get("name"):
+            return None
+        by_id[person["id"]] = person
+    return by_id
+
+
+async def reconcile_family(db: AsyncSession, people: object) -> FamilySync:
+    """Apply the Pi's family to linked members without ever deleting anyone.
+
+    A person missing on the Pi stays in Luna as a guest with all their data; an adult decides what
+    to do next. An empty, malformed or mostly missing list looks like a reset or a restore on the
+    Pi rather than real removals, so it changes nothing.
+    """
+    by_id = _people_by_id(people)
+    members = [m for m in await list_members(db) if m.homesec_person_id is not None]
+    result = FamilySync()
+    if not members:
+        return result
+    missing = [m for m in members if m.role != "owner" and by_id is not None and m.homesec_person_id not in by_id]
+    if not by_id or (len(missing) > 1 and len(missing) * 2 >= len(members)):
+        result.refused = True
+        return result
+    for member in members:
+        person = by_id.get(member.homesec_person_id) if member.homesec_person_id is not None else None
         if person is None:
             if member.role != "owner":
-                await db.delete(member)
+                member.homesec_person_id = None
+                member.role = "guest"
+                result.left_family.append(member.name)
             continue
-        member.name = person["name"]
-        if member.role != "owner":
-            member.role = PERSON_ROLE_TO_MEMBER_ROLE.get(person["role"], "guest")
+        member.name = str(person["name"])
+        role = PERSON_ROLE_TO_MEMBER_ROLE.get(str(person.get("role")))
+        if member.role != "owner" and role is not None:
+            member.role = role
         if person.get("telegram_id") != member.telegram_id:
-            missing_links.append((member.homesec_person_id, member.telegram_id))
+            result.missing_links.append((person["id"], member.telegram_id))
     await db.commit()
-    return missing_links
+    return result
 
 
 async def track_time_request(db: AsyncSession, request_id: int, telegram_id: int) -> None:

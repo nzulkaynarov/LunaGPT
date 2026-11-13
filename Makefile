@@ -49,5 +49,7 @@ lint: ## Проверка качества кода с ruff и mypy
 	uv run ruff format --check src/ tests/ agents/ config/
 	uv run mypy src/ tests/
 
-clean: ## Удалить данные контейнеров (очистка томов)
+clean: ## Удалить ВСЕ данные (память семьи, ключи шлюза, трассы); спросит подтверждение
+	@echo "Это удалит все базы LunaGPT. Последняя копия: $$(ls -1t /data/backups/lunagpt/lunagpt-*.dump 2>/dev/null | head -1)"
+	@read -p "Напишите DELETE, чтобы продолжить: " answer && [ "$$answer" = "DELETE" ]
 	docker compose down -v

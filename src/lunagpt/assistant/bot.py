@@ -17,6 +17,7 @@ from aiogram.types import (
     BufferedInputFile,
     CallbackQuery,
     Document,
+    ErrorEvent,
     ForceReply,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -1297,18 +1298,22 @@ async def report_time_decisions(bot: Bot, pi: PiClient, session_factory: async_s
             status = {"status": "denied", "minutes": 0}
         except PiUnavailableError:
             continue
-        if status["status"] == "pending":
+        state = status.get("status") if isinstance(status, dict) else None
+        if state == "pending":
             if now - request.created_at > TIME_REQUEST_TTL:
                 async with session_factory() as db:
                     await access.finish_time_request(db, request.request_id)
             continue
-        if status["status"] != "approved":
+        if state != "approved":
             text = "Родители пока не добавили время. Поговори с ними 💬"
         elif status.get("category") == "pause":
-            text = f"🎉 Родители открыли интернет на {status['minutes']} минут!"
+            text = f"🎉 Родители открыли интернет на {status.get('minutes', 0)} минут!"
         else:
-            text = f"🎉 Родители добавили {status['minutes']} минут!"
-        await send_long(bot, request.telegram_id, text)
+            text = f"🎉 Родители добавили {status.get('minutes', 0)} минут!"
+        try:
+            await send_long(bot, request.telegram_id, text)
+        except TelegramAPIError as exc:  # a blocked bot must not hold up everyone else's decisions
+            logger.warning("could not report a time decision: %s", type(exc).__name__)
         async with session_factory() as db:
             await access.finish_time_request(db, request.request_id)
 
@@ -1322,8 +1327,26 @@ async def watch_time_requests(bot: Bot, pi: PiClient, session_factory: async_ses
         await asyncio.sleep(TIME_POLL_SECONDS)
 
 
+HANDLER_FAILED = "😿 Не получилось. Попробуй ещё раз чуть позже."
+
+
+async def on_error(event: ErrorEvent) -> bool:
+    """Log a failed update and tell the person, instead of leaving them with silence."""
+    logger.error("update failed: %s", type(event.exception).__name__, exc_info=event.exception)
+    update = event.update
+    try:
+        if update.callback_query is not None:
+            await update.callback_query.answer(HANDLER_FAILED, show_alert=True)
+        elif update.message is not None and update.message.chat.type == "private":
+            await update.message.answer(HANDLER_FAILED)
+    except TelegramAPIError as exc:
+        logger.warning("could not report a failed update: %s", type(exc).__name__)
+    return True
+
+
 def build_router(luna: LunaBot) -> Router:
     router = Router()
     router.message.register(luna.on_message, F.chat.type == "private")
     router.callback_query.register(luna.on_callback)
+    router.errors.register(on_error)
     return router

@@ -8,7 +8,7 @@ from aiogram import Bot, Dispatcher
 from lunagpt.assistant.bot import LunaBot, build_router, watch_time_requests
 from lunagpt.assistant.llm import generate_quiz, generate_reply
 from lunagpt.assistant.memories import Memory
-from lunagpt.assistant.monitor import send_heartbeats, watch_family, watch_pi
+from lunagpt.assistant.monitor import send_heartbeats, supervise, watch_family, watch_pi
 from lunagpt.assistant.pi_client import PiClient
 from lunagpt.assistant.profile import apply_profile
 from lunagpt.config import settings
@@ -31,12 +31,12 @@ async def main() -> None:
     logger.info("Luna AI Assistant started as @%s", me.username)
     await asyncio.gather(
         dispatcher.start_polling(bot, allowed_updates=["message", "callback_query"], handle_signals=False),
-        watch_pi(bot, pi, async_session_factory),
-        send_heartbeats(pi, async_session_factory),
-        watch_family(pi, async_session_factory),
-        watch_time_requests(bot, pi, async_session_factory),
-        luna.reminders.watch(),
-        luna.watch_updates(),
+        supervise("pi", lambda: watch_pi(bot, pi, async_session_factory)),
+        supervise("heartbeats", lambda: send_heartbeats(pi, async_session_factory)),
+        supervise("family", lambda: watch_family(bot, pi, async_session_factory)),
+        supervise("time requests", lambda: watch_time_requests(bot, pi, async_session_factory)),
+        supervise("reminders", luna.reminders.watch),
+        supervise("updates", luna.watch_updates),
     )
 
 

@@ -17,10 +17,10 @@ import av
 import httpx
 import pytest
 from aiogram import Bot, Dispatcher
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
 from aiogram.types import Document, Message, Update
 
-from lunagpt.assistant import access, audio, bot, list_desk, llm, phrases, speech, stories
+from lunagpt.assistant import access, audio, bot, list_desk, llm, monitor, phrases, speech, stories
 from lunagpt.assistant.monitor import AvailabilityTracker
 from lunagpt.assistant.pi_client import PiClient, PiConflictError, PiNotFoundError, PiUnavailableError
 from lunagpt.assistant.telegram import split_message
@@ -823,7 +823,7 @@ def _db_with_members(members: list[AssistantMember]) -> MagicMock:
 
 
 @pytest.mark.asyncio
-async def test_reconcile_follows_pi_and_removes_deleted_people(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_reconcile_follows_pi_and_keeps_removed_people_as_guests(monkeypatch: pytest.MonkeyPatch) -> None:
     renamed = _member("guest", 5)
     renamed.homesec_person_id = 3
     removed = _member("kid", 6)
@@ -837,10 +837,103 @@ async def test_reconcile_follows_pi_and_removes_deleted_people(monkeypatch: pyte
         access, "list_members", AsyncMock(return_value=[renamed, removed, owner, linked, unlinked_guest])
     )
     db = _db_with_members([])
-    assert await access.reconcile_family(db, PEOPLE) == [(3, 5)]
+    result = await access.reconcile_family(db, PEOPLE)
+    assert result.missing_links == [(3, 5)]
     assert (renamed.name, renamed.role) == ("Миша", "kid")
-    db.delete.assert_awaited_once_with(removed)  # the owner survives a missing profile
+    db.delete.assert_not_awaited()  # nobody's memory, reminders or lists are ever deleted by a sync
+    assert (removed.role, removed.homesec_person_id) == ("guest", None)
+    assert result.left_family == ["Тест"]
+    assert (owner.role, owner.homesec_person_id) == ("owner", 98)  # the owner survives a missing profile
     assert unlinked_guest.name == "Тест"
+
+
+@pytest.mark.parametrize(
+    "people",
+    [
+        [],
+        None,
+        {"error": "boom"},
+        [{"name": "без номера"}],
+        [{"id": 50, "name": "Новый", "role": "kid"}],  # every linked person missing at once: a reset Pi
+    ],
+)
+@pytest.mark.asyncio
+async def test_reconcile_changes_nothing_when_the_pi_list_looks_reset(
+    monkeypatch: pytest.MonkeyPatch, people: object
+) -> None:
+    kid = _member("kid", 6)
+    kid.homesec_person_id = 3
+    adult = _member("adult", 44)
+    adult.homesec_person_id = 4
+    monkeypatch.setattr(access, "list_members", AsyncMock(return_value=[kid, adult]))
+    db = _db_with_members([])
+    result = await access.reconcile_family(db, people)
+    assert result.refused
+    assert (kid.role, kid.homesec_person_id, adult.role) == ("kid", 3, "adult")
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unknown_pi_role_keeps_the_member_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    kid = _member("kid", 6)
+    kid.homesec_person_id = 3
+    monkeypatch.setattr(access, "list_members", AsyncMock(return_value=[kid]))
+    await access.reconcile_family(_db_with_members([]), [{"id": 3, "name": "Миша", "role": "iot", "telegram_id": 6}])
+    assert kid.role == "kid"
+
+
+@pytest.mark.asyncio
+async def test_adults_hear_when_someone_leaves_the_family(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = MagicMock()
+    session.__aenter__ = AsyncMock(return_value=MagicMock())
+    session.__aexit__ = AsyncMock(return_value=None)
+    monkeypatch.setattr(access, "reconcile_family", AsyncMock(return_value=access.FamilySync(left_family=["Миша"])))
+    monkeypatch.setattr(access, "adult_chat_ids", AsyncMock(return_value=[1, 2]))
+    telegram = MagicMock(send_message=AsyncMock())
+    pi = MagicMock(people=AsyncMock(return_value=[]), link_telegram=AsyncMock())
+    await monitor.sync_family_once(telegram, pi, MagicMock(return_value=session))
+    assert telegram.send_message.await_count == 2
+    assert "Миша" in telegram.send_message.call_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_supervisor_restarts_a_failed_loop() -> None:
+    calls = 0
+
+    async def job() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("database restarted")
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await monitor.supervise("test", job, restart_delay=0)
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_failed_update_is_answered_not_silent() -> None:
+    message = MagicMock(answer=AsyncMock())
+    message.chat.type = "private"
+    event = MagicMock(exception=RuntimeError("boom"), update=MagicMock(callback_query=None, message=message))
+    assert await bot.on_error(event) is True
+    message.answer.assert_awaited_once_with(bot.HANDLER_FAILED)
+
+
+@pytest.mark.asyncio
+async def test_a_blocked_child_does_not_hold_up_other_decisions(monkeypatch: pytest.MonkeyPatch) -> None:
+    telegram = MagicMock(send_message=AsyncMock(side_effect=[TelegramForbiddenError(MagicMock(), "blocked"), None]))
+    session = MagicMock()
+    session.__aenter__ = AsyncMock(return_value=MagicMock())
+    session.__aexit__ = AsyncMock(return_value=None)
+    requests = [MagicMock(request_id=1, telegram_id=5), MagicMock(request_id=2, telegram_id=6)]
+    monkeypatch.setattr(access, "pending_time_requests", AsyncMock(return_value=requests))
+    finish = AsyncMock()
+    monkeypatch.setattr(access, "finish_time_request", finish)
+    pi = MagicMock(time_request_status=AsyncMock(return_value={"status": "approved", "minutes": 30}))
+    await bot.report_time_decisions(telegram, pi, MagicMock(return_value=session))
+    assert finish.await_count == 2
 
 
 @pytest.mark.asyncio

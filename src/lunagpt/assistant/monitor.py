@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
@@ -17,6 +18,7 @@ CHECK_INTERVAL_SECONDS = 60
 HEARTBEAT_INTERVAL_SECONDS = 30
 FAMILY_SYNC_INTERVAL_SECONDS = 300
 FAILURES_BEFORE_ALERT = 3
+RESTART_DELAY_SECONDS = 30
 PI_DOWN_TEXT = "⚠️ HomeSec на Raspberry Pi не отвечает. Команды сети могут быть недоступны. Luna работает."
 PI_UP_TEXT = "✅ HomeSec на Raspberry Pi снова на связи."
 
@@ -51,34 +53,52 @@ async def watch_pi(bot: Bot, pi: PiClient, session_factory: async_sessionmaker[A
         event = tracker.observe(await pi.is_healthy())
         if event is not None:
             logger.warning("raspberry pi state changed: %s", event)
-            async with session_factory() as db:
-                chat_ids = await access.adult_chat_ids(db)
-            for chat_id in chat_ids:
-                try:
-                    await send_long(bot, chat_id, PI_DOWN_TEXT if event == "down" else PI_UP_TEXT)
-                except TelegramAPIError as exc:
-                    logger.warning("could not notify a parent: %s", type(exc).__name__)
+            await _tell_adults(bot, session_factory, PI_DOWN_TEXT if event == "down" else PI_UP_TEXT)
         await asyncio.sleep(CHECK_INTERVAL_SECONDS)
 
 
-async def sync_family_once(pi: PiClient, session_factory: async_sessionmaker[AsyncSession]) -> None:
+def left_family_text(name: str) -> str:
+    return (
+        f"👤 {name}: такого человека больше нет в HomeSec, поэтому доступ в Luna теперь гостевой. "
+        "Память, напоминания и списки сохранены.\n"
+        "Вернуть в семью или убрать совсем можно в «🏠 Семья» → «👥 Люди»."
+    )
+
+
+async def _tell_adults(bot: Bot, session_factory: async_sessionmaker[AsyncSession], text: str) -> None:
+    async with session_factory() as db:
+        chat_ids = await access.adult_chat_ids(db)
+    for chat_id in chat_ids:
+        try:
+            await send_long(bot, chat_id, text)
+        except TelegramAPIError as exc:
+            logger.warning("could not notify a parent: %s", type(exc).__name__)
+
+
+async def sync_family_once(bot: Bot, pi: PiClient, session_factory: async_sessionmaker[AsyncSession]) -> None:
     """Follow renames, role changes and removals made on the Pi, and repair missing links."""
     people = await pi.people()
     async with session_factory() as db:
-        missing_links = await access.reconcile_family(db, people)
-    for person_id, telegram_id in missing_links:
+        result = await access.reconcile_family(db, people)
+    if result.refused:
+        logger.warning("family sync skipped: the Pi's people list looks empty, malformed or reset")
+        return
+    for name in result.left_family:
+        logger.warning("a member left the family on the Pi and became a guest")
+        await _tell_adults(bot, session_factory, left_family_text(name))
+    for person_id, telegram_id in result.missing_links:
         try:
             await pi.link_telegram(person_id, telegram_id)
         except PiConflictError:
             logger.warning("telegram account of person %s is linked to someone else", person_id)
 
 
-async def watch_family(pi: PiClient, session_factory: async_sessionmaker[AsyncSession]) -> None:
+async def watch_family(bot: Bot, pi: PiClient, session_factory: async_sessionmaker[AsyncSession]) -> None:
     while True:
         async with session_factory() as db:
             await access.expire_applications(db)  # does not depend on the Pi being up
         try:
-            await sync_family_once(pi, session_factory)
+            await sync_family_once(bot, pi, session_factory)
         except (PiUnavailableError, PiNotFoundError) as exc:
             logger.warning("family sync failed: %s", type(exc).__name__)
         await asyncio.sleep(FAMILY_SYNC_INTERVAL_SECONDS)
@@ -94,3 +114,18 @@ async def send_heartbeats(pi: PiClient, session_factory: async_sessionmaker[Asyn
         except (PiUnavailableError, PiConflictError, PiNotFoundError) as exc:
             logger.warning("heartbeat failed: %s", type(exc).__name__)
         await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
+
+
+async def supervise(
+    name: str, job: Callable[[], Awaitable[None]], restart_delay: float = RESTART_DELAY_SECONDS
+) -> None:
+    """Keep a background loop alive: an unexpected error is logged and the loop starts again."""
+    while True:
+        try:
+            await job()
+            logger.warning("background job %s returned; starting it again", name)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("background job %s failed; starting it again in %ss", name, restart_delay)
+        await asyncio.sleep(restart_delay)
