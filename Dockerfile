@@ -3,8 +3,8 @@
 # ============================================================================
 FROM python:3.12-slim-bookworm AS builder
 
-# Install the latest official uv binary
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+# The official uv binary, pinned so a rebuild never changes the toolchain silently
+COPY --from=ghcr.io/astral-sh/uv:0.13.0 /uv /uvx /bin/
 
 WORKDIR /app
 

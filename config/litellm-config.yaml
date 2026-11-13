@@ -98,18 +98,6 @@ model_list:
       output_cost_per_token: 0.000020000
 
   # ----------------------------------------------------------------------------
-  # 4. Логический роутер с отказоустойчивостью (Failover / Routing Group)
-  # ----------------------------------------------------------------------------
-  - model_name: luna-auto
-    litellm_params:
-      model: ollama/qwen2.5-coder:7b
-      api_base: os.environ/OLLAMA_API_BASE
-      num_ctx: 8192
-    model_info:
-      description: "Авто-выбор: код отдаётся локальной RX 580, при перегрузке — Claude Sonnet"
-      mode: chat
-
-  # ----------------------------------------------------------------------------
   # 5. Совместимость с HomeSec (Алиасы claude-opus-4-8 и claude-haiku-4-5)
   # ----------------------------------------------------------------------------
   - model_name: claude-opus-4-8
@@ -147,14 +135,10 @@ model_list:
       output_cost_per_token: 0.000002500
 
 router_settings:
-  routing_strategy: latency-based-routing
+  # Luna chooses its own order of models per feature (assistant/llm.py), so luna-* groups have no
+  # gateway fallbacks: a text-only coder model answering a tool or audio request invents results.
+  # The claude-* aliases serve HomeSec and keep theirs.
   fallbacks:
-    - luna-smart: ["luna-pro", "luna-fast", "luna-coder"]
-    - luna-pro: ["luna-smart", "luna-fast", "luna-coder"]
-    - luna-fast: ["luna-coder"]
-    - luna-coder: ["luna-fast"]
-    - luna-local: ["luna-fast"]
-    - luna-auto: ["luna-coder", "luna-smart", "luna-fast"]
     - claude-opus-4-8: ["claude-haiku-4-5", "luna-coder"]
     - claude-sonnet-4-6: ["claude-haiku-4-5"]
     - claude-haiku-4-5: ["claude-sonnet-4-6"]
@@ -162,10 +146,12 @@ router_settings:
   cooldown_time: 30
 
 # ==============================================================================
-# 5. Кэширование Redis и Настройки Наблюдаемости
+# 5. Наблюдаемость и тайм-ауты
 # ==============================================================================
 litellm_settings:
   drop_params: true
+  # No request may hang longer than this; Luna's own client gives up after 90 s.
+  request_timeout: 120
   set_verbose: false
   callbacks: ["config.langfuse_v2_logger.langfuse_v2_logger"]
 

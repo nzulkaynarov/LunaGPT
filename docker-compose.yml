@@ -4,7 +4,7 @@ services:
   # Единая точка входа для WebUI, VS Code, Antigravity, Aider и CLI-агентов
   # ============================================================================
   litellm:
-    image: ghcr.io/berriai/litellm:main-latest
+    image: ghcr.io/berriai/litellm:main-latest@sha256:030121401c60d732a2cdf8fd485c91432d40388b046bfa3e0b2d3370f26378c9  # pinned to the running build; change on purpose
     container_name: lunagpt-gateway
     restart: unless-stopped
     ports:
@@ -36,7 +36,7 @@ services:
   # 4. Langfuse Server (LLM Observability, Metrics & Tracing)
   # ============================================================================
   langfuse-server:
-    image: ghcr.io/langfuse/langfuse:2
+    image: ghcr.io/langfuse/langfuse:2@sha256:85c278dcab96c15db94191a5c1664f85aba2d7fb6771a00e99681c902c4b7015  # pinned to the running build; change on purpose
     container_name: lunagpt-langfuse
     mem_limit: 768m
     restart: unless-stopped
@@ -90,7 +90,7 @@ services:
   # 6. SearXNG (Приватный метапоисковик для автономного веб-поиска LunaGPT)
   # ============================================================================
   searxng:
-    image: searxng/searxng:latest
+    image: searxng/searxng:latest@sha256:c750ee1d859b26d3aeae51c07f6a48c3a0bfbaa9195d71a18b258862d88c4c3c  # pinned to the running build; change on purpose
     container_name: lunagpt-searxng
     mem_limit: 256m
     restart: unless-stopped
