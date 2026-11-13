@@ -31,7 +31,8 @@ async def _due(db_sessions: async_sessionmaker[AsyncSession]) -> datetime:
     async with db_sessions() as db:
         row = await db.scalar(select(AssistantReminder))
         assert row is not None
-        return reminder_desk.to_local(row.due_at)
+        local: datetime = reminder_desk.to_local(row.due_at)
+        return local
 
 
 @pytest.mark.asyncio

@@ -58,7 +58,7 @@ async def test_bot_adds_facts_only_for_questions_about_luna(monkeypatch: pytest.
     instance = bot.LunaBot.__new__(bot.LunaBot)
     session = AsyncMock()
     session.__aenter__.return_value = AsyncMock()
-    instance._sessions = lambda: session  # type: ignore[assignment]
+    instance._sessions = lambda: session
     member = bot.AssistantMember(telegram_id=1, name="Зарина", role="kid")
     assert "собрал Хозяин" in await instance._about(member, "кто тебя создал?")
     assert await instance._about(member, "который час?") == ""

@@ -62,7 +62,7 @@ async def test_each_person_is_told_once_and_the_button_brings_the_menu(
     assert kid is not None
     callback = MagicMock(data="upd", answer=AsyncMock())
     callback.message = MagicMock(spec=Message, delete=AsyncMock())
-    luna._send = AsyncMock()  # type: ignore[method-assign]
+    luna._send = AsyncMock()
     await luna._restart(callback, kid)
     callback.message.delete.assert_awaited_once()
     assert luna._send.await_args.args[1] == updates.RESTARTED

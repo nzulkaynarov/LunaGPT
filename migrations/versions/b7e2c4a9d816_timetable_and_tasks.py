@@ -43,7 +43,12 @@ def upgrade() -> None:
     op.create_index("ix_assistant_tasks_member_id", "assistant_tasks", ["member_id"])
     op.add_column("assistant_reminders", sa.Column("task_id", sa.BigInteger(), nullable=True))
     op.create_foreign_key(
-        "fk_assistant_reminders_task_id", "assistant_reminders", "assistant_tasks", ["task_id"], ["id"], ondelete="CASCADE"
+        "fk_assistant_reminders_task_id",
+        "assistant_reminders",
+        "assistant_tasks",
+        ["task_id"],
+        ["id"],
+        ondelete="CASCADE",
     )
     op.create_index("ix_assistant_reminders_task_id", "assistant_reminders", ["task_id"])
 
