@@ -131,7 +131,22 @@ class AssistantMember(Base):
     brief_sent_on: Mapped[date | None] = mapped_column(Date, nullable=True)
     google_calendar_id: Mapped[str | None] = mapped_column(String(254), nullable=True)
     seen_version: Mapped[str | None] = mapped_column(String(16), nullable=True)  # the update this person was told of
+    report_sent_on: Mapped[date | None] = mapped_column(Date, nullable=True)  # owner's weekly usage report
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class AssistantUsage(Base):
+    """How often a person used a feature on a local day, and what the models cost; never any text."""
+
+    __tablename__ = "assistant_usage"
+
+    member_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("assistant_members.telegram_id", ondelete="CASCADE"), primary_key=True
+    )
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    feature: Mapped[str] = mapped_column(String(40), primary_key=True)
+    count: Mapped[int] = mapped_column(Integer, server_default="0", default=0, nullable=False)
+    cost_usd: Mapped[Decimal] = mapped_column(Numeric(10, 6), server_default="0", default=Decimal(0), nullable=False)
 
 
 class AssistantMemory(Base):

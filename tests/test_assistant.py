@@ -121,7 +121,8 @@ async def test_voice_is_shown_and_answered_like_text(harness: Any, monkeypatch: 
     _as_member(monkeypatch, _member())
     transcribe = _hearing(instance, "какая погода")
     await instance.on_message(_voice_message())
-    transcribe.assert_awaited_once_with("adult", 1, b"ogg", None, False)
+    assert transcribe.await_args is not None
+    assert transcribe.await_args.args[:3] == ("adult", 1, b"ogg") and transcribe.await_args.args[4] is False
     assert send.await_args_list[0].args[1] == "🗣 «какая погода»"
     assert answer.call_args.args[3] == "какая погода"
     assert _sent(send) == "ответ"
@@ -1263,9 +1264,13 @@ async def test_family_spending_is_not_metered_and_child_age_reaches_the_model(
     kid = _member("kid")
     kid.birth_year = instance._today().year - 14
     _as_member(monkeypatch, kid)
+    record = AsyncMock()
+    monkeypatch.setattr(access, "record_spend", record)
+    answer.side_effect = lambda *args: args[5].on_cost(0.2) or "ответ"  # the cost is seen for the report
     await instance.on_message(_message("вопрос"))
     options = answer.await_args.args[5]
-    assert options.age == 14 and options.on_cost is None and options.local_only is False
+    assert options.age == 14 and options.local_only is False
+    record.assert_not_awaited()  # only guests have a money limit
 
 
 @pytest.mark.asyncio

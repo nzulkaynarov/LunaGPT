@@ -36,7 +36,7 @@ from aiohttp import ClientError
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from lunagpt.assistant import access, updates
+from lunagpt.assistant import access, updates, usage
 from lunagpt.assistant.about import about_luna, is_about_question, owner_name
 from lunagpt.assistant.calendar_desk import CALENDAR_PREFIXES, CalendarDesk, is_calendar_request
 from lunagpt.assistant.gcal import GoogleCalendar
@@ -107,6 +107,21 @@ OLD_BUTTONS = {
     "🐈 Про Луну": BTN_STORY,
 }
 OLD_SHARED = "📺 Общие устройства"
+# Which part of Luna a menu button opens, for the usage counts.
+MENU_FEATURES = {
+    BTN_DAY: "day",
+    BTN_LISTS: "lists",
+    BTN_MEMORY: "memory",
+    BTN_INTERNET: "internet",
+    BTN_FAMILY: "family",
+    BTN_HELP: "help",
+    BTN_ASK_TIME: "internet",
+    BTN_QUIZ: "quiz",
+    BTN_PEOPLE: "people",
+    BTN_INVITE: "people",
+    BTN_STORY: "stories",
+    BTN_PHRASE: "phrases",
+}
 SHARED_MOVED = (
     "📺 Общие устройства теперь в боте HomeSec, кнопка «📺 Общие устройства»: там те же действия. "
     "Я занимаюсь личными делами, а домашней сетью управляет HomeSec."
@@ -463,6 +478,7 @@ class LunaBot:
             await self._drop_prompt(message)
             return
         if picture is not None:
+            await self._count(user_id, "photo")
             await self._photo(member, (message.caption or "").strip(), picture, message.message_id)
             return
         spoken_note = message.voice or message.video_note
@@ -522,6 +538,7 @@ class LunaBot:
             async with ChatActionSender.typing(chat_id=user_id, bot=self._bot):
                 said = await self.lists.request(member, text)
             if said is not None:
+                await self._count(user_id, "lists")
                 self._allow_request(user_id)  # counts like a chat turn; anything else goes on to the chat
                 await self._keep_turn(member, text, said)
                 return
@@ -532,6 +549,9 @@ class LunaBot:
             await self._chat(member, without_voice_words(text), speak=True)
             return
         await self._chat(member, text, speak=spoken_note is not None, message_id=message.message_id)
+
+    async def _count(self, member_id: int, feature: str, cost: float = 0.0) -> None:
+        await usage.record(self._sessions, member_id, feature, self._today(), cost)
 
     async def _drop_prompt(self, message: Message) -> None:
         """A "reply to this message" prompt has done its job once answered, so it leaves the chat."""
@@ -577,6 +597,9 @@ class LunaBot:
             await self.phrases.ask(member)
         else:
             return False
+        feature = MENU_FEATURES.get(text)
+        if feature is not None:
+            await self._count(member.telegram_id, feature)
         return True
 
     async def on_callback(self, callback: CallbackQuery) -> None:
@@ -589,6 +612,9 @@ class LunaBot:
             await callback.answer("Нет доступа", show_alert=True)
             return
         await callback.answer()
+        feature = usage.feature_of_prefix(prefix)
+        if feature is not None:
+            await self._count(user_id, feature)
         args = data.split(":")[1:]
         if prefix == updates.UPDATE_PREFIX:
             await self._restart(callback, member)
@@ -822,7 +848,7 @@ class LunaBot:
                         member.role,
                         user_id,
                         audio.read(),
-                        costs.append if member.role == "guest" else None,
+                        costs.append,
                         access.money_limit_reached(member, today),
                     )
                     if audio is not None
@@ -831,9 +857,10 @@ class LunaBot:
         except (TelegramAPIError, ClientError, TimeoutError) as exc:
             logger.warning("could not download a voice note: %s", type(exc).__name__)
             words = None
-        if any(costs):
+        if any(costs) and member.role == "guest":
             async with self._sessions() as db:
                 await access.record_spend(db, user_id, sum(costs), today)
+        await self._count(user_id, "voice", sum(costs))
         if not words:
             await self._send(user_id, VOICE_FAILED if words is None else VOICE_NOT_HEARD)
             return None
@@ -913,7 +940,7 @@ class LunaBot:
                 options = ReplyOptions(
                     age=access.age_of(current, today),
                     local_only=access.money_limit_reached(current, today),
-                    on_cost=costs.append if current.role == "guest" else None,
+                    on_cost=costs.append,
                     family_facts=await self._memory.family.recall(current.role, text) if self._memory else (),
                     spoken=speak,
                     image=image,
@@ -931,9 +958,10 @@ class LunaBot:
             self._history[user_id].append({"role": "assistant", "content": reply})
             if self._memory:
                 await self._memory.save_exchange(user_id, said, reply, HISTORY_MESSAGES)
-        if any(costs):
+        if any(costs) and current.role == "guest":
             async with self._sessions() as db:
                 await access.record_spend(db, user_id, sum(costs), today)
+        await self._count(user_id, "chat", sum(costs))
         await send_model_reply(self._bot, user_id, reply)
         await self._react(user_id, message_id, DONE_REACTION if member.role == "kid" else None)
         if speak:
@@ -1094,6 +1122,7 @@ class LunaBot:
         if await self._may_ask(member):
             async with ChatActionSender.typing(chat_id=member.telegram_id, bot=self._bot):
                 said = await self.reminders.create(member, text)
+            await self._count(member.telegram_id, "reminders")
             await self._keep_turn(member, text, said)
 
     async def _keep_turn(self, member: AssistantMember, text: str, said: str) -> None:

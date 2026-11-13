@@ -116,6 +116,8 @@ from lunagpt.models import (  # noqa: E402
     AssistantReminder,
     AssistantSchedule,
     AssistantTask,
+    AssistantTimeRequest,
+    AssistantUsage,
 )
 
 TABLES = [
@@ -133,6 +135,8 @@ TABLES = [
         AssistantCatStory,
         AssistantFamilyList,
         AssistantFamilyListItem,
+        AssistantTimeRequest,
+        AssistantUsage,
     )
 ]
 

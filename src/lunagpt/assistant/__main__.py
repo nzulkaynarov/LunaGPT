@@ -2,9 +2,11 @@
 
 import asyncio
 import logging
+from datetime import UTC, datetime, timedelta
 
 from aiogram import Bot, Dispatcher
 
+from lunagpt.assistant import usage
 from lunagpt.assistant.bot import LunaBot, build_router, watch_time_requests
 from lunagpt.assistant.llm import generate_quiz, generate_reply
 from lunagpt.assistant.memories import Memory
@@ -15,6 +17,11 @@ from lunagpt.config import settings
 from lunagpt.db import async_session_factory
 
 logger = logging.getLogger("lunagpt.assistant")
+
+
+def local_now() -> datetime:
+    """The family's wall clock, without a timezone, as the weekly report compares hours and days."""
+    return (datetime.now(UTC) + timedelta(hours=settings.luna_utc_offset_hours)).replace(tzinfo=None)
 
 
 async def main() -> None:
@@ -37,6 +44,7 @@ async def main() -> None:
         supervise("time requests", lambda: watch_time_requests(bot, pi, async_session_factory)),
         supervise("reminders", luna.reminders.watch),
         supervise("updates", luna.watch_updates),
+        supervise("weekly report", lambda: usage.watch_weekly(bot, async_session_factory, local_now)),
     )
 
 
