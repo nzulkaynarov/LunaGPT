@@ -305,7 +305,7 @@ async def test_summary_counts_every_state(desk: Any, sessions: Any) -> None:
     async with sessions() as db:
         db.add(AssistantMember(telegram_id=600, name="Гость", role="guest"))
         await db.commit()
-    text, markup = await desk._summary()
+    text, markup = await desk.summary()
     labels = [row[0].text for row in markup.inline_keyboard]
     assert text == "👥 Люди"
     assert labels == ["Семья: 2", "Гости: 1", "В ожидании: 1", "Отказано: 1", "🔎 Найти по номеру"]

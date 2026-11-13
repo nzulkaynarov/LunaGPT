@@ -282,3 +282,17 @@ async def test_brief_settings_and_morning_send(
     sent = _last(telegram)
     assert "Ташкент: от 1° до 8°, ясно" in sent and "• 18:00 — собрание" in sent and "завтра" not in sent
     assert await desk.send_briefs() == 0  # once a morning
+
+
+@pytest.mark.asyncio
+async def test_my_day_shows_the_calendar_only_once_google_is_connected(
+    db_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    member = await _member(db_sessions)
+    hidden = reminder_desk.ReminderDesk(_telegram(), db_sessions)
+    shown = reminder_desk.ReminderDesk(_telegram(), db_sessions, calendar=True)
+    text, markup = await hidden.view(member)
+    assert text.startswith(reminder_desk.DAY_TITLE)
+    assert "cal" not in [b.callback_data for row in markup.inline_keyboard for b in row]
+    _, markup = await shown.view(member)
+    assert "cal" in [b.callback_data for row in markup.inline_keyboard for b in row]

@@ -351,7 +351,7 @@ class PeopleDesk:
         async with self._sessions() as db:
             member = await db.get(AssistantMember, telegram_id, with_for_update=True)
             if member is None or member.role != "guest":
-                await self._edit(callback, *await self._summary())
+                await self._edit(callback, *await self.summary())
                 return
             person, problem = await self._link_person(telegram_id, person_id)
             if person is None:
@@ -409,7 +409,7 @@ class PeopleDesk:
 
     # ---- overview ----
 
-    async def _summary(self) -> View:
+    async def summary(self) -> View:
         async with self._sessions() as db:
             members = await access.list_members(db)
             pending = await access.list_applications(db, access.PENDING)
@@ -642,7 +642,7 @@ class PeopleDesk:
         return f"📞 {phone}\n{hint}", InlineKeyboardMarkup(inline_keyboard=rows)
 
     async def send_summary(self, chat_id: int) -> None:
-        text, markup = await self._summary()
+        text, markup = await self.summary()
         await self._bot.send_message(chat_id, text, reply_markup=markup)
 
     async def send_invite(self, chat_id: int) -> None:
@@ -660,7 +660,7 @@ class PeopleDesk:
     async def handle(self, callback: CallbackQuery, actor: AssistantMember, prefix: str, args: list[str]) -> None:
         """Every action here is open to adults only; LunaBot checks that before calling."""
         if prefix == "pl":
-            await self._edit(callback, *await self._summary())
+            await self._edit(callback, *await self.summary())
         elif prefix == "pa":
             await self._edit(callback, *self._age_view(int(args[0])))
         elif prefix == "pay":

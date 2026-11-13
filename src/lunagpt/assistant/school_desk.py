@@ -219,7 +219,7 @@ class SchoolDesk:
                     text = f"📝 {when} — {school.task_line(p.subject, p.task)}"
                     db.add(AssistantReminder(member_id=user_id, text=text, due_at=to_utc(p.remind_at), task_id=task.id))
             await db.commit()
-        text = f"📝 Сохранила заданий: {len(planned)}. Список — в «🔔 Напоминания» → «📝 Задания»."
+        text = f"📝 Сохранила заданий: {len(planned)}. Список — в «🗓 Мой день» → «📝 Домашка»."
         if self.mirror is not None:
             try:
                 copied = await self.mirror.sync_tasks(user_id)
@@ -264,7 +264,7 @@ class SchoolDesk:
 
     async def schedule_view(self, user_id: int) -> tuple[str, InlineKeyboardMarkup]:
         days = await self.timetable(user_id)
-        back = [_button("← Напоминания", "rm")]
+        back = [_button("← Мой день", "rm")]
         if not days:
             text = "📚 Расписания пока нет.\n\nПришли фото расписания с подписью «расписание» или напиши его текстом."
             return text, InlineKeyboardMarkup(inline_keyboard=[back])
@@ -274,14 +274,14 @@ class SchoolDesk:
     async def tasks_view(self, user_id: int) -> tuple[str, InlineKeyboardMarkup]:
         tasks = await self.open_tasks(user_id)
         today = local_now().date()
-        back = [_button("← Напоминания", "rm")]
+        back = [_button("← Мой день", "rm")]
         if not tasks:
             text = (
                 "📝 Заданий нет.\n\nНапиши «задали по математике № 125 к пятнице» "
                 "или пришли фото дневника с подписью «запиши домашку»."
             )
             return text, InlineKeyboardMarkup(inline_keyboard=[back])
-        lines = ["📝 Задания:\n"]
+        lines = ["📝 Домашка:\n"]
         for number, task in enumerate(tasks[:LIST_LIMIT], start=1):
             lines.append(
                 f"{number}. {school.task_line(task.subject, task.text)} — {school.due_text(task.due_on, today)}"

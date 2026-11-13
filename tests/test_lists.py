@@ -121,7 +121,7 @@ async def test_a_tap_ticks_a_line_and_clearing_removes_it(db_sessions: async_ses
     await desk.view(people["mom"])
     overview, markup = _sent(telegram)
     assert overview == list_desk.OVERVIEW
-    assert [b[0] for b in _buttons(markup)] == ["🛒 Покупки · 0", "🧹 Дела · 0", "🔒 Мои дела"]
+    assert [b[0] for b in _buttons(markup)] == ["🛒 Покупки · 0", "🧹 Дела по дому · 0", "👤 Мои дела"]
     shopping = _buttons(markup)[0][1].split(":")[1]
 
     reply = MagicMock(spec=Message)
@@ -156,7 +156,7 @@ async def test_a_named_list_is_created_ticked_by_voice_and_gone_when_empty(
     _hears(monkeypatch, '{"action": "add", "list": "дача", "items": ["шланг"]}')
     await desk.request(people["mom"], "добавь шланг в список дача")
     assert "📝 Дача: осталось 1" in _sent(telegram)[0] and await desk.names(people["mom"]) == (
-        ["Покупки", "Дела", "Дача"],
+        ["Покупки", "Дела по дому", "Дача"],
         [],
     )
 
@@ -172,7 +172,7 @@ async def test_a_named_list_is_created_ticked_by_voice_and_gone_when_empty(
     clear = _callback(f"flc:{dacha}")
     await desk.handle(clear, people["mom"], "flc", [str(dacha)])
     assert clear.message.edit_text.call_args.args[0] == list_desk.OVERVIEW and await desk.names(people["mom"]) == (
-        ["Покупки", "Дела"],
+        ["Покупки", "Дела по дому"],
         [],
     )
 
@@ -203,14 +203,15 @@ async def test_the_chat_tool_adds_to_a_list_and_reports_what_was_there(
 ) -> None:
     people = await _family(db_sessions)
     desk = list_desk.ListDesk(_telegram(), db_sessions)
-    assert await desk.add_from_chat(people["mom"], "дела", ["Повесить карниз ", "прикрутить полки"]) == (
-        "Добавлено в «Дела»: Повесить карниз, прикрутить полки."
+    assert await desk.add_from_chat(people["mom"], "дела по дому", ["Повесить карниз ", "прикрутить полки"]) == (
+        "Добавлено в «Дела по дому»: Повесить карниз, прикрутить полки."
     )
-    assert await desk.add_from_chat(people["kid"], "Дела", ["повесить карниз", "разобрать сумки"]) == (
-        "Добавлено в «Дела»: разобрать сумки. Уже были в списке: повесить карниз."
+    assert await desk.add_from_chat(people["kid"], "Дела по дому", ["повесить карниз", "разобрать сумки"]) == (
+        "Добавлено в «Дела по дому»: разобрать сумки. Уже были в списке: повесить карниз."
     )
-    assert await desk.add_from_chat(people["mom"], "Дела", ["  "]) == "Нечего добавлять."
-    assert "Дела (общий): Повесить карниз, прикрутить полки, разобрать сумки" in await desk.planner_text(people["kid"])
+    assert await desk.add_from_chat(people["mom"], "Дела по дому", ["  "]) == "Нечего добавлять."
+    planned = await desk.planner_text(people["kid"])
+    assert "Дела по дому (общий): Повесить карниз, прикрутить полки, разобрать сумки" in planned
 
 
 @pytest.mark.asyncio
@@ -222,13 +223,13 @@ async def test_a_personal_list_is_seen_only_by_its_owner(
     desk = list_desk.ListDesk(telegram, db_sessions)
     _hears(monkeypatch, '{"action": "add", "list": "Мои дела", "items": ["записаться к врачу"], "personal": true}')
     assert await desk.request(people["mom"], "добавь в мой список записаться к врачу") == (
-        "✅ Добавила в «🔒 Мои дела»: записаться к врачу"
+        "✅ Добавила в «👤 Мои дела»: записаться к врачу"
     )
-    assert await desk.names(people["mom"]) == (["Покупки", "Дела"], ["Мои дела"])
-    assert await desk.names(people["kid"]) == (["Покупки", "Дела"], [])
+    assert await desk.names(people["mom"]) == (["Покупки", "Дела по дому"], ["Мои дела"])
+    assert await desk.names(people["kid"]) == (["Покупки", "Дела по дому"], [])
     assert "Мои дела (личный): записаться к врачу" in await desk.planner_text(people["mom"])
     assert "врачу" not in await desk.planner_text(people["kid"])
-    assert await desk.brief_lines(people["mom"], date(2026, 11, 13)) == ["\n🔒 Мои дела: записаться к врачу"]
+    assert await desk.brief_lines(people["mom"], date(2026, 11, 13)) == ["\n👤 Мои дела: записаться к врачу"]
 
     async with db_sessions() as db:
         mine = await db.scalar(select(AssistantFamilyList.id).where(AssistantFamilyList.owner_id == MOM))
@@ -245,7 +246,7 @@ async def test_a_personal_list_is_seen_only_by_its_owner(
     assert "Мои дела ·" not in str(_sent(telegram)[1])
     _hears(monkeypatch, '{"action": "add", "list": "Мои дела", "items": ["купить подарок маме"], "personal": true}')
     await desk.request(people["kid"], "добавь в мой список купить подарок маме")
-    assert await desk.names(people["kid"]) == (["Покупки", "Дела"], ["Мои дела"])
+    assert await desk.names(people["kid"]) == (["Покупки", "Дела по дому"], ["Мои дела"])
     assert "подарок" not in await desk.planner_text(people["mom"])
 
 
@@ -257,12 +258,12 @@ async def test_the_my_list_button_opens_a_personal_list_and_the_chat_adds_to_it(
     desk = list_desk.ListDesk(_telegram(), db_sessions)
     tap = _callback("flm")
     await desk.handle(tap, people["mom"], "flm", [])
-    assert tap.message.edit_text.call_args.args[0].startswith("🔒 Мои дела: осталось 0")
+    assert tap.message.edit_text.call_args.args[0].startswith("👤 Мои дела: осталось 0")
     assert await desk.add_from_chat(people["mom"], "", ["позвонить бухгалтеру"], personal=True) == (
-        "Добавлено в «🔒 Мои дела»: позвонить бухгалтеру."
+        "Добавлено в «👤 Мои дела»: позвонить бухгалтеру."
     )
     reply = MagicMock(spec=Message)
-    reply.reply_to_message = MagicMock(text=list_desk.ADD_PROMPT.format(name="🔒 Мои дела"))
+    reply.reply_to_message = MagicMock(text=list_desk.ADD_PROMPT.format(name="👤 Мои дела"))
     await desk.add_from_reply(people["mom"], reply, "сдать отчёт")
     family, mine = await desk.names(people["mom"])
     assert mine == ["Мои дела"] and "сдать отчёт" in await desk.planner_text(people["mom"])

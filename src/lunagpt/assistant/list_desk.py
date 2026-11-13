@@ -28,9 +28,10 @@ MAX_IN_PROMPT = 40
 MAX_BUTTON_CHARS = 24
 DONE_KEPT = timedelta(days=2)  # a ticked line nobody cleared goes away by itself
 ICONS = {lists.SHOPPING: "🛒", lists.CHORES: "🧹"}
-LOCK = "🔒"
+LOCK = "👤"  # only mine; the family's things carry 🏠 in the menus
+OLD_LOCK = "🔒"  # prompts sent before the change still carry it
 OVERVIEW = (
-    "📋 Списки. Семейные видит и меняет вся семья, личные 🔒 — только ты.\n"
+    "📋 Списки. 🏠 Семейные видит и меняет вся семья, 👤 личные — только ты.\n"
     "Скажи или напиши: «добавь молоко и хлеб в покупки», «вычеркни молоко», «добавь шланг в список Дача», "
     "«добавь в мой список записаться к врачу»."
 )
@@ -340,9 +341,10 @@ class ListDesk:
             await self._bot.send_message(member.telegram_id, NOTHING_TO_ADD)
             return
         shown = named.group(1)
-        personal = shown.startswith(LOCK + " ")
+        personal = shown.startswith((LOCK + " ", OLD_LOCK + " "))
         async with self._sessions() as db:
-            target = await self._named(db, member, shown.removeprefix(LOCK + " "), personal, create=False)
+            name = shown.removeprefix(LOCK + " ").removeprefix(OLD_LOCK + " ")
+            target = await self._named(db, member, name, personal, create=False)
             if target is None:
                 await self._bot.send_message(member.telegram_id, LIST_GONE)
                 return

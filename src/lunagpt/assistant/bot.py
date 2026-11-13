@@ -69,7 +69,7 @@ from lunagpt.assistant.speech import (
     without_voice_refusals,
     without_voice_words,
 )
-from lunagpt.assistant.stories import ADULT_STORY_PREFIXES, STORY_PREFIXES, StoryDesk
+from lunagpt.assistant.stories import ADULT_STORY_PREFIXES, PHRASE_ASK, STORY_PREFIXES, StoryDesk
 from lunagpt.assistant.telegram import is_reply_to_prompt, remove_menu, send_long, send_model_reply
 from lunagpt.assistant.waiting import Waiting, cat_is_thinking
 from lunagpt.config import settings
@@ -82,36 +82,35 @@ QuizFn = Callable[[int, int | None], Awaitable[QuizQuestion | None]]
 TranscribeFn = Callable[[str, int, bytes, Callable[[float], None] | None, bool], Awaitable[str | None]]
 SpeakFn = Callable[[str], Awaitable[SpokenReply | None]]
 
-BTN_MY_TIME = "⏳ Моё время"
-BTN_ASK_TIME = "🙏 Попросить время"
-BTN_QUIZ = "🧠 Викторина +15 мин"
-BTN_SHARED = "📺 Общие устройства"
-BTN_INVITE = "➕ Пригласить"
-BTN_PEOPLE = "👥 Люди"
-BTN_MEMORY = "🧠 Что ты помнишь"
-BTN_HELP = "❓ Помощь"
-BTN_REMINDERS = "🔔 Напоминания"
-BTN_PHRASE = "😺 Фраза для Луны"
-BTN_STORY = "🐈 Про Луну"
+# The menu: one button per part of life; what is inside opens as inline buttons.
+BTN_DAY = "🗓 Мой день"
 BTN_LISTS = "🛒 Списки"
-MENU_BUTTONS = {
-    BTN_STORY,
-    BTN_LISTS,
-    BTN_PHRASE,
-    BTN_REMINDERS,
-    BTN_MY_TIME,
-    BTN_ASK_TIME,
-    BTN_QUIZ,
-    BTN_SHARED,
-    BTN_INVITE,
-    BTN_PEOPLE,
-    BTN_MEMORY,
-    BTN_HELP,
+BTN_MEMORY = "🧠 Память"
+BTN_INTERNET = "⏳ Интернет"
+BTN_FAMILY = "🏠 Семья"
+BTN_HELP = "❓ Помощь"
+MENU_BUTTONS = {BTN_DAY, BTN_LISTS, BTN_MEMORY, BTN_INTERNET, BTN_FAMILY, BTN_HELP}
+# Inside those menus. The texts are also accepted as typed buttons, since older menus carried them.
+BTN_ASK_TIME = "🙏 Попросить время"
+BTN_QUIZ = "🎯 Викторина +15 мин"
+BTN_PEOPLE = "👥 Люди"
+BTN_INVITE = "➕ Пригласить"
+BTN_SHARED = "📺 Общие устройства"
+BTN_STORY = "🐈 Истории про Луну"
+BTN_PHRASE = "😺 Фраза для Луны"
+# Menus stay on a phone until a message brings a new one, so the old buttons keep working until then.
+OLD_BUTTONS = {
+    "🔔 Напоминания": BTN_DAY,
+    "🧠 Что ты помнишь": BTN_MEMORY,
+    "⏳ Моё время": BTN_INTERNET,
+    "🧠 Викторина +15 мин": BTN_QUIZ,
+    "🐈 Про Луну": BTN_STORY,
 }
 MEMORY_PAGE_SIZE = 8
 SHARED_LABELS = {"kid": "👶 Детский режим", "off": "⛔ Выключено", "adult": "🍿 Для взрослых"}
 TIME_POLL_SECONDS = 30
 TIME_REQUEST_TTL = timedelta(hours=24)
+FAMILY_MENU = "🏠 Семья: люди и заявки, приглашения и общие устройства дома."
 PI_OFFLINE = "Сейчас домашняя сеть не отвечает, попробуй чуть позже."
 NO_DEVICE = "Я не нашла твоё устройство в домашней сети. Попроси родителей привязать его."
 
@@ -174,22 +173,25 @@ VOICE_FAILED = "Не получилось разобрать голосовое.
 NOTHING_TO_SAY = "Спроси что-нибудь, и я отвечу голосом."
 CANNOT_SAY = "Этот ответ вслух не прочитать: он длинный или со ссылками. Спроси покороче."
 VOICE_NOT_HEARD = "Не расслышала слов в этом голосовом. Попробуй ещё раз."
-MEMORY_NOTICE = (
-    " Запоминаю важное о тебе, посмотреть и удалить можно на кнопке «Что ты помнишь». Другие люди этого не видят."
-)
+MEMORY_NOTICE = " Запоминаю важное о тебе, посмотреть и удалить можно в «🧠 Память». Другие люди этого не видят."
 FAMILY_NOTICE = " Чтобы запомнить для всех в семье, напиши: «запомни для семьи, что…»."
+WHOSE = "👤 — видишь только ты, 🏠 — видит вся семья."
 ASK_ANYTHING = "Просто напиши или скажи голосом, что нужно: вопрос, идея, перевод, свежие новости."
 PHOTO_HINT = "📸 Пришли фото задачи, чека или текста, и я разберу.\n\n"
 SCHOOL_HINT = "📚 Фото расписания с подписью «расписание» или «задали …» запомню и напомню вовремя.\n\n"
+DAY_LINE = f"{BTN_DAY} — напоминания, поручения и утренняя сводка: «напомни завтра в 9…», «присылай каждый день…»\n"
+LISTS_LINE = f"{BTN_LISTS} — 🏠 семейные и 👤 личные: «добавь молоко в покупки», «добавь в мой список…»\n"
+MEMORY_LINE = f"{BTN_MEMORY} — 👤 что я помню о тебе, 🏠 общая память семьи и 🐈 истории про Луну\n"
 ADULT_HELP = (
     f"{ASK_ANYTHING}\n\n{PHOTO_HINT}"
-    f"{BTN_PEOPLE} — семья, гости и заявки\n"
-    f"{BTN_SHARED} — телевизор и другое домашнее\n"
-    f"{BTN_INVITE} — отправить приглашение\n"
-    f"{BTN_REMINDERS} — напоминания и утренняя сводка\n"
-    f"{BTN_LISTS} — общие покупки и дела: «добавь молоко в покупки»\n"
-    f"{BTN_STORY} — истории и повадки нашей кошки\n"
-    f"{BTN_MEMORY} — личная и общая память\n\n" + MEMORY_NOTICE.strip() + FAMILY_NOTICE
+    + DAY_LINE
+    + LISTS_LINE
+    + MEMORY_LINE
+    + f"{BTN_FAMILY} — люди, приглашения и общие устройства\n\n"
+    + WHOSE
+    + "\n\n"
+    + MEMORY_NOTICE.strip()
+    + FAMILY_NOTICE
 )
 HELP_TEXT = {
     "owner": ADULT_HELP,
@@ -198,17 +200,18 @@ HELP_TEXT = {
         "Спрашивай что угодно: уроки, игры, код, идеи, свежие новости.\n\n"
         + PHOTO_HINT
         + SCHOOL_HINT
-        + f"{BTN_MY_TIME} — сколько осталось интернета\n"
-        f"{BTN_ASK_TIME} — написать родителям\n"
-        f"{BTN_QUIZ} — ответить и заработать время\n"
-        f"{BTN_PHRASE} — придумать, что я пишу, пока думаю\n"
-        f"{BTN_STORY} — рассказать про повадки и смешные случаи Луны\n"
-        f"{BTN_LISTS} — общие покупки и дела семьи: «добавь сок в покупки»\n"
-        f"{BTN_REMINDERS} — напоминания и утренняя сводка\n"
-        f"{BTN_MEMORY} — личная и общая память\n\n" + MEMORY_NOTICE.strip() + FAMILY_NOTICE
+        + f"{BTN_INTERNET} — сколько осталось, попросить минут у родителей и 🎯 викторина\n"
+        + f"{BTN_DAY} — напоминания, расписание уроков и домашка\n"
+        + LISTS_LINE
+        + MEMORY_LINE.rstrip("\n")
+        + ", там же 😺 фраза для Луны\n\n"
+        + WHOSE
+        + "\n\n"
+        + MEMORY_NOTICE.strip()
+        + FAMILY_NOTICE
     ),
     "guest": (
-        f"{ASK_ANYTHING}\n\n{PHOTO_HINT}{BTN_REMINDERS} — напоминания и утренняя сводка\n"
+        f"{ASK_ANYTHING}\n\n{PHOTO_HINT}{BTN_DAY} — напоминания и утренняя сводка\n"
         f"{BTN_MEMORY} — что я о тебе помню\n\n" + MEMORY_NOTICE.strip()
     ),
 }
@@ -280,20 +283,31 @@ def number_of(args: dict[str, Any]) -> int | None:
 
 
 def menu_layout(role: str) -> list[list[str]]:
-    adults = [[BTN_SHARED, BTN_PEOPLE], [BTN_INVITE, BTN_MEMORY], [BTN_REMINDERS, BTN_LISTS], [BTN_STORY, BTN_HELP]]
+    adults = [[BTN_DAY, BTN_LISTS], [BTN_MEMORY, BTN_FAMILY], [BTN_HELP]]
     layouts = {
         "owner": adults,
         "adult": adults,
-        "kid": [
-            [BTN_MY_TIME, BTN_ASK_TIME],
-            [BTN_QUIZ, BTN_PHRASE],
-            [BTN_STORY, BTN_LISTS],
-            [BTN_REMINDERS, BTN_MEMORY],
-            [BTN_HELP],
-        ],
-        "guest": [[BTN_REMINDERS, BTN_MEMORY], [BTN_HELP]],
+        "kid": [[BTN_INTERNET, BTN_DAY], [BTN_LISTS, BTN_MEMORY], [BTN_HELP]],
+        "guest": [[BTN_DAY, BTN_MEMORY], [BTN_HELP]],
     }
     return layouts[role]
+
+
+def _inline(text: str, data: str) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=text, callback_data=data)
+
+
+def family_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [_inline(BTN_PEOPLE, "fhp"), _inline(BTN_INVITE, "fhi")],
+            [_inline(BTN_SHARED, "shl")],
+        ]
+    )
+
+
+def internet_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[_inline(BTN_ASK_TIME, "nta")], [_inline(BTN_QUIZ, "ntq")]])
 
 
 def main_keyboard(role: str) -> ReplyKeyboardMarkup:
@@ -359,9 +373,12 @@ class LunaBot:
         self._username = bot_username
         self._memory = memory
         self._people = PeopleDesk(bot, session_factory, pi, bot_username, self._welcome)
-        self.calendar = CalendarDesk(bot, session_factory, google_calendar())
+        calendar = google_calendar()
+        self.calendar = CalendarDesk(bot, session_factory, calendar)
         self.school = SchoolDesk(bot, session_factory, mirror=self.calendar)
-        self.reminders = ReminderDesk(bot, session_factory, extra_brief=self._brief_extra, run_task=self._run_task)
+        self.reminders = ReminderDesk(
+            bot, session_factory, extra_brief=self._brief_extra, run_task=self._run_task, calendar=calendar is not None
+        )
         self.phrases = PhraseDesk(bot, session_factory)
         self.stories = StoryDesk(bot, session_factory)
         self.lists = ListDesk(bot, session_factory)
@@ -547,30 +564,35 @@ class LunaBot:
 
     async def _menu_action(self, member: AssistantMember, text: str) -> bool:
         """Run the pressed menu button if this role is allowed to use it."""
+        text = OLD_BUTTONS.get(text, text)
         adult = member.role in access.ADULT_ROLES
+        family = member.role in access.FAMILY_ROLES
+        kid = member.role == "kid"
         if text == BTN_HELP:
             await self._send(member.telegram_id, HELP_TEXT[member.role], main_keyboard(member.role))
+        elif text == BTN_DAY:
+            await self._send(member.telegram_id, *await self.reminders.view(member))
+        elif text == BTN_MEMORY:
+            await self._send(member.telegram_id, *await self._memory_view(member, 0))
+        elif text == BTN_LISTS and family:
+            await self.lists.view(member)
+        elif text == BTN_FAMILY and adult:
+            await self._send(member.telegram_id, FAMILY_MENU, family_keyboard())
         elif text == BTN_PEOPLE and adult:
             await self._people.send_summary(member.telegram_id)
         elif text == BTN_INVITE and adult:
             await self._people.send_invite(member.telegram_id)
         elif text == BTN_SHARED and adult:
             await self._send_shared_list(member)
-        elif text == BTN_MEMORY:
-            await self._send(member.telegram_id, *await self._memory_view(member, 0))
-        elif text == BTN_REMINDERS:
-            await self._send(member.telegram_id, *await self.reminders.view(member))
-        elif member.role == "kid" and text == BTN_MY_TIME:
+        elif text == BTN_INTERNET and kid:
             await self._my_time(member)
-        elif member.role == "kid" and text == BTN_ASK_TIME:
+        elif text == BTN_ASK_TIME and kid:
             await self._ask_time(member, "")
-        elif member.role == "kid" and text == BTN_QUIZ:
+        elif text == BTN_QUIZ and kid:
             await self._start_quiz(member)
-        elif member.role in access.FAMILY_ROLES and text == BTN_STORY:
+        elif text == BTN_STORY and family:
             await self.stories.view(member)
-        elif member.role in access.FAMILY_ROLES and text == BTN_LISTS:
-            await self.lists.view(member)
-        elif member.role == "kid" and text == BTN_PHRASE:
+        elif text == BTN_PHRASE and kid:
             await self.phrases.ask(member)
         else:
             return False
@@ -589,6 +611,18 @@ class LunaBot:
         args = data.split(":")[1:]
         if prefix == updates.UPDATE_PREFIX:
             await self._restart(callback, member)
+        elif prefix == "fhp":
+            await self._edit(callback, *await self._people.summary())
+        elif prefix == "fhi":
+            await remove_menu(callback)
+            await self._people.send_invite(user_id)
+        elif prefix == "nta":
+            await self._ask_time(member, "")
+        elif prefix == "ntq":
+            await self._start_quiz(member)
+        elif prefix == PHRASE_ASK:
+            await self.phrases.ask(member)
+            await remove_menu(callback)
         elif prefix == "quiz":
             await self._answer_quiz(member, int(args[0]))
         elif prefix == "shl":
@@ -633,8 +667,10 @@ class LunaBot:
     def _callback_allowed(role: str, prefix: str) -> bool:
         if prefix == updates.UPDATE_PREFIX:
             return role in access.ROLES
-        if prefix == "quiz":
+        if prefix in ("quiz", "nta", "ntq", PHRASE_ASK):
             return role == "kid"
+        if prefix in ("fhp", "fhi"):
+            return role in access.ADULT_ROLES
         if (
             prefix in ("mem", "memd", "memc", "memy")
             or prefix in REMINDER_PREFIXES | SCHOOL_PREFIXES | CALENDAR_PREFIXES
@@ -733,7 +769,7 @@ class LunaBot:
         ]
         if not rows:
             lines.append("Лимитов на сегодня нет.")
-        await self._send(member.telegram_id, "\n".join(lines))
+        await self._send(member.telegram_id, "⏳ Интернет\n\n" + "\n".join(lines), internet_keyboard())
 
     async def _ask_time(self, member: AssistantMember, reason: str) -> None:
         user_id = member.telegram_id
@@ -764,12 +800,14 @@ class LunaBot:
             await self._send(user_id, f"{describe_restriction(restriction)}\n\n{text}")
             return  # quiz minutes would not lift a pause
         text = "✅ Запрос отправлен родителям. Сообщу, когда они ответят."
+        quiz = None
         try:
             if await self._pi.quiz_available(member.name):
                 text += f"\n\nПока ждёшь, можно заработать +15 минут: нажми «{BTN_QUIZ}»."
+                quiz = InlineKeyboardMarkup(inline_keyboard=[[_inline(BTN_QUIZ, "ntq")]])
         except (PiNotFoundError, PiUnavailableError):
             pass
-        await self._send(user_id, text)
+        await self._send(user_id, text, quiz)
 
     async def _start_quiz(self, member: AssistantMember) -> None:
         user_id = member.telegram_id
@@ -789,7 +827,7 @@ class LunaBot:
             await self._send(user_id, "Не получилось придумать вопрос, попробуй чуть позже.")
             return
         self._quizzes[user_id] = quiz
-        await self._send(user_id, f"🧠 {quiz.topic}\n\n{quiz.q}", quiz_keyboard(quiz.options))
+        await self._send(user_id, f"🎯 {quiz.topic}\n\n{quiz.q}", quiz_keyboard(quiz.options))
 
     def _over_rate_limit(self, user_id: int) -> bool:
         times = self._request_times[user_id]
@@ -1246,7 +1284,12 @@ class LunaBot:
             return view
         text, markup = view
         rows = [*(markup.inline_keyboard if markup else [])]
-        rows.append([InlineKeyboardButton(text="🏠 Общая память", callback_data="fam:0")])
+        rows.append(
+            [
+                InlineKeyboardButton(text="🏠 Общая память", callback_data="fam:0"),
+                InlineKeyboardButton(text=BTN_STORY, callback_data="csi"),
+            ]
+        )
         return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
     async def _memory_view(self, member: AssistantMember, page: int) -> tuple[str, InlineKeyboardMarkup | None]:
@@ -1263,7 +1306,7 @@ class LunaBot:
         shown = facts[page * MEMORY_PAGE_SIZE : (page + 1) * MEMORY_PAGE_SIZE]
         first = page * MEMORY_PAGE_SIZE + 1
         lines = [f"{first + i}. {fact.content}" for i, fact in enumerate(shown)]
-        text = f"🧠 Что я о тебе помню ({len(facts)}):\n\n" + "\n".join(lines) + "\n\nНажми номер, чтобы удалить."
+        text = f"👤 Что я о тебе помню ({len(facts)}):\n\n" + "\n".join(lines) + "\n\nНажми номер, чтобы удалить."
         delete_buttons = [
             InlineKeyboardButton(text=f"🗑 {first + i}", callback_data=f"memd:{fact.id.hex}:{page}")
             for i, fact in enumerate(shown)

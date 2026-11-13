@@ -27,10 +27,12 @@ POLL_SECONDS = 20
 LATE_NOTE_AFTER = timedelta(minutes=15)
 SNOOZES = (10, 60)
 CITY_PROMPT = "Напиши ответом на это сообщение свой город для прогноза погоды."
+DAY_TITLE = "🗓 Мой день"
+BACK_TO_DAY = "← Мой день"
 HOW_TO = "Чтобы добавить, напиши или скажи: «напомни завтра в 9 позвонить бабушке»."
 NOT_UNDERSTOOD = "Не поняла, когда напомнить. Напиши, например: «напомни завтра в 9 позвонить бабушке»."
 NOT_PARSED = "Не получилось разобрать напоминание, попробуй ещё раз чуть позже."
-TOO_MANY = f"У тебя уже {MAX_ACTIVE} напоминаний. Удали лишние в меню «🔔 Напоминания»."
+TOO_MANY = f"У тебя уже {MAX_ACTIVE} напоминаний. Удали лишние в «🗓 Мой день»."
 
 ExtractFn = Callable[[str, datetime, dict[str, object]], Awaitable[reminders.ReminderParts | None]]
 GeocodeFn = Callable[[str], Awaitable[brief.Place | None]]
@@ -81,6 +83,7 @@ class ReminderDesk:
         weather: ForecastFn = brief.forecast,
         extra_brief: ExtraBriefFn | None = None,
         run_task: TaskFn | None = None,
+        calendar: bool = False,
     ) -> None:
         self._bot = bot
         self._sessions = session_factory
@@ -89,6 +92,7 @@ class ReminderDesk:
         self._weather = weather
         self._extra_brief = extra_brief
         self.run_task = run_task  # set by the bot, which owns the chat that carries a task out
+        self.calendar = calendar  # the calendar button only shows once the owner has connected Google
 
     # ---------- creating ----------
 
@@ -220,7 +224,7 @@ class ReminderDesk:
         rows = await self._active(member.telegram_id)
         now = local_now()
         if rows:
-            lines = ["🔔 Твои напоминания:\n"]
+            lines = [f"{DAY_TITLE}\n\n🔔 Напоминания:"]
             for number, row in enumerate(rows[:LIST_LIMIT], start=1):
                 when = reminders.when_text(to_local(row.due_at), now, row.repeat)
                 mark = "🗓 " if row.kind == DO else ""
@@ -229,13 +233,14 @@ class ReminderDesk:
                 lines.append(f"…и ещё {len(rows) - LIST_LIMIT}")
             lines.append(f"\nНажми номер, чтобы удалить. {HOW_TO}")
         else:
-            lines = [f"🔔 Напоминаний пока нет.\n\n{HOW_TO}"]
+            lines = [f"{DAY_TITLE}\n\n🔔 Напоминаний пока нет.\n\n{HOW_TO}"]
         lines.append("\n" + self._brief_status(member))
         numbers = [_button(f"✖ {n}", f"rmd:{row.id}") for n, row in enumerate(rows[:LIST_LIMIT], start=1)]
         keyboard = [numbers[i : i + 5] for i in range(0, len(numbers), 5)]
         if member.role == "kid":  # the school timetable and homework are children's
-            keyboard.append([_button("📚 Расписание", "sk"), _button("📝 Задания", "tk")])
-        keyboard.append([_button("📅 Календарь", "cal")])
+            keyboard.append([_button("📚 Расписание", "sk"), _button("📝 Домашка", "tk")])
+        if self.calendar:
+            keyboard.append([_button("📅 Календарь", "cal")])
         keyboard.append([_button("☀️ Утренняя сводка", "rb")])
         return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard)
 
@@ -258,7 +263,7 @@ class ReminderDesk:
         keyboard = [times[:3], times[3:], [_button("🏙 Город для погоды", "rbc")]]
         if member.brief_time:
             keyboard.append([_button("🔕 Выключить", "rbx")])
-        keyboard.append([_button("← Напоминания", "rm")])
+        keyboard.append([_button(BACK_TO_DAY, "rm")])
         return text, InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     async def handle(self, callback: CallbackQuery, member: AssistantMember, prefix: str, args: list[str]) -> None:

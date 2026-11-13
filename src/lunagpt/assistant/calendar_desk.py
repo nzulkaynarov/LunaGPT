@@ -44,7 +44,7 @@ NOT_SHARED = (
     "с правом «Вносить изменения в мероприятия», и пришли адрес ещё раз."
 )
 UNAVAILABLE = "Google сейчас не отвечает, попробуй чуть позже."
-NOT_LINKED = "Сначала подключи календарь: «🔔 Напоминания» → «📅 Календарь»."
+NOT_LINKED = "Сначала подключи календарь: «🗓 Мой день» → «📅 Календарь»."
 NOT_UNDERSTOOD = "Не поняла, на когда. Напиши, например: «добавь в календарь стоматолог в четверг в 15:00»."
 NOT_PARSED = "Не получилось разобрать событие, попробуй ещё раз чуть позже."
 EXPIRED = "Это уже неактуально, напиши ещё раз."
@@ -190,7 +190,7 @@ class CalendarDesk:
     # ---------- menu ----------
 
     async def view(self, user_id: int) -> tuple[str, InlineKeyboardMarkup]:
-        back = [_button("← Напоминания", "rm")]
+        back = [_button("← Мой день", "rm")]
         if self._calendar is None:
             return f"📅 {NOT_CONFIGURED}", InlineKeyboardMarkup(inline_keyboard=[back])
         calendar_id = await self._calendar_id(user_id)

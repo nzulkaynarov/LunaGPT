@@ -66,7 +66,7 @@ async def test_each_person_is_told_once_and_the_button_brings_the_menu(
     await luna._restart(callback, kid)
     callback.message.delete.assert_awaited_once()
     assert luna._send.await_args.args[1] == updates.RESTARTED
-    assert "⏳ Моё время" in str(luna._send.await_args.args[2])
+    assert "⏳ Интернет" in str(luna._send.await_args.args[2])
 
 
 @pytest.mark.asyncio

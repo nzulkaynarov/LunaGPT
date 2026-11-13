@@ -17,7 +17,8 @@ from lunagpt.models import AssistantCatStory, AssistantMember
 
 logger = logging.getLogger("lunagpt.assistant.stories")
 
-STORY_PREFIXES = {"csa", "csl", "csy", "csn", "csx"}
+STORY_PREFIXES = {"csi", "csa", "csl", "csy", "csn", "csx"}
+PHRASE_ASK = "cpa"  # a child's "make up a phrase" button lives here, next to the stories
 ADULT_STORY_PREFIXES = {"csy", "csn", "csx"}
 MIN_LENGTH = 10
 MAX_LENGTH = 500
@@ -60,15 +61,18 @@ def review_keyboard(story_id: int) -> InlineKeyboardMarkup:
     )
 
 
-def intro_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✍️ Рассказать", callback_data="csa"),
-                InlineKeyboardButton(text="📖 Почитать", callback_data="csl:0"),
-            ]
+def intro_keyboard(role: str) -> InlineKeyboardMarkup:
+    """Stories sit inside "🧠 Память", so the screen leads back there."""
+    rows = [
+        [
+            InlineKeyboardButton(text="✍️ Рассказать", callback_data="csa"),
+            InlineKeyboardButton(text="📖 Почитать", callback_data="csl:0"),
         ]
-    )
+    ]
+    if role == "kid":
+        rows.append([InlineKeyboardButton(text="😺 Фраза для Луны", callback_data=PHRASE_ASK)])
+    rows.append([InlineKeyboardButton(text="← Память", callback_data="mem:0")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 class StoryDesk:
@@ -82,9 +86,12 @@ class StoryDesk:
         found: bool = is_reply_to_prompt(message, PROMPT)
         return found
 
+    async def intro(self, member: AssistantMember) -> tuple[str, InlineKeyboardMarkup]:
+        return INTRO.format(count=len(await self.approved())), intro_keyboard(member.role)
+
     async def view(self, member: AssistantMember) -> None:
-        count = len(await self.approved())
-        await self._bot.send_message(member.telegram_id, INTRO.format(count=count), reply_markup=intro_keyboard())
+        text, markup = await self.intro(member)
+        await self._bot.send_message(member.telegram_id, text, reply_markup=markup)
 
     async def approved(self) -> list[tuple[str, str]]:
         if self._approved is None:
@@ -167,6 +174,9 @@ class StoryDesk:
     # ---------- buttons ----------
 
     async def handle(self, callback: CallbackQuery, member: AssistantMember, prefix: str, args: list[str]) -> None:
+        if prefix == "csi":
+            await self._edit(callback, *await self.intro(member))
+            return
         if prefix == "csa":
             await self.ask(member.telegram_id)
             await remove_menu(callback)

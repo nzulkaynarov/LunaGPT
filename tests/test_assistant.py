@@ -612,10 +612,10 @@ def _callback(data: str, user_id: int = 1) -> MagicMock:
 @pytest.mark.parametrize(
     ("role", "expected", "hidden"),
     [
-        ("owner", bot.BTN_PEOPLE, None),
-        ("adult", bot.BTN_INVITE, bot.BTN_QUIZ),
-        ("kid", bot.BTN_ASK_TIME, bot.BTN_SHARED),
-        ("guest", bot.BTN_HELP, bot.BTN_SHARED),
+        ("owner", bot.BTN_FAMILY, bot.BTN_INTERNET),
+        ("adult", bot.BTN_FAMILY, bot.BTN_INTERNET),
+        ("kid", bot.BTN_INTERNET, bot.BTN_FAMILY),
+        ("guest", bot.BTN_DAY, bot.BTN_LISTS),
     ],
 )
 def test_menu_matches_role(role: str, expected: str, hidden: str | None) -> None:
@@ -786,7 +786,7 @@ async def test_my_time_tells_the_truth_at_bedtime(harness: Any, monkeypatch: pyt
     instance, send, pi = _kid_with_pi(harness, monkeypatch)
     pi.restriction = AsyncMock(return_value=BEDTIME)
     pi.quota = AsyncMock(return_value=[])
-    await instance.on_message(_message(bot.BTN_MY_TIME, 5))
+    await instance.on_message(_message(bot.BTN_INTERNET, 5))
     assert "отбой" in _sent(send) and "08:00" in _sent(send)
 
 
@@ -1417,7 +1417,7 @@ async def test_reminder_phrase_goes_to_reminders_not_the_model(
     instance.reminders.create.assert_awaited_once()
     answer.assert_not_awaited()
     buttons = [b.text for row in bot.main_keyboard(role).keyboard for b in row]
-    assert bot.BTN_REMINDERS in buttons
+    assert bot.BTN_DAY in buttons
 
 
 @pytest.mark.asyncio
@@ -1425,7 +1425,7 @@ async def test_reminders_button_and_callbacks_reach_the_desk(harness: Any, monke
     instance, send, _ = harness
     _as_member(monkeypatch, _member("guest", 5))
     instance.reminders.view = AsyncMock(return_value=("🔔 Напоминаний пока нет.", None))
-    await instance.on_message(_message(bot.BTN_REMINDERS, 5))
+    await instance.on_message(_message(bot.BTN_DAY, 5))
     assert "Напоминаний пока нет" in _sent(send)
     instance.reminders.handle = AsyncMock()
     callback = MagicMock(data="rmd:7", answer=AsyncMock())
@@ -1619,8 +1619,12 @@ async def test_phrase_button_is_for_kids_and_a_reply_becomes_a_suggestion(
     instance.phrases.ask = AsyncMock()
     instance.phrases.suggest = AsyncMock()
     _as_member(monkeypatch, _member("kid", 5))
-    assert any(bot.BTN_PHRASE in [b.text for b in row] for row in bot.main_keyboard("kid").keyboard)
-    await instance.on_message(_message(bot.BTN_PHRASE, 5))
+    kid_intro = [b.callback_data for row in stories.intro_keyboard("kid").inline_keyboard for b in row]
+    adult_intro = [b.callback_data for row in stories.intro_keyboard("adult").inline_keyboard for b in row]
+    assert stories.PHRASE_ASK in kid_intro and stories.PHRASE_ASK not in adult_intro
+    tap = MagicMock(data=stories.PHRASE_ASK, answer=AsyncMock())
+    tap.from_user.id = 5
+    await instance.on_callback(tap)
     instance.phrases.ask.assert_awaited_once()
 
     reply = _message("🐾 Ловлю ответ за хвост…", 5)
@@ -1818,3 +1822,55 @@ async def test_an_answered_prompt_leaves_the_chat(harness: Any, monkeypatch: pyt
     await instance.on_message(_message("просто вопрос", 5))  # an ordinary message deletes nothing
     instance._bot.delete_message.assert_not_awaited()
     answer.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_buttons_of_the_old_menu_still_work(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, _, answer = harness
+    _as_member(monkeypatch, _member("guest", 5))
+    instance.reminders.view = AsyncMock(return_value=("🗓 Мой день", None))
+    await instance.on_message(_message("🔔 Напоминания", 5))
+    instance.reminders.view.assert_awaited_once()
+    answer.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("role", "prefix", "allowed"),
+    [
+        ("owner", "fhp", True),
+        ("adult", "fhi", True),
+        ("kid", "fhp", False),
+        ("kid", "nta", True),
+        ("kid", "ntq", True),
+        ("adult", "nta", False),
+        ("guest", "csi", False),
+        ("kid", stories.PHRASE_ASK, True),
+        ("adult", stories.PHRASE_ASK, False),
+    ],
+)
+def test_menu_callbacks_respect_roles(role: str, prefix: str, allowed: bool) -> None:
+    assert bot.LunaBot._callback_allowed(role, prefix) is allowed
+
+
+@pytest.mark.asyncio
+async def test_family_menu_opens_people_for_adults_only(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, send, answer = harness
+    _as_member(monkeypatch, _member("owner", 5))
+    await instance.on_message(_message(bot.BTN_FAMILY, 5))
+    assert _sent(send) == bot.FAMILY_MENU
+    assert [b.callback_data for row in send.call_args.kwargs["reply_markup"].inline_keyboard for b in row] == [
+        "fhp",
+        "fhi",
+        "shl",
+    ]
+    answer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_internet_screen_offers_asking_and_the_quiz(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, send, pi = _kid_with_pi(harness, monkeypatch)
+    pi.quota = AsyncMock(return_value=[])
+    await instance.on_message(_message(bot.BTN_INTERNET, 5))
+    assert _sent(send).startswith("⏳ Интернет")
+    buttons = [b.callback_data for row in send.call_args.kwargs["reply_markup"].inline_keyboard for b in row]
+    assert buttons == ["nta", "ntq"]
