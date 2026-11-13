@@ -290,6 +290,11 @@ def photo_of(message: Message) -> PhotoSize | Document | None:
     return None
 
 
+def pi_person(member: AssistantMember) -> str:
+    """How the Pi knows this person: by id when linked, which survives renames, else by name."""
+    return str(member.homesec_person_id) if member.homesec_person_id is not None else member.name
+
+
 def needs_adult_attention(text: str) -> bool:
     return bool(SAFETY_PATTERN.search(text))
 
@@ -712,7 +717,7 @@ class LunaBot:
 
     async def _quiz_outcome(self, member: AssistantMember, quiz: QuizQuestion, correct: bool) -> str:
         try:
-            minutes = await self._pi.quiz_result(member.name, correct, quiz.topic)
+            minutes = await self._pi.quiz_result(pi_person(member), correct, quiz.topic)
         except PiConflictError:
             return "Сегодня викторина уже пройдена. Приходи завтра!"
         except (PiNotFoundError, PiUnavailableError):
@@ -723,8 +728,8 @@ class LunaBot:
 
     async def _my_time(self, member: AssistantMember) -> None:
         try:
-            restriction = await self._pi.restriction(member.name)
-            rows = await self._pi.quota(member.name)
+            restriction = await self._pi.restriction(pi_person(member))
+            rows = await self._pi.quota(pi_person(member))
         except PiNotFoundError:
             await self._send(member.telegram_id, NO_DEVICE)
             return
@@ -742,7 +747,7 @@ class LunaBot:
     async def _ask_time(self, member: AssistantMember, reason: str) -> None:
         user_id = member.telegram_id
         try:
-            restriction = await self._pi.restriction(member.name)
+            restriction = await self._pi.restriction(pi_person(member))
         except PiUnavailableError:
             await self._send(user_id, PI_OFFLINE)
             return
@@ -751,7 +756,7 @@ class LunaBot:
             await self._send(user_id, describe_restriction(restriction) + BEDTIME_GOODNIGHT)
             return
         try:
-            request_id = await self._pi.request_time(member.name, reason)
+            request_id = await self._pi.request_time(pi_person(member), reason)
         except PiConflictError:
             await self._send(user_id, "Запрос уже отправлен, дождись ответа родителей.")
             return
@@ -770,7 +775,7 @@ class LunaBot:
         text = "✅ Запрос отправлен родителям. Сообщу, когда они ответят."
         quiz = None
         try:
-            if await self._pi.quiz_available(member.name):
+            if await self._pi.quiz_available(pi_person(member)):
                 text += f"\n\nПока ждёшь, можно заработать +15 минут: нажми «{BTN_QUIZ}»."
                 quiz = InlineKeyboardMarkup(inline_keyboard=[[_inline(BTN_QUIZ, "ntq")]])
         except (PiNotFoundError, PiUnavailableError):
@@ -780,7 +785,7 @@ class LunaBot:
     async def _start_quiz(self, member: AssistantMember) -> None:
         user_id = member.telegram_id
         try:
-            available = await self._pi.quiz_available(member.name)
+            available = await self._pi.quiz_available(pi_person(member))
         except PiNotFoundError:
             await self._send(user_id, NO_DEVICE)
             return

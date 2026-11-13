@@ -2029,3 +2029,10 @@ async def test_a_rate_limit_never_hides_a_child_in_trouble(harness: Any, monkeyp
     monkeypatch.setattr(instance, "_allow_request", lambda user_id: False)
     await instance.on_message(_message("мне плохо, не хочу жить", user_id=5))
     assert any(call.args[:1] == (9,) for call in send.await_args_list)
+
+
+def test_the_pi_knows_a_linked_person_by_id() -> None:
+    linked = _member("kid", 5)
+    linked.homesec_person_id = 42
+    assert bot.pi_person(linked) == "42"  # a rename on the Pi does not break the internet screen
+    assert bot.pi_person(_member("kid", 6)) == "Тест"
