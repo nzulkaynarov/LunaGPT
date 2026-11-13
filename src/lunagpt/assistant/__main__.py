@@ -7,7 +7,8 @@ from datetime import UTC, datetime, timedelta
 from aiogram import Bot, Dispatcher
 
 from lunagpt.assistant import usage
-from lunagpt.assistant.bot import LunaBot, build_router, watch_time_requests
+from lunagpt.assistant.bot import LunaBot, build_router
+from lunagpt.assistant.internet_desk import watch_time_requests
 from lunagpt.assistant.llm import generate_quiz, generate_reply
 from lunagpt.assistant.memories import Memory
 from lunagpt.assistant.monitor import send_heartbeats, supervise, watch_family, watch_pi

@@ -40,6 +40,12 @@ from lunagpt.assistant import access, updates, usage
 from lunagpt.assistant.about import about_luna, is_about_question, owner_name
 from lunagpt.assistant.calendar_desk import CALENDAR_PREFIXES, CalendarDesk, is_calendar_request
 from lunagpt.assistant.gcal import GoogleCalendar
+from lunagpt.assistant.internet_desk import (
+    BTN_ASK_TIME,
+    BTN_QUIZ,
+    INTERNET_PREFIXES,
+    InternetDesk,
+)
 from lunagpt.assistant.list_desk import LIST_PREFIXES, ListDesk
 from lunagpt.assistant.lists import is_list_request, quoted
 from lunagpt.assistant.llm import (
@@ -59,7 +65,7 @@ from lunagpt.assistant.llm import (
 from lunagpt.assistant.memories import FAMILY_DUPLICATE, FAMILY_FAILED, FAMILY_FULL, FAMILY_SAVED, Memory
 from lunagpt.assistant.people import PEOPLE_PREFIXES, PeopleDesk
 from lunagpt.assistant.phrases import PHRASE_PREFIXES, PhraseDesk
-from lunagpt.assistant.pi_client import PiClient, PiConflictError, PiNotFoundError, PiUnavailableError
+from lunagpt.assistant.pi_client import PiClient
 from lunagpt.assistant.reminder_desk import REMINDER_PREFIXES, ReminderDesk
 from lunagpt.assistant.reminders import is_reminder_request
 from lunagpt.assistant.school_desk import SCHOOL_PREFIXES, SchoolDesk, is_school_text, photo_kind
@@ -93,8 +99,6 @@ BTN_FAMILY = "🏠 Семья"
 BTN_HELP = "❓ Помощь"
 MENU_BUTTONS = {BTN_DAY, BTN_LISTS, BTN_MEMORY, BTN_INTERNET, BTN_FAMILY, BTN_HELP}
 # Inside those menus. The texts are also accepted as typed buttons, since older menus carried them.
-BTN_ASK_TIME = "🙏 Попросить время"
-BTN_QUIZ = "🎯 Викторина +15 мин"
 BTN_PEOPLE = "👥 Люди"
 BTN_INVITE = "➕ Пригласить"
 BTN_STORY = "🐈 Истории про Луну"
@@ -128,35 +132,9 @@ SHARED_MOVED = (
     "Я занимаюсь личными делами, а домашней сетью управляет HomeSec."
 )
 MEMORY_PAGE_SIZE = 8
-TIME_POLL_SECONDS = 30
-TIME_REQUEST_TTL = timedelta(hours=24)
 FAMILY_MENU = "🏠 Семья: люди и заявки, приглашения. Телевизор и другие общие устройства — в боте HomeSec."
-PI_OFFLINE = "Сейчас домашняя сеть не отвечает, попробуй чуть позже."
-NO_DEVICE = "Я не нашла твоё устройство в домашней сети. Попроси родителей привязать его."
 
 
-def _clock(value: str | None) -> str:
-    return datetime.fromisoformat(value).strftime("%H:%M") if value else ""
-
-
-def describe_restriction(restriction: dict[str, Any] | None) -> str:
-    """One honest line about why the home internet is off for this person now."""
-    if not restriction:
-        return ""
-    if restriction["kind"] == "bedtime":
-        text = f"🌙 Сейчас отбой, интернет дома включится в {_clock(restriction['until'])}."
-        if restriction.get("pause_until"):
-            text += f" Потом ещё пауза до {_clock(restriction['pause_until'])}."
-        return text
-    if restriction.get("open_until"):
-        return (
-            f"🔓 Родители открыли интернет до {_clock(restriction['open_until'])}, "
-            f"потом пауза до {_clock(restriction['until'])}."
-        )
-    return f"⏸ Интернет дома на паузе до {_clock(restriction['until'])}."
-
-
-BEDTIME_GOODNIGHT = " Утром всё заработает само.\n\n😴 Луна уже спит клубочком, и тебе пора. Спокойной ночи!"
 # First, and asking for the first person: placed after the facts, the local model told 2 of 8 stories as
 # Luna's own; placed before them, 7 of 8.
 STORY_MEMORIES = (
@@ -290,11 +268,6 @@ def photo_of(message: Message) -> PhotoSize | Document | None:
     return None
 
 
-def pi_person(member: AssistantMember) -> str:
-    """How the Pi knows this person: by id when linked, which survives renames, else by name."""
-    return str(member.homesec_person_id) if member.homesec_person_id is not None else member.name
-
-
 def needs_adult_attention(text: str) -> bool:
     return bool(SAFETY_PATTERN.search(text))
 
@@ -330,10 +303,6 @@ def family_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def internet_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[_inline(BTN_ASK_TIME, "nta")], [_inline(BTN_QUIZ, "ntq")]])
-
-
 def main_keyboard(role: str) -> ReplyKeyboardMarkup:
     """The persistent menu; server-side checks still decide what each role may do."""
     return ReplyKeyboardMarkup(
@@ -341,12 +310,6 @@ def main_keyboard(role: str) -> ReplyKeyboardMarkup:
         resize_keyboard=True,
         is_persistent=True,
         input_field_placeholder="Напиши Luna…",
-    )
-
-
-def quiz_keyboard(options: list[str]) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=o[:60], callback_data=f"quiz:{i}")] for i, o in enumerate(options)]
     )
 
 
@@ -370,7 +333,6 @@ class LunaBot:
         self._speak = speak
         self._sessions = session_factory
         self._answer = answer
-        self._make_quiz = make_quiz
         self._pi = pi
         self._username = bot_username
         self._memory = memory
@@ -384,12 +346,12 @@ class LunaBot:
         self.phrases = PhraseDesk(bot, session_factory)
         self.stories = StoryDesk(bot, session_factory)
         self.lists = ListDesk(bot, session_factory)
+        self.internet = InternetDesk(bot, session_factory, pi, make_quiz, self._today)
         self._history_loaded: set[int] = set()
         self._background: set[asyncio.Task[None]] = set()
         self._history: dict[int, deque[dict[str, str]]] = defaultdict(lambda: deque(maxlen=HISTORY_MESSAGES))
         self._locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._request_times: dict[int, deque[float]] = defaultdict(lambda: deque(maxlen=RATE_LIMIT))
-        self._quizzes: dict[int, QuizQuestion] = {}
         self._last_question: dict[int, tuple[str, float]] = {}
         self._last_photo: dict[int, tuple[bytes, str, float]] = {}  # in memory only, never stored
 
@@ -597,11 +559,11 @@ class LunaBot:
         elif text == OLD_SHARED and adult:
             await self._send(member.telegram_id, SHARED_MOVED)
         elif text == BTN_INTERNET and kid:
-            await self._my_time(member)
+            await self.internet.view(member)
         elif text == BTN_ASK_TIME and kid:
-            await self._ask_time(member, "")
+            await self.internet.ask(member, "")
         elif text == BTN_QUIZ and kid:
-            await self._start_quiz(member)
+            await self.internet.start_quiz(member)
         elif text == BTN_STORY and family:
             await self.stories.view(member)
         elif text == BTN_PHRASE and kid:
@@ -637,15 +599,9 @@ class LunaBot:
         elif prefix == "fhi":
             await remove_menu(callback)
             await self._people.send_invite(user_id)
-        elif prefix == "nta":
-            await self._ask_time(member, "")
-        elif prefix == "ntq":
-            await self._start_quiz(member)
         elif prefix == PHRASE_ASK:
             await self.phrases.ask(member)
             await remove_menu(callback)
-        elif prefix == "quiz":
-            await self._answer_quiz(member, int(args[0]))
         elif prefix in ("sh", "shs", "shl"):  # buttons of a device list sent before the move to HomeSec
             await self._edit(callback, SHARED_MOVED, None)
         elif prefix == "mem":
@@ -679,12 +635,14 @@ class LunaBot:
             await self.stories.handle(callback, member, prefix, args)
         elif prefix in LIST_PREFIXES:
             await self.lists.handle(callback, member, prefix, args)
+        elif prefix in INTERNET_PREFIXES:
+            await self.internet.handle(callback, member, prefix, args)
 
     @staticmethod
     def _callback_allowed(role: str, prefix: str) -> bool:
         if prefix == updates.UPDATE_PREFIX:
             return role in access.ROLES
-        if prefix in ("quiz", "nta", "ntq", PHRASE_ASK):
+        if prefix in INTERNET_PREFIXES or prefix == PHRASE_ASK:
             return role == "kid"
         if prefix in ("fhp", "fhi"):
             return role in access.ADULT_ROLES
@@ -707,100 +665,6 @@ class LunaBot:
     async def _edit(callback: CallbackQuery, text: str, markup: InlineKeyboardMarkup | None) -> None:
         if isinstance(callback.message, Message):
             await callback.message.edit_text(text, reply_markup=markup)
-
-    async def _answer_quiz(self, member: AssistantMember, choice: int) -> None:
-        quiz = self._quizzes.pop(member.telegram_id, None)
-        if quiz is None:
-            await self._send(member.telegram_id, "Этот вопрос уже закрыт.")
-            return
-        await self._send(member.telegram_id, await self._quiz_outcome(member, quiz, choice == quiz.correct))
-
-    async def _quiz_outcome(self, member: AssistantMember, quiz: QuizQuestion, correct: bool) -> str:
-        try:
-            minutes = await self._pi.quiz_result(pi_person(member), correct, quiz.topic)
-        except PiConflictError:
-            return "Сегодня викторина уже пройдена. Приходи завтра!"
-        except (PiNotFoundError, PiUnavailableError):
-            return PI_OFFLINE
-        if correct:
-            return f"🎉 Верно! Тебе начислено +{minutes} минут."
-        return f"Не совсем. Правильный ответ: {quiz.options[quiz.correct]}. Завтра будет новый шанс!"
-
-    async def _my_time(self, member: AssistantMember) -> None:
-        try:
-            restriction = await self._pi.restriction(pi_person(member))
-            rows = await self._pi.quota(pi_person(member))
-        except PiNotFoundError:
-            await self._send(member.telegram_id, NO_DEVICE)
-            return
-        except PiUnavailableError:
-            await self._send(member.telegram_id, PI_OFFLINE)
-            return
-        lines = [describe_restriction(restriction)] if restriction else []
-        lines += [
-            f"{r['device']}, {r['category_label']}: {r['used_minutes']} из {r['limit_minutes']} мин" for r in rows
-        ]
-        if not rows:
-            lines.append("Лимитов на сегодня нет.")
-        await self._send(member.telegram_id, "⏳ Интернет\n\n" + "\n".join(lines), internet_keyboard())
-
-    async def _ask_time(self, member: AssistantMember, reason: str) -> None:
-        user_id = member.telegram_id
-        try:
-            restriction = await self._pi.restriction(pi_person(member))
-        except PiUnavailableError:
-            await self._send(user_id, PI_OFFLINE)
-            return
-        if restriction and restriction["kind"] == "bedtime":
-            # Parents do not open bedtime at night, so nobody is woken up for it.
-            await self._send(user_id, describe_restriction(restriction) + BEDTIME_GOODNIGHT)
-            return
-        try:
-            request_id = await self._pi.request_time(pi_person(member), reason)
-        except PiConflictError:
-            await self._send(user_id, "Запрос уже отправлен, дождись ответа родителей.")
-            return
-        except PiNotFoundError:
-            await self._send(user_id, NO_DEVICE)
-            return
-        except PiUnavailableError:
-            await self._send(user_id, PI_OFFLINE)
-            return
-        async with self._sessions() as db:
-            await access.track_time_request(db, request_id, user_id)
-        if restriction:
-            text = "✅ Попросила родителей открыть интернет. Сообщу, когда они ответят."
-            await self._send(user_id, f"{describe_restriction(restriction)}\n\n{text}")
-            return  # quiz minutes would not lift a pause
-        text = "✅ Запрос отправлен родителям. Сообщу, когда они ответят."
-        quiz = None
-        try:
-            if await self._pi.quiz_available(pi_person(member)):
-                text += f"\n\nПока ждёшь, можно заработать +15 минут: нажми «{BTN_QUIZ}»."
-                quiz = InlineKeyboardMarkup(inline_keyboard=[[_inline(BTN_QUIZ, "ntq")]])
-        except (PiNotFoundError, PiUnavailableError):
-            pass
-        await self._send(user_id, text, quiz)
-
-    async def _start_quiz(self, member: AssistantMember) -> None:
-        user_id = member.telegram_id
-        try:
-            available = await self._pi.quiz_available(pi_person(member))
-        except PiNotFoundError:
-            await self._send(user_id, NO_DEVICE)
-            return
-        except PiUnavailableError:
-            await self._send(user_id, PI_OFFLINE)
-            return
-        if not available:
-            await self._send(user_id, "Сегодня викторина уже пройдена. Приходи завтра!")
-            return
-        quiz = self._quizzes.get(user_id) or await self._make_quiz(user_id, access.age_of(member, self._today()))
-        if quiz is None:
-            await self._send(user_id, "Не получилось придумать вопрос, попробуй чуть позже.")
-            return
-        self._quizzes[user_id] = quiz
-        await self._send(user_id, f"🎯 {quiz.topic}\n\n{quiz.q}", quiz_keyboard(quiz.options))
 
     def _over_rate_limit(self, user_id: int) -> bool:
         times = self._request_times[user_id]
@@ -1333,47 +1197,6 @@ class LunaBot:
                 await self._send(parent_id, f"🚨 {member.name} написал(а) Luna, стоит поговорить:\n\n{text[:1000]}")
             except TelegramAPIError as exc:
                 logger.warning("could not alert a parent: %s", type(exc).__name__)
-
-
-async def report_time_decisions(bot: Bot, pi: PiClient, session_factory: async_sessionmaker[AsyncSession]) -> None:
-    """Tell children the outcome of requests that parents have resolved on the Pi."""
-    async with session_factory() as db:
-        requests = await access.pending_time_requests(db)
-    now = datetime.now(UTC)
-    for request in requests:
-        try:
-            status = await pi.time_request_status(request.request_id)
-        except PiNotFoundError:
-            status = {"status": "denied", "minutes": 0}
-        except PiUnavailableError:
-            continue
-        state = status.get("status") if isinstance(status, dict) else None
-        if state == "pending":
-            if now - request.created_at > TIME_REQUEST_TTL:
-                async with session_factory() as db:
-                    await access.finish_time_request(db, request.request_id)
-            continue
-        if state != "approved":
-            text = "Родители пока не добавили время. Поговори с ними 💬"
-        elif status.get("category") == "pause":
-            text = f"🎉 Родители открыли интернет на {status.get('minutes', 0)} минут!"
-        else:
-            text = f"🎉 Родители добавили {status.get('minutes', 0)} минут!"
-        try:
-            await send_long(bot, request.telegram_id, text)
-        except TelegramAPIError as exc:  # a blocked bot must not hold up everyone else's decisions
-            logger.warning("could not report a time decision: %s", type(exc).__name__)
-        async with session_factory() as db:
-            await access.finish_time_request(db, request.request_id)
-
-
-async def watch_time_requests(bot: Bot, pi: PiClient, session_factory: async_sessionmaker[AsyncSession]) -> None:
-    while True:
-        try:
-            await report_time_decisions(bot, pi, session_factory)
-        except (TelegramAPIError, OSError) as exc:
-            logger.warning("time decision report failed: %s", type(exc).__name__)
-        await asyncio.sleep(TIME_POLL_SECONDS)
 
 
 HANDLER_FAILED = "😿 Не получилось. Попробуй ещё раз чуть позже."

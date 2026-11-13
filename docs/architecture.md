@@ -26,6 +26,7 @@
 | `reminder_desk.py`, `reminders.py`, `brief.py` | Напоминания, поручения, утренняя сводка |
 | `list_desk.py`, `lists.py` | Семейные и личные списки |
 | `memories.py` | Личная и общая память (pgvector, bge-m3) |
+| `internet_desk.py` | «⏳ Интернет» ребёнка: что держит без интернета, запрос времени, викторина, ответы родителей |
 | `school_desk.py`, `calendar_desk.py` | Уроки и домашка детей, Google Календарь (выключен, пока нет ключа) |
 | `usage.py` | Учёт использования без текста и недельный отчёт |
 | `monitor.py`, `pi_client.py` | Связь с HomeSec на Pi |

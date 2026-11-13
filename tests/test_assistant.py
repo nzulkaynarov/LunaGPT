@@ -20,7 +20,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
 from aiogram.types import Document, Message, Update
 
-from lunagpt.assistant import access, audio, bot, list_desk, llm, monitor, phrases, speech, stories
+from lunagpt.assistant import access, audio, bot, internet_desk, list_desk, llm, monitor, phrases, speech, stories
 from lunagpt.assistant.monitor import AvailabilityTracker
 from lunagpt.assistant.pi_client import PiClient, PiConflictError, PiNotFoundError, PiUnavailableError
 from lunagpt.assistant.telegram import split_message
@@ -755,7 +755,7 @@ async def test_pause_request_asks_to_open_without_quiz(harness: Any, monkeypatch
 
 
 def test_open_window_is_described() -> None:
-    text = bot.describe_restriction({**PAUSE, "open_until": "2026-11-12T10:15"})
+    text = internet_desk.describe_restriction({**PAUSE, "open_until": "2026-11-12T10:15"})
     assert "до 10:15" in text and "пауза до 10:44" in text
 
 
@@ -763,7 +763,7 @@ def test_open_window_is_described() -> None:
 async def test_ordinary_kid_message_never_mentions_quiz(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     instance, send, _ = _kid_with_pi(harness, monkeypatch)
     await instance.on_message(_message("расскажи про космос", 5))
-    instance._make_quiz.assert_not_awaited()
+    instance.internet._make_quiz.assert_not_awaited()
     assert _sent(send) == "ответ"
 
 
@@ -790,7 +790,7 @@ async def test_quiz_correct_answer_awards_minutes(harness: Any, monkeypatch: pyt
     instance, send, pi = _kid_with_pi(harness, monkeypatch)
     pi.quiz_available = AsyncMock(return_value=True)
     pi.quiz_result = AsyncMock(return_value=15)
-    instance._make_quiz = AsyncMock(return_value=QUIZ)
+    instance.internet._make_quiz = AsyncMock(return_value=QUIZ)
     await instance.on_message(_message(bot.BTN_QUIZ, 5))
     assert send.call_args.kwargs["reply_markup"].inline_keyboard[1][0].callback_data == "quiz:1"
     callback = MagicMock(data="quiz:1", answer=AsyncMock())
@@ -933,7 +933,7 @@ async def test_a_blocked_child_does_not_hold_up_other_decisions(monkeypatch: pyt
     finish = AsyncMock()
     monkeypatch.setattr(access, "finish_time_request", finish)
     pi = MagicMock(time_request_status=AsyncMock(return_value={"status": "approved", "minutes": 30}))
-    await bot.report_time_decisions(telegram, pi, MagicMock(return_value=session))
+    await internet_desk.report_time_decisions(telegram, pi, MagicMock(return_value=session))
     assert finish.await_count == 2
 
 
@@ -948,7 +948,7 @@ async def test_decision_is_reported_and_closed(monkeypatch: pytest.MonkeyPatch) 
     finish = AsyncMock()
     monkeypatch.setattr(access, "finish_time_request", finish)
     pi = MagicMock(time_request_status=AsyncMock(return_value={"status": "approved", "minutes": 30}))
-    await bot.report_time_decisions(telegram, pi, MagicMock(return_value=session))
+    await internet_desk.report_time_decisions(telegram, pi, MagicMock(return_value=session))
     assert "30 минут" in telegram.send_message.call_args.args[1]
     finish.assert_awaited_once()
 
@@ -964,7 +964,7 @@ async def test_opened_pause_is_reported(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(access, "finish_time_request", AsyncMock())
     status = {"status": "approved", "minutes": 30, "category": "pause"}
     pi = MagicMock(time_request_status=AsyncMock(return_value=status))
-    await bot.report_time_decisions(telegram, pi, MagicMock(return_value=session))
+    await internet_desk.report_time_decisions(telegram, pi, MagicMock(return_value=session))
     assert "открыли интернет на 30 минут" in telegram.send_message.call_args.args[1]
 
 
@@ -2034,5 +2034,5 @@ async def test_a_rate_limit_never_hides_a_child_in_trouble(harness: Any, monkeyp
 def test_the_pi_knows_a_linked_person_by_id() -> None:
     linked = _member("kid", 5)
     linked.homesec_person_id = 42
-    assert bot.pi_person(linked) == "42"  # a rename on the Pi does not break the internet screen
-    assert bot.pi_person(_member("kid", 6)) == "Тест"
+    assert internet_desk.pi_person(linked) == "42"  # a rename on the Pi does not break the internet screen
+    assert internet_desk.pi_person(_member("kid", 6)) == "Тест"
