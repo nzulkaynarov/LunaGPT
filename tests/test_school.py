@@ -194,3 +194,18 @@ async def test_nothing_is_saved_when_cancelled_or_unreadable(db_sessions: async_
     assert _edited(stale) == school_desk.EXPIRED
     async with db_sessions() as db:
         assert await db.scalar(select(AssistantTask)) is None
+
+
+@pytest.mark.parametrize(
+    ("text", "is_homework"),
+    [
+        ("задали параграф 5", True),
+        ("домашка: упражнение 12", True),
+        ("дз по математике номер 3", True),
+        ("домашка не получается, помоги", False),
+        ("домашка по физике, как решить задачу 4?", False),
+        ("задали задачу, объясни как её решать", False),
+    ],
+)
+def test_homework_to_write_down_versus_help_with_it(text: str, is_homework: bool) -> None:
+    assert school.is_task_request(text) is is_homework

@@ -1999,3 +1999,33 @@ async def test_tool_arguments_as_an_object_are_accepted(monkeypatch: pytest.Monk
     monkeypatch.setattr(llm, "_chat", fake_chat)
     reply = await llm.generate_reply("adult", 1, [], "молоко", options=llm.ReplyOptions(actions=(action,)))
     assert seen == [{"list": "Покупки", "items": ["молоко"]}] and reply == "Добавила молоко"
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["напомни завтра сказать маме что меня бьют в школе", "добавь в список: не хочу жить", "задали: меня травят"],
+)
+@pytest.mark.asyncio
+async def test_a_child_in_trouble_is_heard_in_any_route(
+    harness: Any, monkeypatch: pytest.MonkeyPatch, text: str
+) -> None:
+    instance, send, answer = harness
+    _as_member(monkeypatch, _member("kid", 5))
+    monkeypatch.setattr(access, "adult_chat_ids", AsyncMock(return_value=[9]))
+    instance.reminders.create = AsyncMock()
+    instance.school.handle_text = AsyncMock()
+    await instance.on_message(_message(text, user_id=5))
+    instance.reminders.create.assert_not_awaited()
+    instance.school.handle_text.assert_not_awaited()
+    answer.assert_not_awaited()
+    assert any(call.args[:1] == (9,) for call in send.await_args_list)  # the parent was told
+
+
+@pytest.mark.asyncio
+async def test_a_rate_limit_never_hides_a_child_in_trouble(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, send, _answer = harness
+    _as_member(monkeypatch, _member("kid", 5))
+    monkeypatch.setattr(access, "adult_chat_ids", AsyncMock(return_value=[9]))
+    monkeypatch.setattr(instance, "_allow_request", lambda user_id: False)
+    await instance.on_message(_message("мне плохо, не хочу жить", user_id=5))
+    assert any(call.args[:1] == (9,) for call in send.await_args_list)

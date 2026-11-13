@@ -474,6 +474,8 @@ class LunaBot:
             await self._drop_prompt(message)
             return
         picture = photo_of(message)
+        if picture is not None and await self._raised_alarm(member, (message.caption or "").strip()):
+            return
         if picture is not None and member.role in access.FAMILY_ROLES and self.stories.is_reply(message):
             await self.stories.tell(member, (message.caption or "").strip(), picture.file_id)
             await self._drop_prompt(message)
@@ -489,6 +491,9 @@ class LunaBot:
                 return
         if not text:
             await self._send(user_id, NO_VIDEO if message.video else TEXT_ONLY)
+            return
+        # Before any route: a child in trouble may type it as a reminder, a list or homework.
+        if await self._raised_alarm(member, text):
             return
         if member.role in access.FAMILY_ROLES and is_reply_to_prompt(message, FAMILY_PROMPT):
             await self._chat(member, text, family_note=text)
@@ -611,6 +616,9 @@ class LunaBot:
         prefix = data.split(":", 1)[0]
         if member is None or not self._callback_allowed(member.role, prefix):
             await callback.answer("Нет доступа", show_alert=True)
+            return
+        if access.access_ended(member) and prefix != updates.UPDATE_PREFIX:
+            await callback.answer(ACCESS_ENDED, show_alert=True)
             return
         await callback.answer()
         feature = usage.feature_of_prefix(prefix)
@@ -898,12 +906,10 @@ class LunaBot:
         scheduled: bool = False,
     ) -> None:
         user_id = member.telegram_id
+        if not scheduled and await self._raised_alarm(member, text):
+            return
         if not scheduled and not self._allow_request(user_id):
             await self._send(user_id, TOO_FAST)
-            return
-        if not scheduled and member.role == "kid" and needs_adult_attention(text):
-            await self._alert_parents(member, text)
-            await self._send(user_id, SAFETY_REPLY)
             return
         if member.role in access.FAMILY_ROLES and image is None and not scheduled:
             family_note = family_note or family_request(text)
@@ -1305,6 +1311,14 @@ class LunaBot:
             await self._memory.forget_all(user_id)
         self._history[user_id].clear()
         await self._edit(callback, "Готово, всё забыла.", None)
+
+    async def _raised_alarm(self, member: AssistantMember, text: str) -> bool:
+        """A child's words that need an adult: tell the parents and answer gently; True when it happened."""
+        if member.role != "kid" or not text or not needs_adult_attention(text):
+            return False
+        await self._alert_parents(member, text)
+        await self._send(member.telegram_id, SAFETY_REPLY)
+        return True
 
     async def _alert_parents(self, member: AssistantMember, text: str) -> None:
         async with self._sessions() as db:

@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine
 from datetime import UTC, date, datetime, timedelta
@@ -26,6 +27,7 @@ LIST_LIMIT = 10
 POLL_SECONDS = 20
 # A reminder rung this late is marked so: the PC with Luna was off at the time.
 LATE_NOTE_AFTER = timedelta(minutes=15)
+BRIEF_TIME = re.compile(r"(?:[01]\d|2[0-3])[0-5]\d")
 RING_RETRY_SECONDS = (30, 120, 600)  # a ring that Telegram did not take is tried again after these pauses
 SNOOZES = (10, 60)
 CITY_PROMPT = "Напиши ответом на это сообщение свой город для прогноза погоды."
@@ -291,6 +293,8 @@ class ReminderDesk:
         if prefix == "rmd":
             await self._delete(user_id, int(args[0]))
         elif prefix == "rbt":
+            if not args or not BRIEF_TIME.fullmatch(args[0]):
+                return  # a forged button would otherwise stop every brief in the house
             member = await self._update_brief(user_id, brief_time=f"{args[0][:2]}:{args[0][2:]}")
         elif prefix == "rbx":
             member = await self._update_brief(user_id, brief_time=None)

@@ -234,3 +234,36 @@ async def test_tasks_with_a_deadline_follow_into_the_calendar(
     assert task is not None
     await desk.handle(_callback(f"tkd:{task.id}"), member, "tkd", [str(task.id)])
     assert google.deleted == [task.google_event_id]
+
+
+@pytest.mark.parametrize(
+    ("text", "adds"),
+    [
+        ("добавь в календарь встречу в пятницу в 15", True),
+        ("запиши стоматолога в мой календарь на среду", True),
+        ("посмотри в календарь, что завтра", False),
+        ("что у меня в календаре на неделе?", False),
+    ],
+)
+def test_only_adding_words_open_the_add_event_flow(text: str, adds: bool) -> None:
+    assert calendar_desk.is_calendar_request(text) is adds
+
+
+@pytest.mark.asyncio
+async def test_nobody_links_a_calendar_someone_else_linked(db_sessions: async_sessionmaker[AsyncSession]) -> None:
+    mama = await _member(db_sessions)
+    kid = AssistantMember(telegram_id=2, name="Миша", role="kid")
+    guest = AssistantMember(telegram_id=3, name="Гость", role="guest")
+    async with db_sessions() as db:
+        db.add_all([kid, guest])
+        await db.commit()
+    google = FakeGoogle()
+    telegram = MagicMock(send_message=AsyncMock())
+    desk = calendar_desk.CalendarDesk(telegram, db_sessions, _calendar(google), AsyncMock())
+    await desk.link(mama, "mama@gmail.com")
+    await desk.link(kid, "mama@gmail.com")
+    assert telegram.send_message.call_args.args[1] == calendar_desk.TAKEN
+    await desk.link(guest, "guest@gmail.com")
+    assert telegram.send_message.call_args.args[1] == calendar_desk.GUESTS_NO_CALENDAR
+    async with db_sessions() as db:
+        assert (await db.get(AssistantMember, 2)).google_calendar_id is None  # type: ignore[union-attr]

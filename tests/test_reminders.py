@@ -296,3 +296,11 @@ async def test_my_day_shows_the_calendar_only_once_google_is_connected(
     assert "cal" not in [b.callback_data for row in markup.inline_keyboard for b in row]
     _, markup = await shown.view(member)
     assert "cal" in [b.callback_data for row in markup.inline_keyboard for b in row]
+
+
+@pytest.mark.parametrize("value", ["abcd", "2560", "9", "07:30", ""])
+def test_only_real_brief_times_are_accepted(value: str) -> None:
+    from lunagpt.assistant import reminder_desk
+
+    assert not reminder_desk.BRIEF_TIME.fullmatch(value)
+    assert reminder_desk.BRIEF_TIME.fullmatch("0730") and reminder_desk.BRIEF_TIME.fullmatch("2359")

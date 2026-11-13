@@ -108,8 +108,14 @@ def is_schedule_caption(text: str) -> bool:
     return bool(SCHEDULE_WORDS.search(text))
 
 
+# "домашка не получается, помоги" is a request for help with homework, not homework to write down.
+HELP_REQUEST = re.compile(
+    r"помоги|помощь|не\s+получа|не\s+понима|не\s+могу|как\s+(?:решить|сделать)|объясни|\?", re.IGNORECASE
+)
+
+
 def is_task_request(text: str) -> bool:
-    return bool(TASK_REQUEST.match(text))
+    return bool(TASK_REQUEST.match(text)) and not HELP_REQUEST.search(text)
 
 
 def _subject_key(name: str) -> str:

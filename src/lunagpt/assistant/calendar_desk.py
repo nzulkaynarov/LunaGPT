@@ -27,7 +27,8 @@ TASK_MARK = "📝 "
 CALENDAR_PREFIXES = frozenset({"cal", "calc", "calx", "caly", "caln"})
 CALENDAR_REQUEST = re.compile(
     r"^\s*(?:добавь|запиши|внеси|поставь|создай)\s+(?:в\s+(?:мой\s+)?календар\w*|встречу|событие)|"
-    r"\bв\s+(?:мой\s+)?календар[ья]\b",
+    # "посмотри в календарь" only reads it; an event needs a verb that adds.
+    r"\b(?:добавь|запиши|внеси|занеси|поставь|создай)\b.*\bв\s+(?:мой\s+)?календар[ья]\b",
     re.IGNORECASE,
 )
 CALENDAR_ID = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
@@ -37,6 +38,8 @@ DEFAULT_MINUTES = 60
 CALENDAR_MODELS = ["luna-fast", "luna-smart", "luna-local"]
 WEEK_DAYS = 7
 CACHE_SECONDS = 300
+GUESTS_NO_CALENDAR = "Календарь подключают только члены семьи."
+TAKEN = "Этот календарь уже подключён у другого человека. Если это твой, попроси его отключить календарь у себя."
 LINK_PROMPT = "Напиши ответом на это сообщение адрес своего Google-календаря (обычно это твой Gmail)."
 NOT_CONFIGURED = "Google Calendar ещё не подключён к Luna. Владельцу нужно один раз его настроить."
 NOT_SHARED = (
@@ -166,6 +169,15 @@ class CalendarDesk:
             member = await db.get(AssistantMember, user_id)
             return member.google_calendar_id if member else None
 
+    async def _linked_by_someone_else(self, user_id: int, calendar_id: str) -> bool:
+        async with self._sessions() as db:
+            owner = await db.scalar(
+                select(AssistantMember.telegram_id).where(
+                    AssistantMember.google_calendar_id == calendar_id, AssistantMember.telegram_id != user_id
+                )
+            )
+        return owner is not None
+
     async def _set_calendar_id(self, user_id: int, calendar_id: str | None) -> None:
         async with self._sessions() as db:
             member = await db.get(AssistantMember, user_id)
@@ -251,10 +263,17 @@ class CalendarDesk:
         if self._calendar is None:
             await send_long(self._bot, user_id, NOT_CONFIGURED)
             return
+        if member.role == "guest":
+            await send_long(self._bot, user_id, GUESTS_NO_CALENDAR)
+            return
         if not CALENDAR_ID.match(calendar_id):
             await self._bot.send_message(
                 user_id, f"Это не похоже на адрес календаря. {LINK_PROMPT}", reply_markup=ForceReply()
             )
+            return
+        if await self._linked_by_someone_else(user_id, calendar_id):
+            # The service account reads every calendar shared with it, so an address alone proves nothing.
+            await send_long(self._bot, user_id, TAKEN)
             return
         try:
             await self._calendar.check(calendar_id)
