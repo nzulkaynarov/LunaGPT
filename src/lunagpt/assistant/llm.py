@@ -57,6 +57,10 @@ QUIZ_TOPICS = (
 SEARCH_ROLES = ("owner", "adult", "kid", "guest")
 STRICT_SEARCH_LEVEL = 2
 MAX_TOOL_ROUNDS = 3
+MAX_REPLY_TOKENS = 2000  # about five Telegram messages; bounds the cost of one answer
+SEARCH_DOWN = "Поиск сейчас недоступен. Ответь по своим знаниям и честно скажи, что свежих данных нет."
+DONE_ABOVE = "Готово, всё выше 👆"
+SHOWN_PREFIX = "Человеку показано:"  # an action whose card the person already sees
 MAX_SEARCH_RESULTS = 5
 MODEL_TIMEOUT_SECONDS = 90.0
 
@@ -432,7 +436,12 @@ async def _run_model(
     conversation = list(messages)
     seen_queries: set[str] = set()
     for _ in range(MAX_TOOL_ROUNDS):
-        payload: dict[str, Any] = {"model": model, "messages": conversation, "metadata": metadata}
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": conversation,
+            "metadata": metadata,
+            "max_tokens": MAX_REPLY_TOKENS,
+        }
         tools = ([SEARCH_TOOL] if use_search else []) + [action.schema for action in options.actions]
         if tools:
             payload["tools"] = tools
@@ -445,11 +454,14 @@ async def _run_model(
         conversation.append(message)
         for call in tool_calls:
             name = call["function"]["name"]
-            arguments = json.loads(call["function"]["arguments"] or "{}")
+            raw = call["function"].get("arguments")
+            arguments = raw if isinstance(raw, dict) else json.loads(raw or "{}")
+            if not isinstance(arguments, dict):
+                raise ValueError("model sent tool arguments that are not an object")
             action = next((a for a in options.actions if a.name == name), None)
             if action is not None:
                 key = name + ":" + json.dumps(arguments, ensure_ascii=False, sort_keys=True)
-                if key in seen_queries or not isinstance(arguments, dict):
+                if key in seen_queries:
                     raise ValueError("model repeated an action")
                 seen_queries.add(key)
                 content = await action.run(arguments)
@@ -460,7 +472,11 @@ async def _run_model(
                 seen_queries.add(query)
                 if options.on_search is not None:
                     options.on_search(query)
-                content = await web_search(client, query, strict_search)
+                try:
+                    content = await web_search(client, query, strict_search)
+                except (httpx.HTTPError, ValueError) as exc:  # search down is not "models down"
+                    logger.warning("web search failed: %s", type(exc).__name__)
+                    content = SEARCH_DOWN
             conversation.append({"role": "tool", "tool_call_id": call["id"], "content": content})
     raise ValueError("model did not finish within the tool round limit")
 
@@ -643,6 +659,10 @@ async def generate_reply(
         "source": "luna_assistant",
         "tags": ["client:luna-assistant", "feature:photo" if options.image else "feature:chat", f"role:{role}"],
     }
+    # Actions already carried out in this turn: once something was done for the person, the next
+    # model must not start over and do it again (a second reminder, a second daily task).
+    performed: list[str] = []
+    options = replace(options, actions=tuple(_tracked(action, performed) for action in options.actions))
     async with httpx.AsyncClient() as client:
         if options.local_only:
             models = LOCAL_ONLY_MODELS
@@ -660,9 +680,29 @@ async def generate_reply(
                     role == "kid",
                     options if model in TOOL_MODELS else replace(options, actions=()),
                 )
-            except (httpx.HTTPError, ValueError, KeyError, json.JSONDecodeError) as exc:
+            except (httpx.HTTPError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
                 logger.warning("model %s failed: %s", model, type(exc).__name__)
-                continue
+                reply = ""
             if reply:
                 return reply
+            if performed:
+                return after_actions(performed)
     return MODELS_DOWN
+
+
+def _tracked(action: Action, performed: list[str]) -> Action:
+    async def run(arguments: dict[str, Any]) -> str:
+        result = await action.run(arguments)
+        performed.append(result)
+        return result
+
+    return replace(action, run=run)
+
+
+def after_actions(performed: list[str]) -> str:
+    """The reply when the model stopped after doing something: what was done, never a second try."""
+    shown = [r for r in performed if r.startswith(SHOWN_PREFIX)]
+    told = [r for r in performed if not r.startswith(SHOWN_PREFIX)]
+    if told:
+        return "\n".join(told)
+    return DONE_ABOVE if shown else MODELS_DOWN

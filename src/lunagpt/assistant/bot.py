@@ -50,6 +50,7 @@ from lunagpt.assistant.llm import (
     REMINDER_TOOLS,
     REMINDERS_BLOCK,
     SCHEDULED_TASK,
+    SHOWN_PREFIX,
     Action,
     QuizQuestion,
     ReplyOptions,
@@ -979,14 +980,14 @@ class LunaBot:
             if not request:
                 return "Не сказано, о чём и когда напомнить."
             said = await self.reminders.create(member, f"напомни {request}")
-            return f"Человеку показано: {said}"
+            return f"{SHOWN_PREFIX} {said}"
 
         async def schedule_task(args: dict[str, Any]) -> str:
             request = str(args.get("request") or "").strip()
             if not request:
                 return "Не сказано, что и когда делать."
             said = await self.reminders.create(member, f"напомни {request}", kind="do")
-            return f"Человеку показано: {said}. В это время ты сама выполнишь задание и пришлёшь результат."
+            return f"{SHOWN_PREFIX} {said}. В это время ты сама выполнишь задание и пришлёшь результат."
 
         async def move_reminder(args: dict[str, Any]) -> str:
             number = number_of(args)

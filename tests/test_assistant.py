@@ -1927,3 +1927,75 @@ async def test_shared_devices_point_to_homesec(harness: Any, monkeypatch: pytest
     _as_member(monkeypatch, _member("kid", 5))
     await instance.on_message(_message(bot.OLD_SHARED, 5))
     answer.assert_awaited_once()  # a child's typed text is just a message
+
+
+@pytest.mark.asyncio
+async def test_an_action_is_never_repeated_by_the_next_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Claude sets the reminder, then fails; Gemini must not set a second one."""
+    runs: list[dict[str, Any]] = []
+
+    async def set_reminder(arguments: dict[str, Any]) -> str:
+        runs.append(arguments)
+        return f"{llm.SHOWN_PREFIX} ⏰ завтра в 8:00 — хлеб"
+
+    action = llm.Action(llm.REMINDER_TOOLS[0], set_reminder)
+    calls = {"n": 0}
+
+    async def fake_chat(
+        client: Any, payload: dict[str, Any], on_cost: Any = None, timeout: float = 0
+    ) -> dict[str, Any]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            arguments = json.dumps({"request": "завтра в 8 купить хлеб"})
+            return {"tool_calls": [{"id": "1", "function": {"name": action.name, "arguments": arguments}}]}
+        raise httpx.ReadTimeout("slow")
+
+    monkeypatch.setattr(llm, "_chat", fake_chat)
+    reply = await llm.generate_reply("adult", 1, [], "напомни", options=llm.ReplyOptions(actions=(action,)))
+    assert len(runs) == 1
+    assert reply == llm.DONE_ABOVE
+
+
+@pytest.mark.asyncio
+async def test_search_down_is_not_models_down(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_chat(
+        client: Any, payload: dict[str, Any], on_cost: Any = None, timeout: float = 0
+    ) -> dict[str, Any]:
+        if payload["messages"][-1].get("role") == "tool":
+            assert payload["messages"][-1]["content"] == llm.SEARCH_DOWN
+            return {"content": "Свежих данных нет, но обычно в ноябре прохладно."}
+        query = json.dumps({"query": "погода"})
+        return {"tool_calls": [{"id": "1", "function": {"name": "web_search", "arguments": query}}]}
+
+    async def broken_search(*args: Any, **kwargs: Any) -> str:
+        raise httpx.ConnectError("searxng is down")
+
+    monkeypatch.setattr(llm, "_chat", fake_chat)
+    monkeypatch.setattr(llm, "web_search", broken_search)
+    reply = await llm.generate_reply("adult", 1, [], "какая погода?")
+    assert reply.startswith("Свежих данных нет")
+
+
+@pytest.mark.asyncio
+async def test_tool_arguments_as_an_object_are_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[dict[str, Any]] = []
+
+    async def add(arguments: dict[str, Any]) -> str:
+        seen.append(arguments)
+        return "Добавила"
+
+    action = llm.Action(llm.LIST_TOOL, add)
+    calls = {"n": 0}
+
+    async def fake_chat(
+        client: Any, payload: dict[str, Any], on_cost: Any = None, timeout: float = 0
+    ) -> dict[str, Any]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            arguments = {"list": "Покупки", "items": ["молоко"]}
+            return {"tool_calls": [{"id": "1", "function": {"name": action.name, "arguments": arguments}}]}
+        return {"content": "Добавила молоко"}
+
+    monkeypatch.setattr(llm, "_chat", fake_chat)
+    reply = await llm.generate_reply("adult", 1, [], "молоко", options=llm.ReplyOptions(actions=(action,)))
+    assert seen == [{"list": "Покупки", "items": ["молоко"]}] and reply == "Добавила молоко"
