@@ -89,6 +89,7 @@ async def test_a_task_is_carried_out_by_luna_and_rings_only_if_that_fails(
         row.due_at = datetime.now(UTC) - timedelta(minutes=1)
         await db.commit()
     assert await desk.ring_due() == 1
+    await desk.drain()
     assert done == [(OWNER, "пять новых английских слов")]
     desk._bot.send_message.assert_not_awaited()  # no "🔔" card: Luna did the task itself
     assert await _due(db_sessions) > reminder_desk.local_now()  # and it moved to tomorrow
@@ -103,7 +104,30 @@ async def test_a_task_is_carried_out_by_luna_and_rings_only_if_that_fails(
         row.due_at = datetime.now(UTC) - timedelta(minutes=1)
         await db.commit()
     assert await desk.ring_due() == 1
+    await desk.drain()
     assert "🔔 пять новых английских слов" in desk._bot.send_message.await_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_a_ring_telegram_did_not_take_is_sent_again(
+    db_sessions: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aiogram.exceptions import TelegramNetworkError
+
+    desk, owner = await _setup(db_sessions, _parts(task="купить хлеб", time="11:00", repeat="none"))
+    await desk.create(owner, "напомни в 11 купить хлеб")
+    async with db_sessions() as db:
+        row = await db.scalar(select(AssistantReminder))
+        assert row is not None
+        row.due_at = datetime.now(UTC) - timedelta(minutes=1)
+        await db.commit()
+    monkeypatch.setattr(reminder_desk, "RING_RETRY_SECONDS", (0, 0))
+    desk._bot.send_message.reset_mock()
+    desk._bot.send_message.side_effect = [TelegramNetworkError(MagicMock(), "no internet"), MagicMock()]
+    assert await desk.ring_due() == 1
+    await desk.drain()
+    assert desk._bot.send_message.await_count == 2
+    assert "🔔 купить хлеб" in desk._bot.send_message.await_args.args[1]
 
 
 @pytest.mark.asyncio

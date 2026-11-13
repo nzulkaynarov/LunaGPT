@@ -3,11 +3,12 @@
 import asyncio
 import logging
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramNetworkError, TelegramRetryAfter, TelegramServerError
 from aiogram.types import CallbackQuery, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -25,6 +26,7 @@ LIST_LIMIT = 10
 POLL_SECONDS = 20
 # A reminder rung this late is marked so: the PC with Luna was off at the time.
 LATE_NOTE_AFTER = timedelta(minutes=15)
+RING_RETRY_SECONDS = (30, 120, 600)  # a ring that Telegram did not take is tried again after these pauses
 SNOOZES = (10, 60)
 CITY_PROMPT = "Напиши ответом на это сообщение свой город для прогноза погоды."
 DAY_TITLE = "🗓 Мой день"
@@ -93,6 +95,18 @@ class ReminderDesk:
         self._extra_brief = extra_brief
         self.run_task = run_task  # set by the bot, which owns the chat that carries a task out
         self.calendar = calendar  # the calendar button only shows once the owner has connected Google
+        self._background: set[asyncio.Task[None]] = set()
+
+    def _spawn(self, work: Coroutine[Any, Any, None]) -> None:
+        """Run slow work (a task for the model, a retried ring) without holding up other reminders."""
+        task = asyncio.create_task(work)
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    async def drain(self) -> None:
+        """Wait for work started by the last rings; for tests and shutdown."""
+        while self._background:
+            await asyncio.gather(*list(self._background), return_exceptions=True)
 
     # ---------- creating ----------
 
@@ -379,22 +393,51 @@ class ReminderDesk:
             member = members.get(member_id)
             if member is None or access.access_ended(member):
                 continue
-            if kind == DO and self.run_task is not None and now - planned <= LATE_NOTE_AFTER:
-                try:
-                    await self.run_task(member, text)
-                    sent += 1
-                    continue
-                except Exception:
-                    logger.warning("could not carry out a task, ringing it instead", exc_info=True)
             body = f"🔔 {text or 'Напоминание'}"
             if now - planned > LATE_NOTE_AFTER:
                 body += f"\n(должна была напомнить {to_local(planned):%d.%m в %H:%M}, я была выключена)"
+            if kind == DO and self.run_task is not None and now - planned <= LATE_NOTE_AFTER:
+                # A task can take a minute of model time; others due now must not wait for it.
+                self._spawn(self._carry_out(member, reminder_id, text, body))
+                sent += 1
+                continue
+            if await self._ring(member_id, reminder_id, body):
+                sent += 1
+        return sent
+
+    async def _carry_out(self, member: AssistantMember, reminder_id: int, text: str, body: str) -> None:
+        assert self.run_task is not None
+        try:
+            await self.run_task(member, text)
+        except Exception:
+            logger.warning("could not carry out a task, ringing it instead", exc_info=True)
+            await self._ring(member.telegram_id, reminder_id, body)
+
+    async def _ring(self, member_id: int, reminder_id: int, body: str) -> bool:
+        """Send a ring; when Telegram or the home internet is down, try again later instead of losing it."""
+        try:
+            await send_long(self._bot, member_id, body, ring_keyboard(reminder_id))
+            return True
+        except (TelegramNetworkError, TelegramServerError, TelegramRetryAfter) as exc:
+            logger.warning("could not send a reminder, will retry: %s", type(exc).__name__)
+            self._spawn(self._retry_ring(member_id, reminder_id, body))
+            return True
+        except TelegramAPIError as exc:  # blocked bot, chat gone: retrying cannot help
+            logger.warning("could not send a reminder: %s", type(exc).__name__)
+            return False
+
+    async def _retry_ring(self, member_id: int, reminder_id: int, body: str) -> None:
+        for delay in RING_RETRY_SECONDS:
+            await asyncio.sleep(delay)
             try:
                 await send_long(self._bot, member_id, body, ring_keyboard(reminder_id))
-                sent += 1
+                return
+            except (TelegramNetworkError, TelegramServerError, TelegramRetryAfter) as exc:
+                logger.warning("reminder retry failed: %s", type(exc).__name__)
             except TelegramAPIError as exc:
-                logger.warning("could not send a reminder: %s", type(exc).__name__)
-        return sent
+                logger.warning("reminder retry refused: %s", type(exc).__name__)
+                return
+        logger.warning("a reminder could not be delivered after %s tries", len(RING_RETRY_SECONDS) + 1)
 
     async def send_briefs(self) -> int:
         now = local_now()
