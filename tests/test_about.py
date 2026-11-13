@@ -25,9 +25,9 @@ def test_each_role_reads_only_its_sections() -> None:
     kid = about.about_luna("kid", "Хозяин")
     guest = about.about_luna("guest", "Хозяин")
     adult = about.about_luna("adult", None)
-    assert "собрал Хозяин" in kid and bot.BTN_QUIZ in kid and bot.BTN_SHARED not in kid
+    assert "собрал Хозяин" in kid and bot.BTN_QUIZ in kid and bot.BTN_PEOPLE not in kid
     assert "Хозяин" not in guest and bot.BTN_QUIZ not in guest and "в гостях" in guest
-    assert about.UNKNOWN_OWNER in adult and bot.BTN_SHARED in adult and "{owner}" not in adult
+    assert about.UNKNOWN_OWNER in adult and bot.BTN_PEOPLE in adult and "{owner}" not in adult
     assert "Образцы шуточных ответов" in guest and "Что нового" in guest
 
 

@@ -95,7 +95,6 @@ BTN_ASK_TIME = "🙏 Попросить время"
 BTN_QUIZ = "🎯 Викторина +15 мин"
 BTN_PEOPLE = "👥 Люди"
 BTN_INVITE = "➕ Пригласить"
-BTN_SHARED = "📺 Общие устройства"
 BTN_STORY = "🐈 Истории про Луну"
 BTN_PHRASE = "😺 Фраза для Луны"
 # Menus stay on a phone until a message brings a new one, so the old buttons keep working until then.
@@ -106,11 +105,15 @@ OLD_BUTTONS = {
     "🧠 Викторина +15 мин": BTN_QUIZ,
     "🐈 Про Луну": BTN_STORY,
 }
+OLD_SHARED = "📺 Общие устройства"
+SHARED_MOVED = (
+    "📺 Общие устройства теперь в боте HomeSec, кнопка «📺 Общие устройства»: там те же действия. "
+    "Я занимаюсь личными делами, а домашней сетью управляет HomeSec."
+)
 MEMORY_PAGE_SIZE = 8
-SHARED_LABELS = {"kid": "👶 Детский режим", "off": "⛔ Выключено", "adult": "🍿 Для взрослых"}
 TIME_POLL_SECONDS = 30
 TIME_REQUEST_TTL = timedelta(hours=24)
-FAMILY_MENU = "🏠 Семья: люди и заявки, приглашения и общие устройства дома."
+FAMILY_MENU = "🏠 Семья: люди и заявки, приглашения. Телевизор и другие общие устройства — в боте HomeSec."
 PI_OFFLINE = "Сейчас домашняя сеть не отвечает, попробуй чуть позже."
 NO_DEVICE = "Я не нашла твоё устройство в домашней сети. Попроси родителей привязать его."
 
@@ -187,7 +190,7 @@ ADULT_HELP = (
     + DAY_LINE
     + LISTS_LINE
     + MEMORY_LINE
-    + f"{BTN_FAMILY} — люди, приглашения и общие устройства\n\n"
+    + f"{BTN_FAMILY} — люди и приглашения\n\n"
     + WHOSE
     + "\n\n"
     + MEMORY_NOTICE.strip()
@@ -301,7 +304,6 @@ def family_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [_inline(BTN_PEOPLE, "fhp"), _inline(BTN_INVITE, "fhi")],
-            [_inline(BTN_SHARED, "shl")],
         ]
     )
 
@@ -318,28 +320,6 @@ def main_keyboard(role: str) -> ReplyKeyboardMarkup:
         is_persistent=True,
         input_field_placeholder="Напиши Luna…",
     )
-
-
-def shared_actions_keyboard(device_id: int) -> InlineKeyboardMarkup:
-    action = f"shs:{device_id}"
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="⛔ Выключить", callback_data=f"{action}:off", style="danger"),
-                InlineKeyboardButton(text="👶 Детский режим", callback_data=f"{action}:kid"),
-            ],
-            [
-                InlineKeyboardButton(text="🍿 Взрослым на 3 часа", callback_data=f"{action}:3", style="success"),
-                InlineKeyboardButton(text="🌙 Взрослым до утра", callback_data=f"{action}:m", style="success"),
-            ],
-            [InlineKeyboardButton(text="← Все устройства", callback_data="shl")],
-        ]
-    )
-
-
-def shared_status_text(device: dict[str, Any]) -> str:
-    until = f" до {device['until'][11:16]}" if device.get("until") else ""
-    return f"{device['name']}\nСейчас: {SHARED_LABELS[device['state']]}{until}"
 
 
 def quiz_keyboard(options: list[str]) -> InlineKeyboardMarkup:
@@ -582,8 +562,8 @@ class LunaBot:
             await self._people.send_summary(member.telegram_id)
         elif text == BTN_INVITE and adult:
             await self._people.send_invite(member.telegram_id)
-        elif text == BTN_SHARED and adult:
-            await self._send_shared_list(member)
+        elif text == OLD_SHARED and adult:
+            await self._send(member.telegram_id, SHARED_MOVED)
         elif text == BTN_INTERNET and kid:
             await self._my_time(member)
         elif text == BTN_ASK_TIME and kid:
@@ -625,12 +605,8 @@ class LunaBot:
             await remove_menu(callback)
         elif prefix == "quiz":
             await self._answer_quiz(member, int(args[0]))
-        elif prefix == "shl":
-            await self._edit_shared_list(callback)
-        elif prefix == "sh":
-            await self._show_shared_device(callback, int(args[0]))
-        elif prefix == "shs":
-            await self._change_shared_device(callback, int(args[0]), args[1])
+        elif prefix in ("sh", "shs", "shl"):  # buttons of a device list sent before the move to HomeSec
+            await self._edit(callback, SHARED_MOVED, None)
         elif prefix == "mem":
             await self._edit(callback, *await self._memory_view(member, int(args[0])))
         elif prefix == "memd":
@@ -697,50 +673,6 @@ class LunaBot:
             await self._send(member.telegram_id, "Этот вопрос уже закрыт.")
             return
         await self._send(member.telegram_id, await self._quiz_outcome(member, quiz, choice == quiz.correct))
-
-    async def _shared_list_view(self) -> tuple[str, InlineKeyboardMarkup | None]:
-        try:
-            devices = await self._pi.shared_devices()
-        except (PiNotFoundError, PiUnavailableError):
-            return PI_OFFLINE, None
-        if not devices:
-            return "Общих устройств пока нет.", None
-        rows = [
-            [
-                InlineKeyboardButton(
-                    text=f"{SHARED_LABELS[d['state']].split()[0]} {d['name']}"[:60], callback_data=f"sh:{d['id']}"
-                )
-            ]
-            for d in devices
-        ]
-        return "Выбери устройство:", InlineKeyboardMarkup(inline_keyboard=rows)
-
-    async def _send_shared_list(self, member: AssistantMember) -> None:
-        text, markup = await self._shared_list_view()
-        await self._send(member.telegram_id, text, markup)
-
-    async def _edit_shared_list(self, callback: CallbackQuery) -> None:
-        text, markup = await self._shared_list_view()
-        await self._edit(callback, text, markup)
-
-    async def _show_shared_device(self, callback: CallbackQuery, device_id: int) -> None:
-        try:
-            device = next((d for d in await self._pi.shared_devices() if int(d["id"]) == device_id), None)
-        except (PiNotFoundError, PiUnavailableError):
-            await self._edit(callback, PI_OFFLINE, None)
-            return
-        if device is None:
-            await self._edit(callback, "Устройство не найдено.", None)
-            return
-        await self._edit(callback, shared_status_text(device), shared_actions_keyboard(device_id))
-
-    async def _change_shared_device(self, callback: CallbackQuery, device_id: int, choice: str) -> None:
-        try:
-            device = await self._pi.set_shared_state(device_id, choice)
-        except (PiNotFoundError, PiUnavailableError):
-            await self._edit(callback, PI_OFFLINE, None)
-            return
-        await self._edit(callback, shared_status_text(device), shared_actions_keyboard(device_id))
 
     async def _quiz_outcome(self, member: AssistantMember, quiz: QuizQuestion, correct: bool) -> str:
         try:

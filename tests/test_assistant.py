@@ -629,7 +629,7 @@ def test_menu_matches_role(role: str, expected: str, hidden: str | None) -> None
     ("role", "prefix", "allowed"),
     [
         ("owner", "pxy", True),
-        ("adult", "shs", True),
+        ("adult", "shs", True),  # an old device list answers that it moved
         ("adult", "pxy", True),
         ("owner", "link", False),
         ("kid", "shs", False),
@@ -641,64 +641,6 @@ def test_menu_matches_role(role: str, expected: str, hidden: str | None) -> None
 )
 def test_callback_permissions(role: str, prefix: str, allowed: bool) -> None:
     assert bot.LunaBot._callback_allowed(role, prefix) is allowed
-
-
-def test_callback_data_fits_telegram_limit() -> None:
-    for row in bot.shared_actions_keyboard(10**12).inline_keyboard:
-        assert all(len((button.callback_data or "").encode()) <= 64 for button in row)
-
-
-@pytest.mark.asyncio
-async def test_kid_cannot_open_shared_devices_by_typing(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    instance, _, answer = harness
-    _as_member(monkeypatch, _member("kid", 5))
-    instance._pi.shared_devices = AsyncMock(return_value=[])
-    await instance.on_message(_message(bot.BTN_SHARED, 5))
-    instance._pi.shared_devices.assert_not_awaited()
-    answer.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_shared_device_buttons_edit_same_message(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    instance, _, _ = harness
-    _as_member(monkeypatch, _member("adult"))
-    device = {"id": 7, "name": "TV", "state": "adult", "until": "2026-11-09T23:30:00"}
-    instance._pi.set_shared_state = AsyncMock(return_value=device)
-    callback = _callback("shs:7:3")
-    await instance.on_callback(callback)
-    instance._pi.set_shared_state.assert_awaited_once_with(7, "3")
-    callback.answer.assert_awaited_once_with()
-    assert "до 23:30" in callback.message.edit_text.call_args.args[0]
-
-
-@pytest.mark.asyncio
-async def test_kid_is_denied_shared_button_press(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    instance, _, _ = harness
-    _as_member(monkeypatch, _member("kid", 5))
-    instance._pi.set_shared_state = AsyncMock()
-    await instance.on_callback(_callback("shs:7:off", 5))
-    instance._pi.set_shared_state.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("choice", "body"),
-    [
-        ("off", {"state": "off"}),
-        ("kid", {"state": "kid"}),
-        ("3", {"state": "adult", "hours": 3.0}),
-        ("m", {"state": "adult", "until_morning": True}),
-    ],
-)
-async def test_pi_client_maps_shared_choices(choice: str, body: dict[str, Any]) -> None:
-    seen: dict[str, Any] = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen["body"] = json.loads(request.content)
-        return httpx.Response(200, json={"id": 7, "name": "TV", "state": "kid", "until": None})
-
-    await _pi_client(handler).set_shared_state(7, choice)
-    assert seen["body"] == body
 
 
 @pytest.mark.parametrize("role", ["owner", "adult", "kid", "guest"])
@@ -1861,7 +1803,6 @@ async def test_family_menu_opens_people_for_adults_only(harness: Any, monkeypatc
     assert [b.callback_data for row in send.call_args.kwargs["reply_markup"].inline_keyboard for b in row] == [
         "fhp",
         "fhi",
-        "shl",
     ]
     answer.assert_not_awaited()
 
@@ -1874,3 +1815,17 @@ async def test_internet_screen_offers_asking_and_the_quiz(harness: Any, monkeypa
     assert _sent(send).startswith("⏳ Интернет")
     buttons = [b.callback_data for row in send.call_args.kwargs["reply_markup"].inline_keyboard for b in row]
     assert buttons == ["nta", "ntq"]
+
+
+@pytest.mark.asyncio
+async def test_shared_devices_point_to_homesec(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, send, answer = harness
+    _as_member(monkeypatch, _member("adult", 5))
+    await instance.on_message(_message(bot.OLD_SHARED, 5))
+    assert _sent(send) == bot.SHARED_MOVED
+    callback = _callback("shs:7:off", 5)
+    await instance.on_callback(callback)
+    assert callback.message.edit_text.call_args.args[0] == bot.SHARED_MOVED
+    _as_member(monkeypatch, _member("kid", 5))
+    await instance.on_message(_message(bot.OLD_SHARED, 5))
+    answer.assert_awaited_once()  # a child's typed text is just a message
