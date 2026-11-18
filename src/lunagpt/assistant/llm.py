@@ -38,8 +38,10 @@ QUIZ_MODELS = ["luna-fast", "luna-smart"]
 # page in 2 of 3 runs and luna-fast in none, and homework answers must match the page. Adults' photos go to
 # Claude like their chat: luna-smart read the same seven benchmark photos as well as luna-fast.
 PHOTO_MODELS = ["luna-fast", "luna-smart", "luna-local"]
-# Fact extraction scored 12 of 12 on the local model, so it stays free unless the local model is down.
-MEMORY_MODELS = ["luna-local", "luna-fast"]
+# Fact extraction goes to the cloud first: with today's date in the prompt luna-fast turned 7 of 7 relative dates
+# into calendar ones in two runs and the local model 2 of 7, and the local model stored text it was asked to
+# translate or correct as the user's own facts (benchmark of 2026-11-18, 22 messages). It stays as the fallback.
+MEMORY_MODELS = ["luna-fast", "luna-local"]
 QUIZ_TOPICS = (
     "космос",
     "животные",
