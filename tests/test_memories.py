@@ -1,6 +1,7 @@
 """Long-term memory against a real Postgres database created for this run."""
 
 import json
+import re
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -50,6 +51,10 @@ def _facts(*facts: str) -> str:
     return json.dumps({"facts": list(facts)}, ensure_ascii=False)
 
 
+def _undated(facts: list[str]) -> list[str]:
+    return [fact.rsplit(" (записано ", 1)[0] for fact in facts]
+
+
 async def _contents(memory: Memory, member: int) -> list[str]:
     return [row.content for row in await memory.list_facts(member)]
 
@@ -58,7 +63,7 @@ async def _contents(memory: Memory, member: int) -> list[str]:
 async def test_new_fact_is_stored_and_recalled(sessions: Any) -> None:
     memory, _ = _memory(sessions, _facts("Пользователь любит игры"))
     await memory.remember(OWNER, "owner", "Я очень люблю компьютерные игры")
-    assert await memory.recall(OWNER, "owner", "во что поиграть?") == ["Пользователь любит игры"]
+    assert _undated(await memory.recall(OWNER, "owner", "во что поиграть?")) == ["Пользователь любит игры"]
 
 
 @pytest.mark.asyncio
@@ -105,10 +110,25 @@ async def test_unclear_consolidation_keeps_both_facts(sessions: Any, decision: s
 
 
 @pytest.mark.asyncio
+async def test_relative_dates_are_pinned_and_recalled_facts_carry_their_day(
+    sessions: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A "tomorrow" written on the 12th must not read as a future plan on the 18th."""
+    monkeypatch.setattr(memories, "_local_today", lambda: "2026-11-12, четверг")
+    memory, complete = _memory(sessions, _facts("Пользователь едет в горы 13 ноября 2026 вечером"))
+    await memory.remember(OWNER, "owner", "Завтра вечером еду в горы")
+    assert complete.await_args is not None
+    system = complete.await_args.args[0][0]["content"]
+    assert "Сегодня 2026-11-12, четверг" in system and "не факт о пользователе" in system
+    (fact,) = await memory.recall(OWNER, "owner", "куда я еду?")
+    assert re.fullmatch(r"Пользователь едет в горы 13 ноября 2026 вечером \(записано \d{4}-\d{2}-\d{2}\)", fact)
+
+
+@pytest.mark.asyncio
 async def test_guest_has_personal_memory(sessions: Any) -> None:
     memory, _ = _memory(sessions, _facts("Пользователь любит игры"))
     await memory.remember(OWNER, "guest", "Я гость и люблю игры")
-    assert await memory.recall(OWNER, "guest", "кто я") == ["Пользователь любит игры"]
+    assert _undated(await memory.recall(OWNER, "guest", "кто я")) == ["Пользователь любит игры"]
 
 
 @pytest.mark.asyncio
@@ -141,7 +161,7 @@ async def test_large_store_uses_similarity(sessions: Any, monkeypatch: pytest.Mo
             db.add(AssistantMemory(member_id=OWNER, content=fact, embedding=vector_for(fact)))
         await db.commit()
     found = await memory.recall(OWNER, "owner", "Какие игры?")
-    assert len(found) == 2 and "Любит игры" in found
+    assert len(found) == 2 and "Любит игры" in _undated(found)
 
 
 @pytest.mark.asyncio
