@@ -265,3 +265,7 @@ async def test_weekly_report_carries_the_extra_block_and_survives_its_failure(
 
 def test_feedback_score_name_matches_the_report() -> None:
     assert feedback.SCORE_NAME == "user-feedback"
+
+
+def test_run_names_use_the_family_clock() -> None:
+    assert suites.run_name("weekly", datetime(2026, 11, 22, 20, 0)) == "2026-11-22 20:00 weekly"

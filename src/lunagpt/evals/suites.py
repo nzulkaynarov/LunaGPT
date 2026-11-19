@@ -4,10 +4,11 @@ A check returns (passed, note); the note says what was wrong, so a failed case i
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from lunagpt.assistant import calendar_desk, lists, llm, memories, reminders
+from lunagpt.config import settings
 from lunagpt.evals import cases
 
 Task = Callable[[dict[str, Any], dict[str, Any]], Awaitable[Any]]
@@ -158,4 +159,6 @@ SUITES = (
 
 
 def run_name(source: str, now: datetime | None = None) -> str:
-    return f"{(now or datetime.now()):%Y-%m-%d %H:%M} {source}"
+    """The family's wall clock: the container runs in UTC, the owner reads the runs in Tashkent time."""
+    local = now or datetime.now(UTC) + timedelta(hours=settings.luna_utc_offset_hours)
+    return f"{local:%Y-%m-%d %H:%M} {source}"
