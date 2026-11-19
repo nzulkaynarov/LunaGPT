@@ -1,5 +1,5 @@
 # LunaGPT Management Makefile
-.PHONY: help setup up down restart logs status test lint clean
+.PHONY: help setup up down restart logs status test lint eval clean
 
 help: ## Показать список доступных команд
 	@grep -E '^[a-z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -32,6 +32,9 @@ lint: ## Проверка качества кода с ruff и mypy
 	uv run ruff check src/ tests/ config/
 	uv run ruff format --check src/ tests/ config/
 	uv run mypy src/ tests/
+
+eval: ## Прогнать проверки Luna (память, напоминания, календарь, списки) и записать их в Langfuse
+	LANGFUSE_HOST=http://localhost:3001 uv run python -m lunagpt.evals $(SUITES)
 
 clean: ## Удалить ВСЕ данные (память семьи, ключи шлюза, трассы); спросит подтверждение
 	@echo "Это удалит все базы LunaGPT. Последняя копия: $$(ls -1t /data/backups/lunagpt/lunagpt-*.dump 2>/dev/null | head -1)"

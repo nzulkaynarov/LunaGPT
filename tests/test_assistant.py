@@ -85,8 +85,8 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> tuple[bot.LunaBot, AsyncMock, As
         delete_message=AsyncMock(),
     )
 
-    async def shown_like_text(chat_id: int, rich: Any, reply_markup: Any = None) -> None:
-        await telegram.send_message(chat_id, rich.markdown, reply_markup=reply_markup)
+    async def shown_like_text(chat_id: int, rich: Any, reply_markup: Any = None) -> Any:
+        return await telegram.send_message(chat_id, rich.markdown, reply_markup=reply_markup)
 
     telegram.send_rich_message = shown_like_text
     answer = AsyncMock(return_value="ответ")
@@ -938,7 +938,9 @@ async def test_failed_update_is_answered_not_silent() -> None:
 
 @pytest.mark.asyncio
 async def test_a_blocked_child_does_not_hold_up_other_decisions(monkeypatch: pytest.MonkeyPatch) -> None:
-    telegram = MagicMock(send_message=AsyncMock(side_effect=[TelegramForbiddenError(MagicMock(), "blocked"), None]))
+    telegram = MagicMock(
+        send_message=AsyncMock(side_effect=[TelegramForbiddenError(MagicMock(), "blocked"), MagicMock()])
+    )
     session = MagicMock()
     session.__aenter__ = AsyncMock(return_value=MagicMock())
     session.__aexit__ = AsyncMock(return_value=None)

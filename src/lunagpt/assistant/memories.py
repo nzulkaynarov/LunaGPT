@@ -93,6 +93,24 @@ def _dated(row: AssistantMemory) -> str:
     return f"{row.content} (записано {_local(row.updated_at):%Y-%m-%d})"
 
 
+async def extract_facts(
+    text: str, today: str, metadata: dict[str, Any], complete: CompleteFn = llm.complete_json_text
+) -> list[str]:
+    """The facts worth keeping from one message; also the task of the memory evaluation."""
+    system = EXTRACT_PROMPT + EXTRACT_DATE_NOTE.format(today=today)
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": text[:2000]}]
+    raw = await complete(messages, metadata)
+    if raw is None:
+        return []
+    try:
+        facts = ExtractedFacts.model_validate_json(raw).facts
+    except ValidationError:
+        logger.warning("memory extraction returned invalid JSON")
+        return []
+    cleaned = [fact.strip()[:MAX_FACT_CHARS] for fact in facts if fact.strip()]
+    return cleaned[:MAX_FACTS_PER_MESSAGE]
+
+
 class FamilyMemory:
     """Notes for the whole family, written only on someone's explicit request and kept word for word."""
 
@@ -207,18 +225,7 @@ class Memory:
             logger.warning("memory update failed", exc_info=True)
 
     async def _extract(self, member_id: int, role: str, text: str) -> list[str]:
-        system = EXTRACT_PROMPT + EXTRACT_DATE_NOTE.format(today=_local_today())
-        messages = [{"role": "system", "content": system}, {"role": "user", "content": text[:2000]}]
-        raw = await self._complete(messages, _metadata(member_id, role))
-        if raw is None:
-            return []
-        try:
-            facts = ExtractedFacts.model_validate_json(raw).facts
-        except ValidationError:
-            logger.warning("memory extraction returned invalid JSON")
-            return []
-        cleaned = [fact.strip()[:MAX_FACT_CHARS] for fact in facts if fact.strip()]
-        return cleaned[:MAX_FACTS_PER_MESSAGE]
+        return await extract_facts(text, _local_today(), _metadata(member_id, role), self._complete)
 
     async def _store(self, member_id: int, role: str, fact: str) -> None:
         vector = await self._embed(fact)

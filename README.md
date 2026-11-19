@@ -24,7 +24,7 @@ HomeSec на Pi ──► LiteLLM gateway (свой ключ с лимитом: 
 | Luna | `luna-assistant` | Бот: `src/lunagpt/assistant/` |
 | Шлюз | `lunagpt-gateway` | Все вызовы моделей, ключи клиентов с лимитами: `config/litellm-config.yaml` |
 | База | `lunagpt-postgres` | Базы `lunagpt`, `litellm`, `langfuse` и сохранённая `openwebui` |
-| Трассы | `lunagpt-langfuse` | Langfuse v2, логгер `config/langfuse_v2_logger.py` |
+| Трассы | `lunagpt-langfuse` | Langfuse v2: трассы шлюза, оценки 👍/👎, проверки `make eval`, блок здоровья моделей в недельной сводке (`docs/architecture.md`) |
 | Поиск | `lunagpt-searxng` | Поиск для ответов Luna |
 | Миграции | `lunagpt-migrate` | Alembic при каждом запуске, остальные ждут его |
 

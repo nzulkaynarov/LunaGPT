@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     # The service account's JSON key, on one line; empty keeps Google Calendar off.
     luna_google_service_account: str = ""
 
+    # Langfuse: the gateway writes every model call there; Luna adds feedback scores and evaluations,
+    # and reads the week back for the owner's report. Empty keys keep all of that off.
+    langfuse_host: str = "http://localhost:3001"
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

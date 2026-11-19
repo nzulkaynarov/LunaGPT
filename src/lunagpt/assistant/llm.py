@@ -365,6 +365,7 @@ class ReplyOptions:
     about: str = ""  # what Luna knows about herself, when the question is about her
     on_search: Callable[[str], None] | None = None  # shows the search in the waiting phrases
     actions: tuple["Action", ...] = ()  # what the chat model may do: lists, reminders
+    trace_id: str | None = None  # the bot's id for this reply, so a reaction to it can score the trace
 
 
 def age_band(age: int | None) -> str:
@@ -656,7 +657,7 @@ async def generate_reply(
         {"role": "user", "content": user},
     ]
     metadata = {
-        "trace_id": str(uuid.uuid4()),
+        "trace_id": options.trace_id or str(uuid.uuid4()),
         "user_id": f"member:{member_id}",
         "session_id": f"luna:{member_id}",
         "source": "luna_assistant",

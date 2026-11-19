@@ -7,7 +7,7 @@ counts are how the owner sees that, and which features nobody opens.
 import asyncio
 import logging
 from collections import defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -156,13 +156,29 @@ def report_due(now: datetime, sent_on: date | None) -> bool:
     return now.weekday() == REPORT_WEEKDAY and now.hour >= REPORT_HOUR and sent_on != now.date()
 
 
-async def send_weekly_report(bot: Bot, sessions: async_sessionmaker[AsyncSession], now: datetime) -> bool:
-    """Send the week to the owner once on Sunday evening; True when it went out."""
+ExtraFn = Callable[[], Awaitable[list[str]]]
+
+
+async def send_weekly_report(
+    bot: Bot, sessions: async_sessionmaker[AsyncSession], now: datetime, extra: ExtraFn | None = None
+) -> bool:
+    """Send the week to the owner once on Sunday evening; True when it went out. `extra` adds lines, such as
+    the models' health; it may take a minute, so it runs before the report is marked as sent."""
     async with sessions() as db:
         owner = await db.scalar(select(AssistantMember).where(AssistantMember.role == "owner"))
         if owner is None or not report_due(now, owner.report_sent_on):
             return False
-        text = report_text(await week(db, now.date()), now.date())
+    added: list[str] = []
+    if extra is not None:
+        try:
+            added = await extra()
+        except Exception as exc:  # noqa: BLE001 — the week's use goes out even if the extra block fails
+            logger.warning("could not add to the weekly report: %s", type(exc).__name__)
+    async with sessions() as db:
+        owner = await db.scalar(select(AssistantMember).where(AssistantMember.role == "owner"))
+        if owner is None or not report_due(now, owner.report_sent_on):
+            return False
+        text = "\n".join([report_text(await week(db, now.date()), now.date()), *added])
         owner.report_sent_on = now.date()  # marked first: a Telegram failure loses one report, never repeats it
         await db.commit()
         owner_id = owner.telegram_id
@@ -174,7 +190,12 @@ async def send_weekly_report(bot: Bot, sessions: async_sessionmaker[AsyncSession
     return True
 
 
-async def watch_weekly(bot: Bot, sessions: async_sessionmaker[AsyncSession], local_now: Callable[[], datetime]) -> None:
+async def watch_weekly(
+    bot: Bot,
+    sessions: async_sessionmaker[AsyncSession],
+    local_now: Callable[[], datetime],
+    extra: ExtraFn | None = None,
+) -> None:
     while True:
-        await send_weekly_report(bot, sessions, local_now())
+        await send_weekly_report(bot, sessions, local_now(), extra)
         await asyncio.sleep(REPORT_CHECK_SECONDS)

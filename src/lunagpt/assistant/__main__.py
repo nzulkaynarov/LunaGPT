@@ -11,11 +11,13 @@ from lunagpt.assistant.bot import LunaBot, build_router
 from lunagpt.assistant.internet_desk import watch_time_requests
 from lunagpt.assistant.llm import generate_quiz, generate_reply
 from lunagpt.assistant.memories import Memory
+from lunagpt.assistant.model_health import ModelHealth
 from lunagpt.assistant.monitor import send_heartbeats, supervise, watch_family, watch_pi
 from lunagpt.assistant.pi_client import PiClient
 from lunagpt.assistant.profile import apply_profile
 from lunagpt.config import settings
 from lunagpt.db import async_session_factory
+from lunagpt.langfuse_api import Langfuse
 
 logger = logging.getLogger("lunagpt.assistant")
 
@@ -33,19 +35,27 @@ async def main() -> None:
     await apply_profile(bot)
     pi = PiClient()
     memory = Memory(async_session_factory)
-    luna = LunaBot(bot, async_session_factory, generate_reply, generate_quiz, pi, str(me.username), memory)
+    langfuse = Langfuse()
+    luna = LunaBot(
+        bot, async_session_factory, generate_reply, generate_quiz, pi, str(me.username), memory, langfuse=langfuse
+    )
     dispatcher = Dispatcher()
     dispatcher.include_router(build_router(luna))
     logger.info("Luna AI Assistant started as @%s", me.username)
     await asyncio.gather(
-        dispatcher.start_polling(bot, allowed_updates=["message", "callback_query"], handle_signals=False),
+        dispatcher.start_polling(
+            bot, allowed_updates=["message", "callback_query", "message_reaction"], handle_signals=False
+        ),
         supervise("pi", lambda: watch_pi(bot, pi, async_session_factory)),
         supervise("heartbeats", lambda: send_heartbeats(pi, async_session_factory)),
         supervise("family", lambda: watch_family(bot, pi, async_session_factory)),
         supervise("time requests", lambda: watch_time_requests(bot, pi, async_session_factory)),
         supervise("reminders", luna.reminders.watch),
         supervise("updates", luna.watch_updates),
-        supervise("weekly report", lambda: usage.watch_weekly(bot, async_session_factory, local_now)),
+        supervise(
+            "weekly report",
+            lambda: usage.watch_weekly(bot, async_session_factory, local_now, ModelHealth(langfuse).lines),
+        ),
     )
 
 

@@ -98,6 +98,11 @@ def _should_redact_content(tags: list[str]) -> bool:
     return "client:homesec" in tags and bool(REDACTED_HOMESEC_FEATURES.intersection(tags))
 
 
+def _iso_ms(ts: float) -> str:
+    """UTC with milliseconds: whole seconds made every call look like 0 or 1 s long."""
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(ts)) + f".{int(ts * 1000) % 1000:03d}Z"
+
+
 def _safe_serialize(val: Any) -> Any:
     """Recursively convert arbitrary objects to JSON-serializable primitives."""
     if isinstance(val, (str, int, float, bool)) or val is None:
@@ -192,8 +197,7 @@ class LangfuseV2Logger(CustomLogger):
 
             start_ts = start_time.timestamp() if hasattr(start_time, "timestamp") else time.time()
             end_ts = end_time.timestamp() if hasattr(end_time, "timestamp") else time.time()
-            start_iso = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(start_ts))
-            end_iso = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(end_ts))
+            start_iso, end_iso = _iso_ms(start_ts), _iso_ms(end_ts)
 
             batch: list[dict[str, Any]] = [
                 {
@@ -223,7 +227,7 @@ class LangfuseV2Logger(CustomLogger):
                         "input": messages,
                         "output": output_text,
                         "usage": usage,
-                        "metadata": metadata,
+                        "metadata": {**metadata, "tags": tags},
                     },
                 },
             ]
@@ -255,8 +259,7 @@ class LangfuseV2Logger(CustomLogger):
 
             start_ts = start_time.timestamp() if hasattr(start_time, "timestamp") else time.time()
             end_ts = end_time.timestamp() if hasattr(end_time, "timestamp") else time.time()
-            start_iso = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(start_ts))
-            end_iso = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(end_ts))
+            start_iso, end_iso = _iso_ms(start_ts), _iso_ms(end_ts)
 
             batch: list[dict[str, Any]] = [
                 {
@@ -285,7 +288,7 @@ class LangfuseV2Logger(CustomLogger):
                         "model": model,
                         "level": "ERROR",
                         "statusMessage": exception_msg,
-                        "metadata": metadata,
+                        "metadata": {**metadata, "tags": tags},
                     },
                 },
             ]

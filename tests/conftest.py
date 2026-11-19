@@ -111,6 +111,7 @@ from lunagpt.models import (  # noqa: E402
     AssistantMemory,
     AssistantMessage,
     AssistantReminder,
+    AssistantReplyTrace,
     AssistantSchedule,
     AssistantTask,
     AssistantTimeRequest,
@@ -134,6 +135,7 @@ TABLES = [
         AssistantFamilyListItem,
         AssistantTimeRequest,
         AssistantUsage,
+        AssistantReplyTrace,
     )
 ]
 

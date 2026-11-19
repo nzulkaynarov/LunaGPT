@@ -139,6 +139,10 @@ services:
       - LUNA_GOOGLE_SERVICE_ACCOUNT=${LUNA_GOOGLE_SERVICE_ACCOUNT:-}
       - LUNAGPT_DATABASE_URL=postgresql+psycopg://postgres:${POSTGRES_PASSWORD}@langfuse-db:5432/lunagpt
       - SEARXNG_URL=http://searxng:8080
+      # Feedback scores, evaluation runs and the weekly model health: the same project keys the gateway uses
+      - LANGFUSE_HOST=http://langfuse-server:3000
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:?set LANGFUSE_PUBLIC_KEY in .env}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:?set LANGFUSE_SECRET_KEY in .env}
     depends_on:
       migrate:
         condition: service_completed_successfully

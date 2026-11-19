@@ -128,6 +128,24 @@ class AssistantMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
+class AssistantReplyTrace(Base):
+    """Which Langfuse trace a message of Luna's came from, so a reaction to it becomes a score on that trace."""
+
+    __tablename__ = "assistant_reply_traces"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("assistant_members.telegram_id", ondelete="CASCADE"), nullable=False
+    )
+    message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    trace_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
+
+    __table_args__ = (Index("ix_assistant_reply_traces_message", "chat_id", "message_id", unique=True),)
+
+
 class AssistantApplication(Base):
     """Somebody who asked to join: waiting, turned away, or never answered."""
 

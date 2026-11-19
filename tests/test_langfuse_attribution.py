@@ -57,3 +57,8 @@ def test_child_conversations_are_redacted(logger_module: Any) -> None:
     assert logger_module._should_redact_content(["client:luna-assistant", "feature:chat"])
     assert not logger_module._should_redact_content(["client:homesec", "feature:orchestrator"])
     assert not logger_module._should_redact_content(["client:openwebui", "feature:chat"])
+
+
+def test_timestamps_keep_milliseconds(logger_module: Any) -> None:
+    """Whole seconds made every model call look 0 or 1 s long, so speed could not be compared."""
+    assert logger_module._iso_ms(1795095023.25) == "2026-11-19T13:30:23.250Z"

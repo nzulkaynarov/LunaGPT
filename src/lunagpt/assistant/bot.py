@@ -4,6 +4,7 @@ import asyncio
 import html
 import logging
 import re
+import uuid
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime, timedelta
@@ -35,6 +36,7 @@ from lunagpt.assistant import access, updates, usage
 from lunagpt.assistant.calendar_desk import CALENDAR_PREFIXES, CalendarDesk, is_calendar_request
 from lunagpt.assistant.chat_context import ChatContext
 from lunagpt.assistant.dialogue import Dialogue
+from lunagpt.assistant.feedback import FeedbackDesk
 from lunagpt.assistant.gcal import GoogleCalendar
 from lunagpt.assistant.internet_desk import BTN_ASK_TIME, BTN_QUIZ, INTERNET_PREFIXES, InternetDesk
 from lunagpt.assistant.list_desk import LIST_PREFIXES, ListDesk
@@ -88,6 +90,7 @@ from lunagpt.assistant.stories import ADULT_STORY_PREFIXES, PHRASE_ASK, STORY_PR
 from lunagpt.assistant.telegram import is_reply_to_prompt, remove_menu, send_long, send_model_reply
 from lunagpt.assistant.waiting import cat_is_thinking
 from lunagpt.config import settings
+from lunagpt.langfuse_api import Langfuse
 from lunagpt.models import AssistantMember
 
 logger = logging.getLogger("lunagpt.assistant.bot")
@@ -177,8 +180,10 @@ class LunaBot:
         memory: Memory | None = None,
         transcribe: TranscribeFn = transcribe_voice,
         speak: SpeakFn = speak_reply,
+        langfuse: Langfuse | None = None,
     ) -> None:
         self._bot = bot
+        self.feedback = FeedbackDesk(session_factory, langfuse)
         self._transcribe = transcribe
         self._speak = speak
         self._sessions = session_factory
@@ -615,6 +620,7 @@ class LunaBot:
             return
         today = self._today()
         costs: list[float] = []
+        trace_id = str(uuid.uuid4())
         earlier_photo = False
         if image is None:
             self.dialogue.note_question(user_id, text)
@@ -646,6 +652,7 @@ class LunaBot:
                     on_search=waiting.searching,
                     about=await self.context.about(current, text),
                     actions=await self.context.actions(current),
+                    trace_id=trace_id,
                 )
                 reply = await self._answer(member.role, user_id, history, text, facts, options)
             # Later turns keep only a mark of the photo: its bytes are never stored or sent again.
@@ -655,7 +662,8 @@ class LunaBot:
             async with self._sessions() as db:
                 await access.record_spend(db, user_id, sum(costs), today)
         await self._count(user_id, "chat", sum(costs))
-        await send_model_reply(self._bot, user_id, reply)
+        sent = await send_model_reply(self._bot, user_id, reply)
+        await self.feedback.remember(user_id, sent, trace_id)
         await self._react(user_id, message_id, DONE_REACTION if member.role == "kid" else None)
         if speak:
             await self._send_voice_reply(user_id, reply)
@@ -778,5 +786,6 @@ def build_router(luna: LunaBot) -> Router:
     router = Router()
     router.message.register(luna.on_message, F.chat.type == "private")
     router.callback_query.register(luna.on_callback)
+    router.message_reaction.register(luna.feedback.on_reaction, F.chat.type == "private")
     router.errors.register(on_error)
     return router

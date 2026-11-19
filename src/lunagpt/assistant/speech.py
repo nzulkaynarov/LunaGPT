@@ -164,7 +164,13 @@ async def _synthesize(text: str) -> SpokenReply:
                             "tags": ["client:luna-assistant", "feature:voice-reply", f"lang:{reply_language(text)}"],
                         },
                     },
-                    headers={"Authorization": f"Bearer {settings.litellm_assistant_key}"},
+                    headers={
+                        "Authorization": f"Bearer {settings.litellm_assistant_key}",
+                        # the speech route does not always pass the body's metadata on; headers always reach
+                        # the Langfuse logger, so a voice reply is never counted as an unknown caller
+                        "X-Luna-Client": "luna-assistant",
+                        "X-Luna-Feature": "voice-reply",
+                    },
                     timeout=SPEECH_TIMEOUT_SECONDS,
                 )
                 response.raise_for_status()

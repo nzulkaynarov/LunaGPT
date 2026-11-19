@@ -34,12 +34,12 @@ def split_message(text: str, limit: int = MESSAGE_LIMIT) -> list[str]:
     return parts
 
 
-async def send_long(bot: Bot, chat_id: int, text: str, reply_markup: Any = None) -> None:
-    """Send text in Telegram-sized parts, attaching the keyboard to the last one."""
+async def send_long(bot: Bot, chat_id: int, text: str, reply_markup: Any = None) -> list[int]:
+    """Send text in Telegram-sized parts, attaching the keyboard to the last one; the ids of the parts."""
     parts = split_message(text)
-    for part in parts[:-1]:
-        await bot.send_message(chat_id, part)
-    await bot.send_message(chat_id, parts[-1], reply_markup=reply_markup)
+    sent = [await bot.send_message(chat_id, part) for part in parts[:-1]]
+    sent.append(await bot.send_message(chat_id, parts[-1], reply_markup=reply_markup))
+    return [message.message_id for message in sent]
 
 
 def _keep_or_escape_dollars(match: re.Match[str]) -> str:
@@ -54,15 +54,16 @@ def escape_prices(markdown: str) -> str:
     return DOLLARS.sub(_keep_or_escape_dollars, markdown)
 
 
-async def send_model_reply(bot: Bot, chat_id: int, markdown: str, reply_markup: Any = None) -> None:
-    """Show a model's Markdown as Telegram's native rich message; plain text is the fallback."""
+async def send_model_reply(bot: Bot, chat_id: int, markdown: str, reply_markup: Any = None) -> list[int]:
+    """Show a model's Markdown as Telegram's native rich message; plain text is the fallback. The sent ids."""
     text = escape_prices(EMBEDDED_MEDIA.sub("", markdown).strip() or markdown)
     try:
-        await bot.send_rich_message(
+        message = await bot.send_rich_message(
             chat_id, InputRichMessage(markdown=text[:RICH_MESSAGE_LIMIT]), reply_markup=reply_markup
         )
     except TelegramBadRequest:
-        await send_long(bot, chat_id, text, reply_markup)
+        return await send_long(bot, chat_id, text, reply_markup)
+    return [message.message_id]
 
 
 def is_reply_to_prompt(message: Message, prompt: str) -> bool:
