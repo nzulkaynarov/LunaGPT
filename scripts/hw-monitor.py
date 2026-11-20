@@ -50,14 +50,15 @@ FIELDS = (
     "time,cpu_busy_pct,cpu_pkg_c,cpu_core_max_c,gpu_edge_c,gpu_power_w,gpu_fan_rpm,gpu_busy_pct,nvme_c,board_c,"
     "load1,mem_avail_mb,swap_used_mb,top_process"
 )
-# Kernel lines that mean hardware trouble: machine checks, disk and filesystem errors, GPU hangs,
-# thermal throttling and the out-of-memory killer.
+# Kernel lines that mean hardware trouble: machine checks, disk and filesystem errors, GPU hangs
+# and thermal throttling. The out-of-memory killer is software running out of room, counted apart.
 KERNEL_TROUBLE = re.compile(
     r"mce: |Hardware Error|EDAC .*(CE|UE) |I/O error|nvme\S*: .*(timeout|resetting controller|"
     r"controller is down)|EXT4-fs error|BTRFS error|ring \S+ timeout|GPU reset|"
-    r"temperature above threshold|Out of memory: Killed",
+    r"temperature above threshold",
     re.IGNORECASE,
 )
+OOM_KILL = re.compile(r"Out of memory: Killed process \d+ \(([^)]*)\).*?anon-rss:(\d+)kB")
 
 
 def _read(path: Path) -> str:
@@ -253,6 +254,15 @@ def kernel_errors(text: str) -> tuple[int, str | None]:
     return len(lines), (lines[-1].strip()[:200] if lines else None)
 
 
+def oom_kills(text: str) -> tuple[int, str | None]:
+    """Processes the kernel killed for lack of memory since boot, and the newest as "name 4.9 GB"."""
+    kills = [m for line in text.splitlines() if (m := OOM_KILL.search(line))]
+    if not kills:
+        return 0, None
+    name, rss_kb = kills[-1].groups()
+    return len(kills), f"{name[:60]} {int(rss_kb) / 1024 / 1024:.1f} GB"
+
+
 def tailscale_days(status_json: str, now: datetime | None = None) -> float | None:
     try:
         expiry = json.loads(status_json)["Self"].get("KeyExpiry")
@@ -401,6 +411,7 @@ def main() -> None:
                 journal = _run(["journalctl", "-k", "-b", "-o", "short-iso", "--no-pager", "-q"], 30)
                 count, last = kernel_errors(journal)
                 slow["kernel_errors"], slow["kernel_error_last"] = count, last
+                slow["oom_kills"], slow["oom_last"] = oom_kills(journal)
             if reports % TAILSCALE_EVERY == 0:
                 slow["tailscale_days"] = tailscale_days(_run(["tailscale", "status", "--json"]))
             report = {

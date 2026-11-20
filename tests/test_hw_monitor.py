@@ -70,6 +70,19 @@ def test_kernel_trouble_is_found_and_noise_is_not(hw: ModuleType) -> None:
     assert last is not None and "Machine check" in last
 
 
+def test_an_oom_kill_is_counted_apart_from_hardware_trouble(hw: ModuleType) -> None:
+    journal = "\n".join(
+        [
+            "2026-11-21T00:37:00 umar14j kernel: Out of memory: Killed process 81455 (pytest) "
+            "total-vm:8041740kB, anon-rss:5095260kB, file-rss:8kB, shmem-rss:0kB, UID:1000",
+            "2026-11-21T00:37:00 umar14j kernel: gdbus invoked oom-killer: gfp_mask=0x140cca",
+        ]
+    )
+    assert hw.kernel_errors(journal) == (0, None)
+    assert hw.oom_kills(journal) == (1, "pytest 4.9 GB")
+    assert hw.oom_kills("") == (0, None)
+
+
 def test_tailscale_expiry_in_days(hw: ModuleType) -> None:
     now = datetime(2026, 11, 20, tzinfo=UTC)
     status = json.dumps({"Self": {"KeyExpiry": "2026-12-01T00:00:00Z"}})
