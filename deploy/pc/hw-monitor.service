@@ -1,0 +1,15 @@
+[Unit]
+Description=LunaGPT: PC health every 10 s to a local file, every minute to HomeSec on the Pi
+After=network-online.target
+
+[Service]
+ExecStart=%h/projects/LunaGPT/scripts/hw-monitor.py
+Restart=always
+RestartSec=10
+Nice=10
+# A stop or a restart is a clean end; a power cut leaves the state file marked dirty.
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target
