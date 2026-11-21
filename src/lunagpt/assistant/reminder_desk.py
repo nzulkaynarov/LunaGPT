@@ -32,8 +32,11 @@ from lunagpt.models import AssistantMember, AssistantReminder
 
 logger = logging.getLogger("lunagpt.assistant.reminder_desk")
 
-REMINDER_PREFIXES = frozenset({"rm", "rmd", "rmz", "rmok", "rb", "rbt", "rbx", "rbc", "rbq"})
+REMINDER_PREFIXES = frozenset({"rm", "rmd", "rmz", "rmok", "rmn", "rmt", "rmq", "rb", "rbt", "rbx", "rbc", "rbq"})
 CITY_CANCEL = "rbq"  # "✖ Отмена" under the city prompt; the brief screen stays above it
+NEW_REMINDER = "rmn"  # "➕ Напоминание" on Мой день
+NEW_TASK = "rmt"  # "➕ Поручение" on Мой день
+NEW_CANCEL = "rmq"  # "✖ Отмена" under "what and when": Мой день, removed when it was asked, comes back
 MAX_ACTIVE = 50
 LIST_LIMIT = 10
 POLL_SECONDS = 20
@@ -46,7 +49,20 @@ CITY_PROMPT = "Напиши ответом на это сообщение сво
 CITY_NOT_FOUND = "Не нашла такой город."
 DAY_TITLE = "🗓 Мой день"
 BACK_TO_DAY = "← Мой день"
-HOW_TO = "Чтобы добавить, напиши или скажи: «напомни завтра в 9 позвонить бабушке»."
+BTN_NEW_REMINDER = "➕ Напоминание"
+BTN_NEW_TASK = "➕ Поручение"
+HOW_TO = (
+    f"«{BTN_NEW_REMINDER}» — напомню в нужное время, можно и словами: «напомни завтра в 9 позвонить бабушке». "
+    f"«{BTN_NEW_TASK}» — в нужное время сама сделаю дело и пришлю, например новые английские слова."
+)
+REMINDER_PROMPT = (
+    "🔔 Что и когда напомнить? Например: «завтра в 9 позвонить бабушке» "
+    "или «каждый будний день в 7:30 выпить витамины»."
+)
+TASK_PROMPT = (
+    "🗓 Что мне делать самой и когда? Например: «каждый день в 11 присылай 5 английских слов и проверяй вчерашние»."
+)
+TRY_AGAIN = "Не получилось разобрать, попробуй ещё раз."
 NOT_UNDERSTOOD = "Не поняла, когда напомнить. Напиши, например: «напомни завтра в 9 позвонить бабушке»."
 NOT_PARSED = "Не получилось разобрать напоминание, попробуй ещё раз чуть позже."
 TOO_MANY = f"У тебя уже {MAX_ACTIVE} напоминаний. Удали лишние в «🗓 Мой день»."
@@ -64,6 +80,13 @@ ExtraBriefFn = Callable[[int, date], Awaitable[list[str]]]
 TaskFn = Callable[[AssistantMember, str], Awaitable[None]]  # Luna carries out a task she was given for this time
 FinishTaskFn = Callable[[int, int], Awaitable[bool]]  # marks a person's homework done; False when nothing was open
 DO = "do"
+REMIND = "remind"
+# Asked from Мой день: the question for each kind, and the line above it again when the answer named no time.
+NEW_PROMPTS = {REMIND: REMINDER_PROMPT, DO: TASK_PROMPT}
+WHEN_MISSING = {
+    REMIND: "Не поняла, когда напомнить: назови день или время.",
+    DO: "Не поняла, когда это делать: назови день или время.",
+}
 # A closed row recording that a guest was told their access ended: its due time is the end it was about, so the
 # notice comes once per end and again only after access was extended and ended anew. Nothing lists or rings it.
 NOTICE = "notice"
@@ -84,6 +107,11 @@ def to_local(moment: datetime) -> datetime:
 
 def _button(text: str, data: str, style: str | None = None) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data=data, style=style)
+
+
+def as_request(text: str) -> str:
+    """A typed answer as a reminder phrase: «завтра в 9 позвонить бабушке» reads like «напомни завтра в 9…»."""
+    return text if reminders.is_reminder_request(text) else f"напомни {text}"
 
 
 def ring_keyboard(reminder_id: int) -> InlineKeyboardMarkup:
@@ -200,6 +228,32 @@ class ReminderDesk:
         note = "\nОбычное напоминание на это же время убрала." if replaced else ""
         return f"{verb} {reminders.when_text(due, now, parts.repeat)}{what}{note}", cancel
 
+    # ---------- from Мой день ----------
+
+    @staticmethod
+    def prompt_kind(message: Message) -> str | None:
+        """What an answer to "what and when" from Мой день sets: a reminder or a task; None for other messages."""
+        return next((kind for kind, prompt in NEW_PROMPTS.items() if is_reply_to_prompt(message, prompt)), None)
+
+    async def ask_new(self, user_id: int, kind: str, problem: str = "") -> None:
+        await send_prompt(self._bot, user_id, NEW_PROMPTS[kind], NEW_CANCEL, problem)
+
+    async def create_from_prompt(self, member: AssistantMember, text: str, kind: str) -> str | None:
+        """The answer to "what and when": the card as a phrase makes it, with the way back to Мой день, which made
+        way for the question; an answer with no time gets the question again. What the person was told, or None
+        when nothing was set."""
+        user_id = member.telegram_id
+        said, markup = await self._create(member, as_request(text), kind)
+        if markup is not None:
+            back = InlineKeyboardMarkup(inline_keyboard=[*markup.inline_keyboard, [_button(BACK_TO_DAY, "rm")]])
+            await send_long(self._bot, user_id, said, back)
+            return said
+        if said == TOO_MANY:  # Мой день itself, where the extra ones are deleted
+            await send_long(self._bot, user_id, *await self.view(member, said))
+        else:
+            await self.ask_new(user_id, kind, WHEN_MISSING[kind] if said == NOT_UNDERSTOOD else TRY_AGAIN)
+        return None
+
     # ---------- from the chat ----------
 
     async def planner_text(self, user_id: int) -> str:
@@ -261,10 +315,10 @@ class ReminderDesk:
             )
             return list(rows)
 
-    async def view(self, member: AssistantMember) -> tuple[str, InlineKeyboardMarkup]:
+    async def view(self, member: AssistantMember, note: str = "") -> tuple[str, InlineKeyboardMarkup]:
         rows = await self._active(member.telegram_id)
         now = local_now()
-        parts = [f"<h3>{esc(DAY_TITLE)}</h3>"]
+        parts = ([f"<p>{esc(note)}</p>"] if note else []) + [f"<h3>{esc(DAY_TITLE)}</h3>"]
         if rows:
             table = [
                 (
@@ -283,6 +337,8 @@ class ReminderDesk:
         parts.append(f"<footer>{esc(self._brief_status(member))}</footer>")
         numbers = [_button(f"✖ {n}", f"rmd:{row.id}", DANGER) for n, row in enumerate(rows[:LIST_LIMIT], start=1)]
         keyboard = [numbers[i : i + 5] for i in range(0, len(numbers), 5)]
+        # Everyone: a guest's task is carried out by the guest's own chat model, which needs no tools for it.
+        keyboard.append([_button(BTN_NEW_REMINDER, NEW_REMINDER), _button(BTN_NEW_TASK, NEW_TASK)])
         if member.role == "kid":  # the school timetable and homework are children's
             keyboard.append([_button("📚 Расписание", "sk"), _button("📝 Домашка", "tk")])
         if self.calendar and member.role in access.FAMILY_ROLES:  # guests cannot link a calendar
@@ -319,6 +375,14 @@ class ReminderDesk:
             return
         if prefix == "rmok":
             await self._mark_done(callback, user_id, int(args[0]) if args else None)
+            return
+        if prefix in (NEW_REMINDER, NEW_TASK):
+            await self.ask_new(user_id, DO if prefix == NEW_TASK else REMIND)
+            await remove_menu(callback)  # the card that answers it leads back to a fresh Мой день
+            return
+        if prefix == NEW_CANCEL:
+            await remove_menu(callback)
+            await send_long(self._bot, user_id, *await self.view(member))
             return
         if prefix == "rmd":
             await self._delete(user_id, int(args[0]))

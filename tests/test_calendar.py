@@ -431,3 +431,118 @@ async def test_guests_are_offered_reminders_instead_of_the_calendar(
     assert shown.args == (calendar_desk.GUESTS_NO_CALENDAR,)
     assert pressed(shown.kwargs["reply_markup"], "← Мой день")[1] == "rm"
     telegram.send_message.assert_awaited_once()  # no address prompt was sent
+
+
+# ---------- an event from the calendar screen ----------
+
+
+async def _linked(db_sessions: async_sessionmaker[AsyncSession]) -> AssistantMember:
+    member = await _member(db_sessions)
+    async with db_sessions() as db:
+        (await db.get(AssistantMember, 1)).google_calendar_id = "mama@gmail.com"  # type: ignore[union-attr]
+        await db.commit()
+    return member
+
+
+def _labels(markup: Any) -> list[str]:
+    return [b.text for row in markup.inline_keyboard for b in row]
+
+
+@pytest.mark.asyncio
+async def test_only_a_linked_calendar_offers_a_new_event(db_sessions: async_sessionmaker[AsyncSession]) -> None:
+    member = await _member(db_sessions)
+    desk = calendar_desk.CalendarDesk(MagicMock(send_message=AsyncMock()), db_sessions, _calendar(FakeGoogle()))
+    _, markup = await desk.view(1)
+    assert calendar_desk.BTN_ADD_EVENT not in _labels(markup)  # not linked yet: there is nowhere to add
+    await desk.link(member, "mama@gmail.com")
+    text, markup = await desk.view(1)
+    assert pressed(markup, calendar_desk.BTN_ADD_EVENT)[1] == calendar_desk.ADD_EVENT
+    assert calendar_desk.BTN_ADD_EVENT in text
+
+    guest = AssistantMember(telegram_id=3, name="Гость", role="guest")
+    async with db_sessions() as db:
+        db.add(guest)
+        await db.commit()
+    old_screen = _callback(calendar_desk.ADD_EVENT)
+    await desk.handle(old_screen, guest, calendar_desk.ADD_EVENT, [])
+    shown = old_screen.message.edit_text.call_args
+    assert shown.args == (calendar_desk.GUESTS_NO_CALENDAR,)  # guests have no calendar, so no question either
+    assert calendar_desk.BTN_ADD_EVENT not in _labels(shown.kwargs["reply_markup"])
+
+
+@pytest.mark.asyncio
+async def test_a_new_event_from_the_screen_asks_again_then_previews_and_leads_back(
+    db_sessions: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(calendar_desk, "local_now", lambda: NOW)
+    member = await _linked(db_sessions)
+    google = FakeGoogle()
+    telegram = MagicMock(send_message=AsyncMock())
+    extract = AsyncMock(
+        side_effect=[
+            EventParts(title="Стоматолог"),  # no day or time
+            None,  # the model could not read it
+            EventParts(title="Стоматолог", day="thu", time="15:00"),
+        ]
+    )
+    desk = calendar_desk.CalendarDesk(telegram, db_sessions, _calendar(google), extract)
+    press = _callback(calendar_desk.ADD_EVENT)
+    press.message.delete = AsyncMock()
+    await desk.handle(press, member, calendar_desk.ADD_EVENT, [])
+    asked = telegram.send_message.call_args
+    assert asked.args[1] == calendar_desk.EVENT_PROMPT and "«стоматолог в четверг в 15:00»" in asked.args[1]
+    assert prompt_cancel(asked.kwargs["reply_markup"]) == calendar_desk.EVENT_CANCEL
+    press.message.delete.assert_awaited_once()  # the week made way for the question
+    assert desk.is_event_reply(_answer_to(asked.args[1]))
+
+    await desk.request_event(member, "стоматолог", from_screen=True)
+    again = telegram.send_message.call_args
+    assert again.args[1] == f"{calendar_desk.EVENT_WHEN_MISSING}\n{calendar_desk.EVENT_PROMPT}"
+    assert prompt_cancel(again.kwargs["reply_markup"]) == calendar_desk.EVENT_CANCEL
+    assert desk.is_event_reply(_answer_to(again.args[1]))  # the fresh question still works
+    await desk.request_event(member, "стоматолог в четверг", from_screen=True)
+    assert telegram.send_message.call_args.args[1] == f"{calendar_desk.EVENT_TRY_AGAIN}\n{calendar_desk.EVENT_PROMPT}"
+
+    await desk.request_event(member, "стоматолог в четверг в 15:00", from_screen=True)
+    assert extract.call_args.args[0] == "добавь в календарь стоматолог в четверг в 15:00"  # read like the phrase
+    preview = telegram.send_message.call_args
+    assert preview.args[1] == "📅 Добавить в календарь?\n\nСтоматолог\nзавтра 15:00–16:00"
+    data, prefix, args = pressed(preview.kwargs["reply_markup"], "✅ Добавить")
+    confirm = _callback(data)
+    await desk.handle(confirm, member, prefix, args)
+    shown = confirm.message.edit_text.call_args
+    assert shown.args[0].startswith("✅ Добавила в календарь: Стоматолог")
+    assert pressed(shown.kwargs["reply_markup"], calendar_desk.BACK_TO_CALENDAR)[1] == "cal"
+    assert [event["summary"] for event in google.created] == ["Стоматолог"]
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_event_from_the_screen_leads_back_and_a_phrase_preview_stays_as_it_was(
+    db_sessions: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(calendar_desk, "local_now", lambda: NOW)
+    member = await _linked(db_sessions)
+    telegram = MagicMock(send_message=AsyncMock())
+    extract = AsyncMock(return_value=EventParts(title="Собрание", day="fri"))
+    desk = calendar_desk.CalendarDesk(telegram, db_sessions, _calendar(FakeGoogle()), extract)
+    await desk.request_event(member, "собрание в пятницу", from_screen=True)
+    data, prefix, args = pressed(telegram.send_message.call_args.kwargs["reply_markup"], "✖ Отмена")
+    cancel = _callback(data)
+    await desk.handle(cancel, member, prefix, args)
+    shown = cancel.message.edit_text.call_args
+    assert shown.args == (calendar_desk.CANCELLED,)
+    assert pressed(shown.kwargs["reply_markup"], calendar_desk.BACK_TO_CALENDAR)[1] == "cal"
+
+    await desk.request_event(member, "добавь в календарь собрание в пятницу")
+    assert extract.call_args.args[0] == "добавь в календарь собрание в пятницу"
+    phrase_markup = telegram.send_message.call_args.kwargs["reply_markup"]
+    assert [b.callback_data.count(":") for row in phrase_markup.inline_keyboard for b in row] == [1, 1]
+
+    question = _callback(calendar_desk.EVENT_CANCEL)  # "✖ Отмена" under the question itself
+    question.message.delete = AsyncMock()
+    telegram.send_message.reset_mock()
+    await desk.handle(question, member, calendar_desk.EVENT_CANCEL, [])
+    question.message.delete.assert_awaited_once()
+    week = telegram.send_message.call_args
+    assert week.args[1].startswith("📅 Календарь mama@gmail.com на неделю")
+    assert calendar_desk.BTN_ADD_EVENT in _labels(week.kwargs["reply_markup"])

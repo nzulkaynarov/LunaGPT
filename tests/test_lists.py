@@ -8,7 +8,7 @@ import pytest
 from aiogram.types import Message
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from telegram_fakes import edited, fake_bot, last_sent, prompt_cancel
+from telegram_fakes import edited, fake_bot, last_sent, pressed, prompt_cancel
 
 from lunagpt.assistant import list_desk, lists
 from lunagpt.models import AssistantFamilyList, AssistantFamilyListItem, AssistantMember
@@ -154,7 +154,12 @@ async def test_a_tap_ticks_a_line_and_clearing_removes_it(db_sessions: async_ses
     await desk.view(people["mom"])
     overview, markup = _sent(telegram)
     assert overview == list_desk.OVERVIEW
-    assert [b[0] for b in _buttons(markup)] == ["🛒 Покупки · 0", "🧹 Дела по дому · 0", "👤 Мои дела"]
+    assert [b[0] for b in _buttons(markup)] == [
+        "🛒 Покупки · 0",
+        "🧹 Дела по дому · 0",
+        "👤 Мои дела",
+        list_desk.BTN_NEW_LIST,
+    ]
     shopping = _buttons(markup)[0][1].split(":")[1]
 
     reply = MagicMock(spec=Message)
@@ -507,3 +512,135 @@ async def test_a_button_on_a_list_that_went_away_leads_to_all_lists(
     markup = late.message.edit_text.call_args.kwargs["reply_markup"]
     assert [b[0] for b in _buttons(markup)][:2] == ["🛒 Покупки · 0", "🧹 Дела по дому · 0"]
     late.message.delete.assert_not_awaited()
+
+
+# ---------- a new list by buttons ----------
+
+
+def _answer_to(prompt: str) -> MagicMock:
+    answer = MagicMock(spec=Message)
+    answer.reply_to_message = MagicMock(text=prompt, from_user=MagicMock(is_bot=True))
+    return answer
+
+
+async def _named_by(desk: list_desk.ListDesk, member: AssistantMember, name: str) -> tuple[str, Any]:
+    """Answer "how to name it" with this name; the question that comes next."""
+    await desk.name_from_reply(member, name)
+    return _sent(desk._bot)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("who", ["kid", "mom"])
+async def test_every_family_member_sees_new_list_and_the_question_can_be_cancelled(
+    db_sessions: async_sessionmaker[AsyncSession], who: str
+) -> None:
+    people = await _family(db_sessions)
+    telegram = _telegram()
+    desk = list_desk.ListDesk(telegram, db_sessions)
+    await desk.view(people[who])
+    assert (list_desk.BTN_NEW_LIST, list_desk.NEW_LIST) in _buttons(_sent(telegram)[1])
+
+    press = _callback(list_desk.NEW_LIST)
+    await desk.handle(press, people[who], list_desk.NEW_LIST, [])
+    asked, markup = _sent(telegram)
+    assert asked == list_desk.NEW_LIST_PROMPT and prompt_cancel(markup) == list_desk.NEW_LIST_CANCEL
+    press.message.delete.assert_awaited_once()  # all the lists made way for the question
+    assert desk.is_name_reply(_answer_to(asked)) and not desk.is_add_reply(_answer_to(asked))
+
+    cancel = _callback(list_desk.NEW_LIST_CANCEL)
+    await desk.handle(cancel, people[who], list_desk.NEW_LIST_CANCEL, [])
+    cancel.message.delete.assert_awaited_once()
+    text, markup = _sent(telegram)
+    assert text == list_desk.OVERVIEW and (list_desk.BTN_NEW_LIST, list_desk.NEW_LIST) in _buttons(markup)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("typed", "problem"),
+    [
+        ("  «» ", list_desk.NAME_EMPTY),
+        ("Очень длинное название для списка на даче", list_desk.NAME_TOO_LONG),
+        ("покупки", list_desk.NAME_TAKEN.format(name="Покупки")),
+        ("продукты", list_desk.NAME_TAKEN.format(name="Покупки")),  # phrases with it land in «Покупки»
+        ("дела", list_desk.NAME_TAKEN.format(name="Дела по дому")),
+        ("мои дела", list_desk.NAME_TAKEN.format(name="👤 Мои дела")),
+    ],
+)
+async def test_a_wrong_name_asks_again_with_what_was_wrong(
+    db_sessions: async_sessionmaker[AsyncSession], typed: str, problem: str
+) -> None:
+    people = await _family(db_sessions)
+    desk = list_desk.ListDesk(_telegram(), db_sessions)
+    again, markup = await _named_by(desk, people["kid"], typed)
+    assert again == f"{problem}\n{list_desk.NEW_LIST_PROMPT}"
+    assert prompt_cancel(markup) == list_desk.NEW_LIST_CANCEL
+    assert desk.is_name_reply(_answer_to(again))  # the fresh question still works
+    family, mine = await desk.names(people["kid"])
+    assert family == ["Покупки", "Дела по дому"] and mine == []
+
+
+@pytest.mark.asyncio
+async def test_a_child_makes_a_family_list_everyone_sees_and_it_opens_empty(
+    db_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    people = await _family(db_sessions)
+    telegram = _telegram()
+    desk = list_desk.ListDesk(telegram, db_sessions)
+    question, markup = await _named_by(desk, people["kid"], "  дача ")
+    assert question == list_desk.WHOSE_QUESTION.format(name="Дача")
+    assert [b[0] for b in _buttons(markup)] == [list_desk.BTN_FOR_FAMILY, list_desk.BTN_FOR_ME, "✖ Отмена"]
+
+    data, prefix, args = pressed(markup, list_desk.BTN_FOR_FAMILY)
+    choice = _callback(data)
+    await desk.handle(choice, people["kid"], prefix, args)
+    shown = edited(choice.message)
+    assert shown.startswith(list_desk.LIST_MADE.format(name="Дача")) and "Пока пусто" in shown
+    screen = [b[0] for b in _buttons(choice.message.edit_text.call_args.kwargs["reply_markup"])]
+    assert screen == ["➕ Добавить", "⬅️ Все списки"]  # the next step and the way back
+    assert "Дача" in (await desk.names(people["mom"]))[0]
+
+    again = _callback(data)  # the same question pressed twice makes one list
+    await desk.handle(again, people["kid"], prefix, args)
+    assert edited(again.message).startswith(list_desk.NAME_LOST)
+    assert (await desk.names(people["mom"]))[0].count("Дача") == 1
+
+    taken, _ = await _named_by(desk, people["mom"], "ДАЧА")
+    assert taken == f"{list_desk.NAME_TAKEN.format(name='Дача')}\n{list_desk.NEW_LIST_PROMPT}"
+
+
+@pytest.mark.asyncio
+async def test_a_list_only_for_me_is_seen_only_by_its_maker(db_sessions: async_sessionmaker[AsyncSession]) -> None:
+    people = await _family(db_sessions)
+    telegram = _telegram()
+    desk = list_desk.ListDesk(telegram, db_sessions)
+    _, markup = await _named_by(desk, people["mom"], "Работа")
+    data, prefix, args = pressed(markup, list_desk.BTN_FOR_ME)
+    choice = _callback(data)
+    await desk.handle(choice, people["mom"], prefix, args)
+    assert edited(choice.message).startswith(list_desk.LIST_MADE.format(name="👤 Работа"))
+    assert (await desk.names(people["mom"]))[1] == ["Работа"]
+    assert "Работа" not in sum(await desk.names(people["kid"]), [])
+
+    _, markup = await _named_by(desk, people["kid"], "работа")  # the kid's own name is free for the kid
+    assert _sent(telegram)[0] == list_desk.WHOSE_QUESTION.format(name="Работа")
+    data, prefix, args = pressed(markup, "✖ Отмена")
+    cancel = _callback(data)
+    await desk.handle(cancel, people["kid"], prefix, args)
+    assert edited(cancel.message) == list_desk.OVERVIEW  # back to all the lists, nothing made
+    assert (await desk.names(people["kid"]))[1] == []
+
+
+@pytest.mark.asyncio
+async def test_no_new_list_past_the_limit(db_sessions: async_sessionmaker[AsyncSession]) -> None:
+    people = await _family(db_sessions)
+    telegram = _telegram()
+    desk = list_desk.ListDesk(telegram, db_sessions)
+    async with db_sessions() as db:
+        db.add_all(AssistantFamilyList(name=f"Список {n}") for n in range(list_desk.MAX_LISTS - 2))
+        await db.commit()
+    _, markup = await _named_by(desk, people["mom"], "Дача")
+    data, prefix, args = pressed(markup, list_desk.BTN_FOR_FAMILY)
+    choice = _callback(data)
+    await desk.handle(choice, people["mom"], prefix, args)
+    assert edited(choice.message) == f"{list_desk.TOO_MANY_LISTS}\n\n{list_desk.OVERVIEW}"
+    assert "Дача" not in (await desk.names(people["mom"]))[0]

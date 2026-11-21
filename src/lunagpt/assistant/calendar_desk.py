@@ -33,8 +33,11 @@ logger = logging.getLogger("lunagpt.assistant.calendar_desk")
 
 # Tasks copied from Luna start with this mark; the brief and chat already list tasks, so they skip these events.
 TASK_MARK = "📝 "
-CALENDAR_PREFIXES = frozenset({"cal", "calc", "calx", "calxy", "caly", "caln", "calq"})
+CALENDAR_PREFIXES = frozenset({"cal", "calc", "calx", "calxy", "caly", "caln", "calq", "cale", "caleq"})
 LINK_CANCEL = "calq"  # "✖ Отмена" under the address prompt; the calendar screen stays above it
+ADD_EVENT = "cale"  # "➕ Событие" on the calendar screen
+EVENT_CANCEL = "caleq"  # "✖ Отмена" under "what and when": the calendar, removed when it was asked, comes back
+FROM_SCREEN = "s"  # the preview's buttons carry it when the calendar screen made way for the question
 UNLINK = "calx"  # "🔌 Отключить" asks first: linking again means sending the address again
 UNLINK_YES = "calxy"
 CALENDAR_REQUEST = re.compile(
@@ -67,6 +70,11 @@ NOT_LINKED = "Сначала подключи календарь: «🗓 Мой 
 NOT_UNDERSTOOD = "Не поняла, на когда. Напиши, например: «добавь в календарь стоматолог в четверг в 15:00»."
 NOT_PARSED = "Не получилось разобрать событие, попробуй ещё раз чуть позже."
 EXPIRED = "Это уже неактуально, напиши ещё раз."
+BTN_ADD_EVENT = "➕ Событие"
+BACK_TO_CALENDAR = "← Календарь"
+EVENT_PROMPT = "📅 Что и когда добавить? Например: «стоматолог в четверг в 15:00»."
+EVENT_WHEN_MISSING = "Не поняла, на когда: назови день или время."
+EVENT_TRY_AGAIN = "Не получилось разобрать событие, попробуй ещё раз."
 CANCELLED = "Отменила, в календарь ничего не добавила."
 CONFIRM_UNLINK = (
     "🔌 Отключить календарь?\n\nСобытия в самом Google Calendar останутся, но я перестану показывать их "
@@ -121,6 +129,11 @@ class PlannedEvent:
 
 def is_calendar_request(text: str) -> bool:
     return bool(CALENDAR_REQUEST.search(text))
+
+
+def as_request(text: str) -> str:
+    """A typed answer as an event phrase: «стоматолог в четверг» reads like «добавь в календарь стоматолог…»."""
+    return text if is_calendar_request(text) else f"добавь в календарь {text}"
 
 
 def plan(parts: EventParts, now: datetime) -> PlannedEvent | None:
@@ -247,8 +260,8 @@ class CalendarDesk:
         today = local_now().date()
         lines = [f"📅 Календарь {calendar_id} на неделю:\n"]
         lines += [f"• {event_when(e, today)} — {e.title}" for e in events] or ["Событий нет."]
-        lines.append("\nДобавить: «добавь в календарь стоматолог в четверг в 15:00».")
-        keyboard = [[_button("🔌 Отключить", UNLINK, DANGER)], back]
+        lines.append(f"\nДобавить: «{BTN_ADD_EVENT}» или словами «добавь в календарь стоматолог в четверг в 15:00».")
+        keyboard = [[_button(BTN_ADD_EVENT, ADD_EVENT)], [_button("🔌 Отключить", UNLINK, DANGER)], back]
         return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod
@@ -265,6 +278,7 @@ class CalendarDesk:
     async def handle(self, callback: CallbackQuery, member: AssistantMember, prefix: str, args: list[str]) -> None:
         user_id = member.telegram_id
         token = args[0] if args else None
+        back = args[1:] == [FROM_SCREEN]  # a preview asked from the calendar screen leads back to it
         if prefix == LINK_CANCEL:
             await remove_menu(callback)
             return
@@ -274,17 +288,25 @@ class CalendarDesk:
         if prefix == "calc":
             await send_prompt(self._bot, user_id, LINK_PROMPT, LINK_CANCEL)
             return
+        if prefix == ADD_EVENT:
+            await send_prompt(self._bot, user_id, EVENT_PROMPT, EVENT_CANCEL)
+            await remove_menu(callback)  # the event's preview leads back to a fresh week
+            return
+        if prefix == EVENT_CANCEL:
+            await remove_menu(callback)
+            await send_long(self._bot, user_id, *await self.view(user_id))
+            return
         if prefix == UNLINK:
             await self._edit(callback, *self._confirm_unlink())
             return
         if prefix == UNLINK_YES:
             await self._set_calendar_id(user_id, None)
         elif prefix == "caly":
-            await self._edit(callback, *await self._add_pending(user_id, token))
+            await self._edit(callback, *await self._add_pending(user_id, token, back))
             return
         elif prefix == "caln":
             self._pending.take(user_id, token)  # a cancel is a cancel even on a preview that is long gone
-            await self._edit(callback, CANCELLED, None)
+            await self._edit(callback, CANCELLED, self._back(back))
             return
         await self._edit(callback, *await self.view(user_id))
 
@@ -292,6 +314,11 @@ class CalendarDesk:
     async def _edit(callback: CallbackQuery, text: str, markup: InlineKeyboardMarkup | None) -> None:
         if isinstance(callback.message, Message):
             await edit_screen(callback.message, text, markup)
+
+    @staticmethod
+    def _back(back: bool) -> InlineKeyboardMarkup | None:
+        """The way back to the calendar after a preview it made way for; a phrase's preview stays as it was."""
+        return InlineKeyboardMarkup(inline_keyboard=[[_button(BACK_TO_CALENDAR, "cal")]]) if back else None
 
     # ---------- linking ----------
 
@@ -334,7 +361,13 @@ class CalendarDesk:
 
     # ---------- adding ----------
 
-    async def request_event(self, member: AssistantMember, text: str) -> None:
+    @staticmethod
+    def is_event_reply(message: Message) -> bool:
+        return bool(is_reply_to_prompt(message, EVENT_PROMPT))
+
+    async def request_event(self, member: AssistantMember, text: str, from_screen: bool = False) -> None:
+        """A preview of the event to add. An answer to the calendar's own question that names no time, or that
+        could not be read, gets the question again."""
         user_id = member.telegram_id
         if member.role not in access.FAMILY_ROLES:  # guests keep their plans in reminders
             await send_long(self._bot, user_id, GUESTS_NO_CALENDAR)
@@ -353,40 +386,49 @@ class CalendarDesk:
             "source": "luna_assistant",
             "tags": ["client:luna-assistant", "feature:calendar", f"role:{member.role}"],
         }
-        parts = await self._extract(text, now, metadata)
-        if parts is None:
-            await send_long(self._bot, user_id, NOT_PARSED)
+        parts = await self._extract(as_request(text) if from_screen else text, now, metadata)
+        planned = plan(parts, now) if parts is not None else None
+        if planned is None and from_screen:
+            problem = EVENT_TRY_AGAIN if parts is None else EVENT_WHEN_MISSING
+            await send_prompt(self._bot, user_id, EVENT_PROMPT, EVENT_CANCEL, problem)
             return
-        planned = plan(parts, now)
         if planned is None:
-            await send_long(self._bot, user_id, NOT_UNDERSTOOD)
+            await send_long(self._bot, user_id, NOT_PARSED if parts is None else NOT_UNDERSTOOD)
             return
         token = self._pending.keep(user_id, planned)
-        await send_long(self._bot, user_id, *self._preview(planned, token, now.date()))
+        await send_long(self._bot, user_id, *self._preview(planned, token, now.date(), back=from_screen))
 
     @staticmethod
-    def _preview(planned: PlannedEvent, token: str, today: date, problem: str = "") -> tuple[str, InlineKeyboardMarkup]:
+    def _preview(
+        planned: PlannedEvent, token: str, today: date, problem: str = "", back: bool = False
+    ) -> tuple[str, InlineKeyboardMarkup]:
         """The event waiting for "✅ Добавить"; after a failed try it comes again with what went wrong on top."""
+        tail = f":{FROM_SCREEN}" if back else ""
         keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[[_button("✅ Добавить", f"caly:{token}", SUCCESS), _button("✖ Отмена", f"caln:{token}")]]
+            inline_keyboard=[
+                [_button("✅ Добавить", f"caly:{token}{tail}", SUCCESS), _button("✖ Отмена", f"caln:{token}{tail}")]
+            ]
         )
         preview = f"📅 Добавить в календарь?\n\n{planned.title}\n{event_when(planned, today)}"
         return (f"{problem}\n\n{preview}" if problem else preview), keyboard
 
-    async def _add_pending(self, user_id: int, token: str | None) -> tuple[str, InlineKeyboardMarkup | None]:
+    async def _add_pending(
+        self, user_id: int, token: str | None, back: bool = False
+    ) -> tuple[str, InlineKeyboardMarkup | None]:
         planned = self._pending.take(user_id, token)
         calendar_id = await self._calendar_id(user_id)
         if planned is None or token is None or self._calendar is None or not calendar_id:
-            return EXPIRED, None
+            return EXPIRED, self._back(back)
         try:
             await self._calendar.add(calendar_id, planned.title, planned.start, planned.end, planned.all_day)
         except CalendarError as exc:
             # The preview stays with its buttons, so "later" is one more press, not typing the event again.
             self._pending.keep(user_id, planned, token)
             problem = NOT_SHARED.format(email=self._calendar.email) if exc.kind == "not_shared" else UNAVAILABLE
-            return self._preview(planned, token, local_now().date(), problem)
+            return self._preview(planned, token, local_now().date(), problem, back)
         self._cache.pop(user_id, None)
-        return f"✅ Добавила в календарь: {planned.title}, {event_when(planned, local_now().date())}", None
+        added = f"✅ Добавила в календарь: {planned.title}, {event_when(planned, local_now().date())}"
+        return added, self._back(back)
 
     # ---------- tasks copied to the calendar ----------
 

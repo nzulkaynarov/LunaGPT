@@ -15,6 +15,7 @@ CHORES = "Дела по дому"  # not just "Дела", which read like remind
 DEFAULT_LISTS = (SHOPPING, CHORES)
 MY_LIST = "Мои дела"  # the personal list a person gets with one tap
 MAX_NAME_CHARS = 30
+NAME_TRIM = " .«»\"'"  # what is cut off the ends of a list name
 MAX_ITEM_CHARS = 120
 MAX_ITEMS_AT_ONCE = 30
 # The local model first: on 17 phrases, three runs each, it read every one, and the family's shopping stays home.
@@ -89,7 +90,7 @@ class ListRequest(BaseModel):
 
 def list_name(raw: str) -> str:
     """A list name as it is stored and shown: one line, capitalised, short."""
-    name = " ".join(str(raw).split()).strip(" .«»\"'")[:MAX_NAME_CHARS].strip()
+    name = " ".join(str(raw).split()).strip(NAME_TRIM)[:MAX_NAME_CHARS].strip()
     return name[:1].upper() + name[1:]
 
 

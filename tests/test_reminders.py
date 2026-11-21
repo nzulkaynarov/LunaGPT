@@ -9,7 +9,7 @@ import pytest
 from aiogram.types import Message
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from telegram_fakes import fake_bot, last_sent, prompt_cancel
+from telegram_fakes import edited, fake_bot, last_sent, prompt_cancel
 
 from lunagpt.assistant import access, brief, reminder_desk, reminders
 from lunagpt.assistant.reminders import ReminderParts
@@ -490,3 +490,161 @@ async def test_brief_of_a_guest_whose_access_ended_gives_way_to_the_same_single_
     monkeypatch.setattr(reminder_desk, "local_now", lambda: morning + timedelta(days=2))
     assert await desk.send_briefs() == 0
     assert _texts(telegram) == [reminder_desk.PAUSED, reminder_desk.PAUSED]
+
+
+# ---------- a new reminder or task from Мой день ----------
+
+
+def _answer_to(prompt: str) -> MagicMock:
+    answer = MagicMock(spec=Message)
+    answer.reply_to_message = MagicMock(text=prompt, from_user=MagicMock(is_bot=True))
+    return answer
+
+
+def _labels(markup: Any) -> dict[str, str]:
+    return {b.text: b.callback_data for row in markup.inline_keyboard for b in row}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["owner", "adult", "kid", "guest"])
+async def test_my_day_offers_a_new_reminder_and_a_task_to_every_role(
+    db_sessions: async_sessionmaker[AsyncSession], role: str
+) -> None:
+    member = AssistantMember(telegram_id=1, name="Тест", role=role)
+    async with db_sessions() as db:
+        db.add(member)
+        await db.commit()
+    text, markup = await reminder_desk.ReminderDesk(_telegram(), db_sessions).view(member)
+    buttons = _labels(markup)
+    assert buttons[reminder_desk.BTN_NEW_REMINDER] == reminder_desk.NEW_REMINDER
+    assert buttons[reminder_desk.BTN_NEW_TASK] == reminder_desk.NEW_TASK
+    assert reminder_desk.BTN_NEW_TASK in to_plain(text)  # the screen says what a task is
+
+
+@pytest.mark.asyncio
+async def test_a_reminder_from_my_day_asks_asks_again_and_leads_back(
+    db_sessions: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(reminder_desk, "local_now", lambda: NOW)
+    member = await _member(db_sessions)
+    telegram = _telegram()
+    extract = AsyncMock(
+        side_effect=[
+            _parts(task="позвонить бабушке"),  # no time named
+            None,  # the model could not read it
+            _parts(task="позвонить бабушке", day="tomorrow", time="09:00"),
+        ]
+    )
+    desk = reminder_desk.ReminderDesk(telegram, db_sessions, extract)
+    press = _callback(reminder_desk.NEW_REMINDER)
+    press.message.delete = AsyncMock()
+    await desk.handle(press, member, reminder_desk.NEW_REMINDER, [])
+    asked, markup = last_sent(telegram)
+    assert asked == reminder_desk.REMINDER_PROMPT and "«завтра в 9 позвонить бабушке»" in asked
+    assert prompt_cancel(markup) == reminder_desk.NEW_CANCEL
+    press.message.delete.assert_awaited_once()  # Мой день made way for the question
+    assert desk.prompt_kind(_answer_to(asked)) == reminder_desk.REMIND
+
+    assert await desk.create_from_prompt(member, "позвонить бабушке", reminder_desk.REMIND) is None
+    again, markup = last_sent(telegram)
+    assert again == f"{reminder_desk.WHEN_MISSING[reminder_desk.REMIND]}\n{reminder_desk.REMINDER_PROMPT}"
+    assert prompt_cancel(markup) == reminder_desk.NEW_CANCEL
+    assert desk.prompt_kind(_answer_to(again)) == reminder_desk.REMIND  # the fresh question still works
+    assert await desk.create_from_prompt(member, "завтра позвонить", reminder_desk.REMIND) is None
+    assert last_sent(telegram)[0] == f"{reminder_desk.TRY_AGAIN}\n{reminder_desk.REMINDER_PROMPT}"
+    async with db_sessions() as db:
+        assert await db.scalar(select(AssistantReminder)) is None
+
+    said = await desk.create_from_prompt(member, "завтра в 9 позвонить бабушке", reminder_desk.REMIND)
+    assert extract.call_args.args[0] == "напомни завтра в 9 позвонить бабушке"  # read like the phrase
+    card, markup = last_sent(telegram)
+    assert said == card == "🔔 Напомню завтра в 09:00: позвонить бабушке"  # the card a phrase makes
+    buttons = _labels(markup)
+    assert buttons["✖ Отменить"].startswith("rmd:") and buttons[reminder_desk.BACK_TO_DAY] == "rm"
+    back = _callback("rm")
+    await desk.handle(back, member, "rm", [])
+    assert "завтра в 09:00 · позвонить бабушке" in edited(back.message)
+
+
+@pytest.mark.asyncio
+async def test_a_task_from_my_day_is_one_luna_carries_out(
+    db_sessions: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(reminder_desk, "local_now", lambda: NOW)
+    member = await _member(db_sessions)
+    telegram = _telegram()
+    extract = AsyncMock(
+        side_effect=[
+            _parts(task="присылать 5 английских слов"),
+            _parts(task="присылать 5 английских слов", time="11:00", repeat="daily"),
+        ]
+    )
+    desk = reminder_desk.ReminderDesk(telegram, db_sessions, extract)
+    press = _callback(reminder_desk.NEW_TASK)
+    press.message.delete = AsyncMock()
+    await desk.handle(press, member, reminder_desk.NEW_TASK, [])
+    press.message.delete.assert_awaited_once()
+    asked, markup = last_sent(telegram)
+    assert asked == reminder_desk.TASK_PROMPT and prompt_cancel(markup) == reminder_desk.NEW_CANCEL
+    assert desk.prompt_kind(_answer_to(asked)) == reminder_desk.DO
+
+    await desk.create_from_prompt(member, "присылай английские слова", reminder_desk.DO)
+    assert last_sent(telegram)[0] == f"{reminder_desk.WHEN_MISSING[reminder_desk.DO]}\n{reminder_desk.TASK_PROMPT}"
+    phrase = "Напомни каждый день в 11 присылать 5 английских слов"
+    await desk.create_from_prompt(member, phrase, reminder_desk.DO)
+    assert extract.call_args.args[0] == phrase  # said with «напомни» it is not doubled
+    card, markup = last_sent(telegram)
+    assert card == "🗓 Сделаю сама каждый день в 11:00: присылать 5 английских слов"
+    assert _labels(markup)[reminder_desk.BACK_TO_DAY] == "rm"
+    async with db_sessions() as db:
+        row = await db.scalar(select(AssistantReminder))
+    assert row is not None and row.kind == reminder_desk.DO and row.repeat == "daily"
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_question_brings_my_day_back(db_sessions: async_sessionmaker[AsyncSession]) -> None:
+    member = await _member(db_sessions)
+    telegram = _telegram()
+    desk = reminder_desk.ReminderDesk(telegram, db_sessions, AsyncMock())
+    cancel = _callback(reminder_desk.NEW_CANCEL)
+    cancel.message.delete = AsyncMock()
+    await desk.handle(cancel, member, reminder_desk.NEW_CANCEL, [])
+    cancel.message.delete.assert_awaited_once()
+    text, markup = last_sent(telegram)
+    assert text.startswith(reminder_desk.DAY_TITLE) and reminder_desk.BTN_NEW_REMINDER in _labels(markup)
+
+
+@pytest.mark.asyncio
+async def test_a_full_day_answers_the_question_with_my_day_to_delete_from(
+    db_sessions: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(reminder_desk, "local_now", lambda: NOW)
+    member = await _member(db_sessions)
+    later = datetime.now(UTC) + timedelta(days=1)
+    async with db_sessions() as db:
+        db.add_all(
+            AssistantReminder(member_id=1, text=f"дело {n}", due_at=later) for n in range(reminder_desk.MAX_ACTIVE)
+        )
+        await db.commit()
+    telegram = _telegram()
+    extract = AsyncMock(return_value=_parts(day="tomorrow", time="09:00"))
+    desk = reminder_desk.ReminderDesk(telegram, db_sessions, extract)
+    assert await desk.create_from_prompt(member, "завтра в 9 дело", reminder_desk.REMIND) is None
+    text, markup = last_sent(telegram)
+    assert text.startswith(reminder_desk.TOO_MANY) and reminder_desk.DAY_TITLE in text
+    assert "✖ 1" in _labels(markup)
+
+
+@pytest.mark.asyncio
+async def test_a_phrase_still_makes_the_card_it_always_made(
+    db_sessions: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(reminder_desk, "local_now", lambda: NOW)
+    member = await _member(db_sessions)
+    telegram = _telegram()
+    extract = AsyncMock(return_value=_parts(task="позвонить бабушке", day="tomorrow", time="09:00"))
+    desk = reminder_desk.ReminderDesk(telegram, db_sessions, extract)
+    await desk.create(member, "напомни завтра в 9 позвонить бабушке")
+    assert extract.call_args.args[0] == "напомни завтра в 9 позвонить бабушке"
+    _, markup = last_sent(telegram)
+    assert list(_labels(markup)) == ["✖ Отменить"]

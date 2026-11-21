@@ -2279,9 +2279,13 @@ def test_the_pi_knows_a_linked_person_by_id() -> None:
         ("owner", people.PEOPLE_CANCEL, True),
         ("kid", people.PEOPLE_CANCEL, False),
         ("guest", reminder_desk.CITY_CANCEL, True),
+        ("guest", reminder_desk.NEW_CANCEL, True),
         ("guest", calendar_desk.LINK_CANCEL, True),
+        ("kid", calendar_desk.EVENT_CANCEL, True),
         ("kid", list_desk.LIST_CANCEL, True),
         ("guest", list_desk.LIST_CANCEL, False),
+        ("kid", list_desk.NEW_LIST_CANCEL, True),
+        ("guest", list_desk.NEW_LIST_CANCEL, False),
         ("kid", memory_desk.FAMILY_NOTE_CANCEL, True),
         ("guest", memory_desk.FAMILY_NOTE_CANCEL, False),
         ("adult", stories.STORY_CANCEL, True),
@@ -2388,3 +2392,96 @@ async def test_a_wrong_answer_leaves_a_fresh_prompt_in_place_of_the_old_one(
     assert prompt_cancel(send.call_args.kwargs["reply_markup"]) == cancel
     instance._bot.delete_message.assert_awaited_once_with(reply.chat.id, 77)  # only the answered one goes
     answer.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("role", "prefix", "allowed"),
+    [
+        ("guest", reminder_desk.NEW_REMINDER, True),
+        ("guest", reminder_desk.NEW_TASK, True),
+        ("kid", reminder_desk.NEW_TASK, True),
+        ("kid", calendar_desk.ADD_EVENT, True),
+        ("kid", list_desk.NEW_LIST, True),
+        ("kid", list_desk.WHOSE, True),
+        ("guest", list_desk.NEW_LIST, False),  # guests have no lists
+        ("guest", list_desk.WHOSE, False),
+    ],
+)
+def test_new_buttons_are_open_to_the_roles_that_see_them(role: str, prefix: str, allowed: bool) -> None:
+    assert bot.LunaBot._callback_allowed(role, prefix) is allowed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("prompt", "kind"),
+    [(reminder_desk.REMINDER_PROMPT, reminder_desk.REMIND), (reminder_desk.TASK_PROMPT, reminder_desk.DO)],
+)
+async def test_an_answer_to_my_days_question_sets_it_and_the_question_goes(
+    harness: Any, monkeypatch: pytest.MonkeyPatch, prompt: str, kind: str
+) -> None:
+    instance, _, answer = harness
+    _as_member(monkeypatch, _member("guest", 5))
+    instance.reminders.create_from_prompt = AsyncMock(return_value="🔔 Напомню завтра в 09:00: позвонить")
+    instance.reminders.create = AsyncMock()
+    reply = _reply_to("завтра в 9 позвонить", prompt)
+    reply.from_user.id = 5
+    await instance.on_message(reply)
+    member, text, asked_kind = instance.reminders.create_from_prompt.await_args.args
+    assert (member.telegram_id, text, asked_kind) == (5, "завтра в 9 позвонить", kind)
+    instance.reminders.create.assert_not_awaited()
+    answer.assert_not_awaited()
+    instance._bot.delete_message.assert_awaited_once()  # the answered question leaves the chat
+    assert (await instance.dialogue.turns(5))[-1]["content"] == "🔔 Напомню завтра в 09:00: позвонить"
+
+
+@pytest.mark.asyncio
+async def test_too_fast_an_answer_keeps_the_question(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, send, answer = harness
+    _as_member(monkeypatch, _member("adult", 5))
+    monkeypatch.setattr(instance.dialogue, "allow_request", MagicMock(return_value=False))
+    instance.reminders.create_from_prompt = AsyncMock()
+    instance.calendar.request_event = AsyncMock()
+    for prompt in (reminder_desk.REMINDER_PROMPT, calendar_desk.EVENT_PROMPT):
+        reply = _reply_to("завтра в 9 дело", prompt)
+        reply.from_user.id = 5
+        await instance.on_message(reply)
+    assert _sent(send) == bot.TOO_FAST
+    instance.reminders.create_from_prompt.assert_not_awaited()
+    instance.calendar.request_event.assert_not_awaited()
+    instance._bot.delete_message.assert_not_awaited()  # still there to answer in a minute
+    answer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_answer_to_the_calendars_question_goes_the_phrases_way(
+    harness: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance, _, answer = harness
+    _as_member(monkeypatch, _member("kid", 5))
+    instance.calendar.request_event = AsyncMock()
+    reply = _reply_to("стоматолог в четверг в 15:00", calendar_desk.EVENT_PROMPT)
+    reply.from_user.id = 5
+    await instance.on_message(reply)
+    call = instance.calendar.request_event.await_args
+    assert call.args[1] == "стоматолог в четверг в 15:00" and call.kwargs == {"from_screen": True}
+    instance._bot.delete_message.assert_awaited_once()
+    answer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("role", "routed"), [("kid", True), ("owner", True), ("guest", False)])
+async def test_an_answer_with_a_new_lists_name_reaches_the_lists_of_family_only(
+    harness: Any, monkeypatch: pytest.MonkeyPatch, role: str, routed: bool
+) -> None:
+    instance, _, answer = harness
+    _as_member(monkeypatch, _member(role, 5))
+    instance.lists.name_from_reply = AsyncMock()
+    reply = _reply_to("Дача", list_desk.NEW_LIST_PROMPT)
+    reply.from_user.id = 5
+    await instance.on_message(reply)
+    if routed:
+        instance.lists.name_from_reply.assert_awaited_once()
+        assert instance.lists.name_from_reply.await_args.args[1] == "Дача"
+        answer.assert_not_awaited()
+    else:
+        instance.lists.name_from_reply.assert_not_awaited()

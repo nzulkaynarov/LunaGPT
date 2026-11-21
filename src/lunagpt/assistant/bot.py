@@ -34,13 +34,19 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import access, live_reply, updates, usage
-from lunagpt.assistant.calendar_desk import CALENDAR_PREFIXES, LINK_CANCEL, CalendarDesk, is_calendar_request
+from lunagpt.assistant.calendar_desk import (
+    CALENDAR_PREFIXES,
+    EVENT_CANCEL,
+    LINK_CANCEL,
+    CalendarDesk,
+    is_calendar_request,
+)
 from lunagpt.assistant.chat_context import ChatContext
 from lunagpt.assistant.dialogue import Dialogue
 from lunagpt.assistant.feedback import FeedbackDesk
 from lunagpt.assistant.gcal import GoogleCalendar
 from lunagpt.assistant.internet_desk import BTN_ASK_TIME, BTN_QUIZ, INTERNET_PREFIXES, InternetDesk
-from lunagpt.assistant.list_desk import LIST_CANCEL, LIST_PREFIXES, ListDesk
+from lunagpt.assistant.list_desk import LIST_CANCEL, LIST_PREFIXES, NEW_LIST_CANCEL, ListDesk
 from lunagpt.assistant.lists import is_list_request
 from lunagpt.assistant.llm import SCHEDULED_TASK, QuizQuestion, ReplyOptions, transcribe_voice
 from lunagpt.assistant.memories import Memory
@@ -77,7 +83,7 @@ from lunagpt.assistant.menu import (
 from lunagpt.assistant.people import FAMILY_HOME, PEOPLE_CANCEL, PEOPLE_PREFIXES, PeopleDesk
 from lunagpt.assistant.phrases import PHRASE_CANCEL, PHRASE_PREFIXES, PhraseDesk
 from lunagpt.assistant.pi_client import PiClient
-from lunagpt.assistant.reminder_desk import CITY_CANCEL, REMINDER_PREFIXES, ReminderDesk
+from lunagpt.assistant.reminder_desk import CITY_CANCEL, NEW_CANCEL, REMINDER_PREFIXES, ReminderDesk
 from lunagpt.assistant.reminders import is_reminder_request
 from lunagpt.assistant.school_desk import SCHOOL_PREFIXES, SchoolDesk, is_school_text, photo_kind
 from lunagpt.assistant.speech import (
@@ -130,7 +136,18 @@ UPDATE_CHECK_SECONDS = 600
 RESTARTED_TEXT = updates.RESTARTED
 # "✖ Отмена" under every "reply to this message" prompt: the prompt goes, and the press is answered "Отменила".
 PROMPT_CANCELS = frozenset(
-    {PEOPLE_CANCEL, CITY_CANCEL, LINK_CANCEL, LIST_CANCEL, FAMILY_NOTE_CANCEL, STORY_CANCEL, PHRASE_CANCEL}
+    {
+        PEOPLE_CANCEL,
+        CITY_CANCEL,
+        NEW_CANCEL,
+        LINK_CANCEL,
+        EVENT_CANCEL,
+        LIST_CANCEL,
+        NEW_LIST_CANCEL,
+        FAMILY_NOTE_CANCEL,
+        STORY_CANCEL,
+        PHRASE_CANCEL,
+    }
 )
 FAMILY_REQUEST = re.compile(
     r"^\s*(?:запомни|запиши|сохрани)\s+(?:для\s+(?:всей\s+)?(?:семьи|всех)|в\s+(?:семейн\w+|общ\w+)\s+памят\w+)"
@@ -375,6 +392,10 @@ class LunaBot:
             await self.stories.tell(member, text)
             await self._drop_prompt(message)
             return
+        if member.role in access.FAMILY_ROLES and self.lists.is_name_reply(message):
+            await self.lists.name_from_reply(member, text)
+            await self._drop_prompt(message)
+            return
         if member.role in access.FAMILY_ROLES and self.lists.is_add_reply(message):
             await self.lists.add_from_reply(member, message, text)
             await self._drop_prompt(message)
@@ -383,9 +404,19 @@ class LunaBot:
             await self.reminders.set_city(member, text)
             await self._drop_prompt(message)
             return
+        kind = self.reminders.prompt_kind(message)
+        if kind is not None:
+            await self._new_reminder(member, text, kind, message)
+            return
         if self.calendar.is_link_reply(message):
             await self.calendar.link(member, text)
             await self._drop_prompt(message)
+            return
+        if self.calendar.is_event_reply(message):
+            if await self._may_ask(member):  # too fast, the question stays to be answered in a minute
+                async with ChatActionSender.typing(chat_id=user_id, bot=self._bot):
+                    await self.calendar.request_event(member, text, from_screen=True)
+                await self._drop_prompt(message)
             return
         if await self._menu_action(member, text):
             self.internet.forget_chore(user_id)  # a menu tap means the child moved on
@@ -758,10 +789,20 @@ class LunaBot:
             return False
         return True
 
-    async def _new_reminder(self, member: AssistantMember, text: str) -> None:
-        if await self._may_ask(member):
-            async with ChatActionSender.typing(chat_id=member.telegram_id, bot=self._bot):
-                said = await self.reminders.create(member, text)
+    async def _new_reminder(
+        self, member: AssistantMember, text: str, kind: str | None = None, answer: Message | None = None
+    ) -> None:
+        """A reminder from a phrase, or from the answer to the question asked on Мой день (kind given)."""
+        if not await self._may_ask(member):
+            return  # too fast: a question asked on Мой день stays to be answered in a minute
+        async with ChatActionSender.typing(chat_id=member.telegram_id, bot=self._bot):
+            if kind is None:
+                said: str | None = await self.reminders.create(member, text)
+            else:
+                said = await self.reminders.create_from_prompt(member, text, kind)
+        if answer is not None:
+            await self._drop_prompt(answer)
+        if said is not None:
             await self._count(member.telegram_id, "reminders")
             await self._keep_turn(member, text, said)
 

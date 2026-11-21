@@ -17,6 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import access, lists
 from lunagpt.assistant.telegram import (
+    CANCEL,
+    Previews,
     Rich,
     edit_screen,
     esc,
@@ -29,8 +31,13 @@ from lunagpt.models import AssistantFamilyList, AssistantFamilyListItem, Assista
 
 logger = logging.getLogger("lunagpt.assistant.lists")
 
-LIST_PREFIXES = {"flo", "flt", "fla", "flc", "flb", "flm", "flq"}
+LIST_PREFIXES = {"flo", "flt", "fla", "flc", "flb", "flm", "flq", "fln", "flnq", "fls", "flx"}
 LIST_CANCEL = "flq"  # "✖ Отмена" under "what to add": the list, removed when it was asked, comes back
+NEW_LIST = "fln"  # "➕ Новый список" on the overview
+NEW_LIST_CANCEL = "flnq"  # "✖ Отмена" under "how to name it": all the lists, removed when it was asked, come back
+WHOSE = "fls"  # "🏠 Для всей семьи" or "👤 Только мне" for the name just given
+WHOSE_CANCEL = "flx"  # "✖ Отмена" under that question: it turns back into all the lists
+FOR_FAMILY, FOR_ME = "f", "p"
 MAX_LISTS = 12  # for the family, and again for each person
 MAX_OPEN_ITEMS = 100
 MAX_SHOWN = 40
@@ -53,6 +60,17 @@ TOO_MANY_LISTS = f"Списков уже {MAX_LISTS}. Сначала очист�
 LIST_FULL = f"В списке уже {MAX_OPEN_ITEMS} пунктов. Сначала отметь или убери лишнее."
 LIST_GONE = "Этого списка уже нет."
 ITEM_GONE = "Этого пункта в списке уже нет."
+BTN_NEW_LIST = "➕ Новый список"
+NEW_LIST_PROMPT = "📝 Как назвать новый список? Например: «Дача» или «Аптека»."
+NAME_EMPTY = "Не поняла название."
+NAME_TOO_LONG = f"Название длинное: нужно не больше {lists.MAX_NAME_CHARS} знаков."
+NAME_TAKEN = "Так уже называется список «{name}». Придумай другое название."
+WHOSE_QUESTION = "📝 Список «{name}»: для кого он? 🏠 Семейный видит и меняет вся семья, 👤 личный — только ты."
+BTN_FOR_FAMILY = "🏠 Для всей семьи"
+BTN_FOR_ME = "👤 Только мне"
+NAME_LOST = f"Это уже неактуально: нажми «{BTN_NEW_LIST}» ещё раз."
+LIST_MADE = "✅ Создала список «{name}». Добавь, что в нём будет."
+LIST_WAS_THERE = "Список «{name}» уже есть, вот он."
 
 
 def icon(target: AssistantFamilyList) -> str:
@@ -81,10 +99,16 @@ class ListDesk:
     def __init__(self, bot: Bot, sessions: async_sessionmaker[AsyncSession]) -> None:
         self._bot = bot
         self._sessions = sessions
+        self._new_names: Previews[str] = Previews()  # a new list's name waits for "🏠" or "👤" under its token
 
     @staticmethod
     def is_add_reply(message: Message) -> bool:
         found: bool = is_reply_to_prompt(message, ADD_PROMPT_HEAD)
+        return found
+
+    @staticmethod
+    def is_name_reply(message: Message) -> bool:
+        found: bool = is_reply_to_prompt(message, NEW_LIST_PROMPT)
         return found
 
     # ---------- storage ----------
@@ -240,6 +264,7 @@ class ListDesk:
         ]
         if not any(one.owner_id for one in every):
             rows.append([InlineKeyboardButton(text=f"{LOCK} {lists.MY_LIST}", callback_data="flm")])
+        rows.append([InlineKeyboardButton(text=BTN_NEW_LIST, callback_data=NEW_LIST)])
         return OVERVIEW, InlineKeyboardMarkup(inline_keyboard=rows)
 
     async def _list_view(self, member: AssistantMember, list_id: int) -> tuple[str, InlineKeyboardMarkup] | None:
@@ -413,9 +438,91 @@ class ListDesk:
         else:
             await self._send_list(member, target.id, self._added_note(label(target), added))
 
+    # ---------- a new list by buttons ----------
+
+    async def _taken(self, member: AssistantMember, name: str) -> str | None:
+        """The list this name already means for the person, as shown on screen; None when the name is free. A usual
+        word for a standing list («продукты», «мои дела») is taken by that list, since phrases with it land there."""
+        family, personal = await self.names(member)
+        key = name.casefold()
+        found = next((one for one in family if one.casefold() == key), None)
+        if found is not None:
+            return found
+        found = next((one for one in personal if one.casefold() == key), None)
+        if found is not None:
+            return f"{LOCK} {found}"
+        meant, mine = lists.meant_list(name, False)
+        if mine:  # «мои дела», «мой список»: always the person's own «Мои дела»
+            return f"{LOCK} {meant}"
+        return meant if meant != name else None
+
+    async def name_from_reply(self, member: AssistantMember, text: str) -> None:
+        """The answer to "how to name it": a wrong name gets the question again, a good one asks whose list it is."""
+        # Quotes inside a name would cut it short where a prompt quotes it back, so they become plain ones.
+        typed = " ".join(text.replace("«", '"').replace("»", '"').split()).strip(lists.NAME_TRIM)
+        name = lists.list_name(typed)
+        problem = ""
+        if not name:
+            problem = NAME_EMPTY
+        elif len(typed) > lists.MAX_NAME_CHARS:
+            problem = NAME_TOO_LONG
+        elif (taken := await self._taken(member, name)) is not None:
+            problem = NAME_TAKEN.format(name=taken)
+        if problem:
+            await send_prompt(self._bot, member.telegram_id, NEW_LIST_PROMPT, NEW_LIST_CANCEL, problem)
+            return
+        token = self._new_names.keep(member.telegram_id, name)
+        markup = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text=BTN_FOR_FAMILY, callback_data=f"{WHOSE}:{token}:{FOR_FAMILY}"),
+                    InlineKeyboardButton(text=BTN_FOR_ME, callback_data=f"{WHOSE}:{token}:{FOR_ME}"),
+                ],
+                [InlineKeyboardButton(text=CANCEL, callback_data=f"{WHOSE_CANCEL}:{token}")],
+            ]
+        )
+        await self._bot.send_message(member.telegram_id, WHOSE_QUESTION.format(name=name), reply_markup=markup)
+
+    async def _new_list(self, callback: CallbackQuery, member: AssistantMember, prefix: str, args: list[str]) -> None:
+        if prefix == NEW_LIST:
+            family, personal = await self.names(member)
+            if len(family) >= MAX_LISTS and len(personal) >= MAX_LISTS:
+                text, markup = await self._overview(member)
+                await self._edit(callback, f"{TOO_MANY_LISTS}\n\n{text}", markup)
+                return
+            await send_prompt(self._bot, member.telegram_id, NEW_LIST_PROMPT, NEW_LIST_CANCEL)
+            await remove_menu(callback)  # the new list itself comes in its place
+            return
+        if prefix == NEW_LIST_CANCEL:
+            await remove_menu(callback)
+            await self.view(member)
+            return
+        name = self._new_names.take(member.telegram_id, args[0] if args else None)
+        if prefix == WHOSE_CANCEL or name is None:
+            text, markup = await self._overview(member)
+            await self._edit(callback, text if prefix == WHOSE_CANCEL else f"{NAME_LOST}\n\n{text}", markup)
+            return
+        mine = args[1:] == [FOR_ME]
+        async with self._sessions() as db:
+            there = await self._named(db, member, name, mine, create=False)
+            target = there or await self._named(db, member, name, mine, create=True)
+        if target is None:
+            text, markup = await self._overview(member)
+            await self._edit(callback, f"{TOO_MANY_LISTS}\n\n{text}", markup)
+            return
+        note = (LIST_WAS_THERE if there else LIST_MADE).format(name=label(target))
+        screen = await self._list_screen(member, target.id, note)
+        if screen is None:  # gone already: all the lists, never a dead end
+            text, markup = await self._overview(member)
+            screen = (f"{LIST_GONE}\n\n{text}", markup)
+        await self._edit(callback, *screen)
+
     # ---------- buttons ----------
 
     async def handle(self, callback: CallbackQuery, member: AssistantMember, prefix: str, args: list[str]) -> None:
+        if prefix in (NEW_LIST, NEW_LIST_CANCEL, WHOSE, WHOSE_CANCEL):
+            await self._new_list(callback, member, prefix, args)
+            return
         if prefix == "flb":
             await self._edit(callback, *await self._overview(member))
             return
