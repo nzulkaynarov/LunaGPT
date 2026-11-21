@@ -2,8 +2,12 @@
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
-from lunagpt.assistant.internet_desk import BTN_ASK_TIME, BTN_QUIZ
+from lunagpt.assistant.access import FAMILY_ROLES
+from lunagpt.assistant.calendar_desk import BTN_ADD_EVENT
+from lunagpt.assistant.internet_desk import BTN_ASK_TIME, BTN_CHORE, BTN_QUIZ
+from lunagpt.assistant.list_desk import BTN_NEW_LIST
 from lunagpt.assistant.memory_desk import BTN_STORY
+from lunagpt.assistant.reminder_desk import BTN_NEW_REMINDER, BTN_NEW_TASK
 
 # The menu: one button per part of life; what is inside opens as inline buttons.
 BTN_DAY = "🗓 Мой день"
@@ -47,50 +51,89 @@ SHARED_MOVED = (
 )
 FAMILY_MENU = "🏠 Семья: люди и заявки, приглашения. Телевизор и другие общие устройства — в боте HomeSec."
 
-MEMORY_NOTICE = " Запоминаю важное о тебе, посмотреть и удалить можно в «🧠 Память». Другие люди этого не видят."
-FAMILY_NOTICE = " Чтобы запомнить для всех в семье, напиши: «запомни для семьи, что…»."
-WHOSE = "👤 — видишь только ты, 🏠 — видит вся семья."
-ASK_ANYTHING = "Просто напиши или скажи голосом, что нужно: вопрос, идея, перевод, свежие новости."
-PHOTO_HINT = "📸 Пришли фото задачи, чека или текста, и я разберу.\n\n"
-SCHOOL_HINT = "📚 Фото расписания с подписью «расписание» или «задали …» запомню и напомню вовремя.\n\n"
-DAY_LINE = f"{BTN_DAY} — напоминания, поручения и утренняя сводка: «напомни завтра в 9…», «присылай каждый день…»\n"
-LISTS_LINE = f"{BTN_LISTS} — 🏠 семейные и 👤 личные: «добавь молоко в покупки», «добавь в мой список…»\n"
-MEMORY_LINE = f"{BTN_MEMORY} — 👤 что я помню о тебе, 🏠 общая память семьи и 🐈 истории про Луну\n"
-ADULT_HELP = (
-    f"{ASK_ANYTHING}\n\n{PHOTO_HINT}"
-    + DAY_LINE
-    + LISTS_LINE
-    + MEMORY_LINE
-    + f"{BTN_FAMILY} — люди и приглашения\n\n"
-    + WHOSE
-    + "\n\n"
-    + MEMORY_NOTICE.strip()
-    + FAMILY_NOTICE
+# The help: what this role can do, screen by screen in the order of its menu, with one example for each thing.
+ASK_ANYTHING = (
+    "💬 Спрашивай что угодно, текстом или голосом: {examples}. Пока я пишу ответ, его можно остановить кнопкой "
+    "«Стоп», а готовый — оценить реакцией 👍 или 👎."
 )
-HELP_TEXT = {
-    "owner": ADULT_HELP,
-    "adult": ADULT_HELP,
-    "kid": (
-        "Спрашивай что угодно: уроки, игры, код, идеи, свежие новости.\n\n"
-        + PHOTO_HINT
-        + SCHOOL_HINT
-        + f"{BTN_INTERNET} — сколько осталось, попросить минут у родителей, ✅ сделал дело и 🎯 викторина\n"
-        + f"{BTN_DAY} — напоминания, расписание уроков и домашка\n"
-        + LISTS_LINE
-        + MEMORY_LINE.rstrip("\n")
-        + ", там же 😺 фраза для Луны\n\n"
-        + WHOSE
-        + "\n\n"
-        + MEMORY_NOTICE.strip()
-        + FAMILY_NOTICE
-    ),
-    "guest": (
-        f"{ASK_ANYTHING}\n\n{PHOTO_HINT}{BTN_DAY} — напоминания и утренняя сводка\n"
-        f"{BTN_MEMORY} — что я о тебе помню\n\n" + MEMORY_NOTICE.strip()
-    ),
+ASK_EXAMPLES = {
+    "kid": "«объясни дроби», «переведи на английский: я опоздаю»",
+    "guest": "«переведи на английский: где вокзал?», «какие новости сегодня?»",
 }
-WELCOME = "<b>Добро пожаловать, {name}!</b> 🌙\n\n{help}"
-BACK_AGAIN = "Привет, {name}! Я на связи. Напиши, что нужно, или выбери кнопку внизу."
+ADULT_EXAMPLES = "«переведи на английский: я опаздываю», «какие новости сегодня?»"
+# A voice note or a round video is always answered aloud as well; a typed question only when asked to.
+VOICE_HINT = (
+    "🎙 На голосовое или кружок отвечу и текстом, и голосом, а написанное скажу вслух, если попросить: "
+    "«расскажи голосом сказку» или «озвучь» после ответа."
+)
+PHOTO_HINT = "📸 Пришли фото задачи, чека или текста, и я разберу."
+DAY_REMINDER = (
+    f"• {BTN_NEW_REMINDER} — «напомни завтра в 9 позвонить бабушке»; "
+    "когда напомню, можно отложить: «⏰ +10 мин» или «⏰ +1 час»"
+)
+DAY_TASK = f"• {BTN_NEW_TASK} — в срок сделаю сама и пришлю: «каждый день в 11 присылай 5 английских слов»"
+DAY_SCHOOL = (
+    "• 📚 Расписание и 📝 Домашка — пришли фото с подписью «расписание» "
+    "или напиши «задали по математике № 125 к пятнице»"
+)
+DAY_CALENDAR = f"• 📅 Календарь — «добавь в календарь стоматолог в четверг в 15:00» или кнопка «{BTN_ADD_EVENT}»"
+DAY_BRIEF = "• ☀️ Утренняя сводка — выбери время и «🏙 Город для погоды»"
+LISTS_LINES = (
+    "• «добавь молоко и хлеб в покупки», «вычеркни молоко», а в личный — «добавь в мой список позвонить врачу»",
+    f"• {BTN_NEW_LIST} — назови его и выбери, для всей семьи он или только для тебя",
+)
+MEMORY_MINE = "• 👤 что я помню о тебе — другие этого не видят, лишнее можно удалить"
+MEMORY_FAMILY = (
+    "• 🏠 Общая память — «запомни для семьи, что бабушка приедет в субботу»",
+    f"• {BTN_STORY} — повадки и смешные случаи нашей кошки",
+)
+INTERNET_LINES = (
+    f"• {BTN_ASK_TIME} — выбери причину, родители решат",
+    f"• {BTN_CHORE} — напиши или пришли фото, что сделал",
+    f"• {BTN_QUIZ} — один вопрос в день",
+)
+FAMILY_LINES = (f"• {BTN_PEOPLE} — семья, гости и заявки", f"• {BTN_INVITE} — ссылка для нового человека")
+WHOSE = "👤 — видишь только ты, 🏠 — видит вся семья."
+GUEST_MEMORY = f"{BTN_MEMORY} — что я запомнила о тебе. Другие этого не видят, лишнее можно удалить."
+
+
+def _day_block(role: str, calendar: bool) -> list[str]:
+    lines = [BTN_DAY, DAY_REMINDER, DAY_TASK]
+    if role == "kid":
+        lines.append(DAY_SCHOOL)
+    if calendar and role in FAMILY_ROLES:
+        lines.append(DAY_CALENDAR)
+    return [*lines, DAY_BRIEF]
+
+
+def _memory_block(role: str) -> list[str]:
+    if role not in FAMILY_ROLES:
+        return [GUEST_MEMORY]
+    lines = [BTN_MEMORY, MEMORY_MINE, *MEMORY_FAMILY]
+    return [*lines, f"• {BTN_PHRASE} — придумай, что я пишу, пока думаю"] if role == "kid" else lines
+
+
+def help_text(role: str, calendar: bool = False) -> str:
+    """What this role can do, grouped by the screens of its menu, and nothing it cannot use. The calendar is
+    named only when the owner has connected Google, since its button is not there otherwise."""
+    blocks = {
+        BTN_DAY: _day_block(role, calendar),
+        BTN_LISTS: [f"{BTN_LISTS} — 🏠 семейные и 👤 личные", *LISTS_LINES],
+        BTN_MEMORY: _memory_block(role),
+        BTN_INTERNET: [f"{BTN_INTERNET} — сколько времени осталось", *INTERNET_LINES],
+        BTN_FAMILY: [BTN_FAMILY, *FAMILY_LINES],
+    }
+    intro = "\n".join([ASK_ANYTHING.format(examples=ASK_EXAMPLES.get(role, ADULT_EXAMPLES)), VOICE_HINT, PHOTO_HINT])
+    screens = ["\n".join(blocks[button]) for row in menu_layout(role) for button in row if button in blocks]
+    footer = [WHOSE] if role in FAMILY_ROLES else []
+    return "\n\n".join([intro, *screens, *footer])
+
+
+WELCOME = "<b>Добро пожаловать, {name}!</b> 🌙\n\n{help}\n\nЭта подсказка всегда есть в «" + BTN_HELP + "»."
+BACK_AGAIN = (
+    "Привет, {name}! Я на связи. Напиши или скажи голосом, что нужно, или выбери кнопку внизу. "
+    f"Что я умею — в «{BTN_HELP}»."
+)
 
 
 def menu_layout(role: str) -> list[list[str]]:

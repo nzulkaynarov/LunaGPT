@@ -1301,7 +1301,24 @@ async def test_guest_whose_time_ended_gets_the_reason_instead_of_a_screen(
     instance.memories.view.assert_not_awaited()
     answer.assert_not_awaited()
     await instance.on_message(_message(menu.BTN_HELP))  # help still explains what Luna is
-    assert _sent(send) == menu.HELP_TEXT["guest"]
+    assert _sent(send) == menu.help_text("guest")
+
+
+@pytest.mark.parametrize(
+    ("role", "calendar", "named"), [("kid", True, True), ("kid", False, False), ("guest", True, False)]
+)
+@pytest.mark.asyncio
+async def test_help_names_the_calendar_only_where_its_button_is(
+    harness: Any, monkeypatch: pytest.MonkeyPatch, role: str, calendar: bool, named: bool
+) -> None:
+    """Мой день shows «📅 Календарь» to the family once the owner connected Google, so the help says the same."""
+    instance, send, _ = harness
+    _as_member(monkeypatch, _member(role))
+    instance.reminders.calendar = calendar
+    await instance.on_message(_message(menu.BTN_HELP))
+    assert ("📅 Календарь" in _sent(send)) is named
+    await instance.on_message(_message("/start"))
+    assert menu.BTN_HELP in _sent(send)  # the way to the help from the greeting
 
 
 @pytest.mark.asyncio

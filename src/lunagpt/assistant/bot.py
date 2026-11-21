@@ -70,13 +70,13 @@ from lunagpt.assistant.menu import (
     BTN_PEOPLE,
     BTN_PHRASE,
     FAMILY_MENU,
-    HELP_TEXT,
     MENU_FEATURES,
     OLD_BUTTONS,
     OLD_SHARED,
     SHARED_MOVED,
     WELCOME,
     family_keyboard,
+    help_text,
     main_keyboard,
     menu_layout,
 )
@@ -314,6 +314,11 @@ class LunaBot:
                 logger.exception("could not announce the update")
             await asyncio.sleep(UPDATE_CHECK_SECONDS)
 
+    def _help(self, role: str) -> str:
+        """The calendar is named in the help only when its button is on Мой день."""
+        text: str = help_text(role, calendar=self.reminders.calendar)
+        return text
+
     async def _restart(self, callback: CallbackQuery, member: AssistantMember) -> None:
         await remove_menu(callback)
         await self._send(member.telegram_id, RESTARTED_TEXT, main_keyboard(member.role))
@@ -322,7 +327,7 @@ class LunaBot:
         try:
             await self._bot.send_message(
                 telegram_id,
-                WELCOME.format(name=html.escape(name), help=html.escape(HELP_TEXT[role], quote=False)),
+                WELCOME.format(name=html.escape(name), help=html.escape(self._help(role), quote=False)),
                 parse_mode="HTML",
                 reply_markup=main_keyboard(role),
             )
@@ -428,7 +433,7 @@ class LunaBot:
             await self._send(user_id, BACK_AGAIN.format(name=member.name), main_keyboard(member.role))
             return
         if text.startswith("/"):
-            await self._send(user_id, HELP_TEXT[member.role], main_keyboard(member.role))
+            await self._send(user_id, self._help(member.role), main_keyboard(member.role))
             return
         # «запомни для семьи, что надо купить корм» is a note for the family, though it has a list's words in it;
         # «запиши для всех в покупки молоко» names the list it is for, so it goes on to the list route.
@@ -489,7 +494,7 @@ class LunaBot:
         family = member.role in access.FAMILY_ROLES
         kid = member.role == "kid"
         if text == BTN_HELP:
-            await self._send(member.telegram_id, HELP_TEXT[member.role], main_keyboard(member.role))
+            await self._send(member.telegram_id, self._help(member.role), main_keyboard(member.role))
         elif text == BTN_DAY:
             await self._send(member.telegram_id, *await self.reminders.view(member))
         elif text == BTN_MEMORY:

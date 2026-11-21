@@ -5,7 +5,18 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from lunagpt.assistant import about, chat_context, internet_desk, llm, menu
+from lunagpt.assistant import (
+    about,
+    access,
+    calendar_desk,
+    chat_context,
+    internet_desk,
+    list_desk,
+    llm,
+    memory_desk,
+    menu,
+    reminder_desk,
+)
 from lunagpt.models import AssistantMember
 
 
@@ -37,6 +48,55 @@ def test_every_menu_button_is_described() -> None:
     text = about.ABOUT_FILE.read_text(encoding="utf-8")
     missing = [b for b in menu.MENU_BUTTONS - {menu.BTN_HELP} if b not in text]
     assert missing == []
+
+
+@pytest.mark.parametrize("calendar", [False, True])
+@pytest.mark.parametrize("role", access.ROLES)
+def test_help_follows_the_menu_of_each_role(role: str, calendar: bool) -> None:
+    """The help names every screen on this role's menu, in its order, and no screen this role does not have."""
+    text = menu.help_text(role, calendar)
+    screens = [button for row in menu.menu_layout(role) for button in row if button != menu.BTN_HELP]
+    others = menu.MENU_BUTTONS - set(screens) - {menu.BTN_HELP}
+    assert [b for b in screens if b not in text] == []
+    assert [b for b in others if b in text] == []
+    assert [text.index(b) for b in screens] == sorted(text.index(b) for b in screens)
+
+
+@pytest.mark.parametrize("role", access.ROLES)
+def test_help_tells_each_role_what_is_inside_its_screens(role: str) -> None:
+    text = menu.help_text(role, calendar=True)
+    family, adult, kid = role in access.FAMILY_ROLES, role in access.ADULT_ROLES, role == "kid"
+    for entry in (reminder_desk.BTN_NEW_REMINDER, reminder_desk.BTN_NEW_TASK, "☀️ Утренняя сводка", "⏰ +10 мин"):
+        assert entry in text
+    for said in ("голосом", "озвучь", "«Стоп»", "👍", "📸"):  # voice, the live answer, reactions and photos
+        assert said in text
+    expected = {
+        list_desk.BTN_NEW_LIST: family,
+        "вычеркни": family,
+        calendar_desk.BTN_ADD_EVENT: family,
+        memory_desk.BTN_STORY: family,
+        "запомни для семьи": family,
+        menu.WHOSE: family,
+        menu.BTN_PEOPLE: adult,
+        menu.BTN_INVITE: adult,
+        internet_desk.BTN_ASK_TIME: kid,
+        internet_desk.BTN_CHORE: kid,
+        internet_desk.BTN_QUIZ: kid,
+        menu.BTN_PHRASE: kid,
+        "📚 Расписание": kid,
+    }
+    assert {entry: entry in text for entry in expected} == expected
+
+
+def test_help_keeps_the_calendar_hidden_until_it_is_connected() -> None:
+    assert all(calendar_desk.BTN_ADD_EVENT not in menu.help_text(role) for role in access.ROLES)
+
+
+def test_about_tells_the_truth_about_voice() -> None:
+    """A voice note is answered aloud as well, without being asked; a typed question only when asked."""
+    text = about.ABOUT_FILE.read_text(encoding="utf-8")
+    assert "отвечать голосом, если попросить" not in text
+    assert "и текстом, и голосом" in text and "и текстом, и голосом" in menu.VOICE_HINT
 
 
 @pytest.mark.asyncio
