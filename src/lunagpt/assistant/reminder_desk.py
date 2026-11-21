@@ -10,7 +10,7 @@ from typing import Any
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramNetworkError, TelegramRetryAfter, TelegramServerError
-from aiogram.types import CallbackQuery, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -22,15 +22,18 @@ from lunagpt.assistant.telegram import (
     edit_screen,
     esc,
     is_reply_to_prompt,
+    remove_menu,
     rich_table,
     send_long,
+    send_prompt,
 )
 from lunagpt.config import settings
 from lunagpt.models import AssistantMember, AssistantReminder
 
 logger = logging.getLogger("lunagpt.assistant.reminder_desk")
 
-REMINDER_PREFIXES = frozenset({"rm", "rmd", "rmz", "rmok", "rb", "rbt", "rbx", "rbc"})
+REMINDER_PREFIXES = frozenset({"rm", "rmd", "rmz", "rmok", "rb", "rbt", "rbx", "rbc", "rbq"})
+CITY_CANCEL = "rbq"  # "✖ Отмена" under the city prompt; the brief screen stays above it
 MAX_ACTIVE = 50
 LIST_LIMIT = 10
 POLL_SECONDS = 20
@@ -40,6 +43,7 @@ BRIEF_TIME = re.compile(r"(?:[01]\d|2[0-3])[0-5]\d")
 RING_RETRY_SECONDS = (30, 120, 600)  # a ring that Telegram did not take is tried again after these pauses
 SNOOZES = (10, 60)
 CITY_PROMPT = "Напиши ответом на это сообщение свой город для прогноза погоды."
+CITY_NOT_FOUND = "Не нашла такой город."
 DAY_TITLE = "🗓 Мой день"
 BACK_TO_DAY = "← Мой день"
 HOW_TO = "Чтобы добавить, напиши или скажи: «напомни завтра в 9 позвонить бабушке»."
@@ -313,7 +317,10 @@ class ReminderDesk:
         elif prefix == "rbx":
             member = await self._update_brief(user_id, brief_time=None)
         elif prefix == "rbc":
-            await self._bot.send_message(user_id, CITY_PROMPT, reply_markup=ForceReply())
+            await send_prompt(self._bot, user_id, CITY_PROMPT, CITY_CANCEL)
+            return
+        elif prefix == CITY_CANCEL:
+            await remove_menu(callback)
             return
         if prefix in ("rb", "rbt", "rbx"):
             await self._edit(callback, *self._brief_view(member))
@@ -373,9 +380,7 @@ class ReminderDesk:
     async def set_city(self, member: AssistantMember, text: str) -> None:
         place = await self._geocode(text)
         if place is None:
-            await self._bot.send_message(
-                member.telegram_id, f"Не нашла такой город. {CITY_PROMPT}", reply_markup=ForceReply()
-            )
+            await send_prompt(self._bot, member.telegram_id, CITY_PROMPT, CITY_CANCEL, CITY_NOT_FOUND)
             return
         updated = await self._update_brief(
             member.telegram_id, brief_city=place.name, brief_lat=place.lat, brief_lon=place.lon

@@ -7,15 +7,16 @@ import uuid
 from collections.abc import Callable
 
 from aiogram import Bot
-from aiogram.types import CallbackQuery, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from lunagpt.assistant import access
 from lunagpt.assistant.memories import FAMILY_DUPLICATE, FAMILY_FAILED, FAMILY_FULL, FAMILY_SAVED, Memory
-from lunagpt.assistant.telegram import DANGER, edit_screen, remove_menu, send_long
+from lunagpt.assistant.telegram import DANGER, edit_screen, remove_menu, send_long, send_prompt
 from lunagpt.models import AssistantMember
 
 MEMORY_PREFIXES = {"mem", "memd", "memc", "memy"}
-FAMILY_MEMORY_PREFIXES = {"fam", "fama", "famd", "famy"}
+FAMILY_MEMORY_PREFIXES = {"fam", "fama", "famd", "famy", "famq"}
+FAMILY_NOTE_CANCEL = "famq"  # "✖ Отмена" under the family note prompt: the family memory, removed then, comes back
 MEMORY_PAGE_SIZE = 8
 BTN_STORY = "🐈 Истории про Луну"
 FAMILY_PROMPT = (
@@ -59,8 +60,11 @@ class MemoryDesk:
         elif prefix == "fam":
             await self._edit(callback, *await self.family_view(member, int(args[0])))
         elif prefix == "fama":
-            await self._bot.send_message(user_id, FAMILY_PROMPT, reply_markup=ForceReply())
+            await send_prompt(self._bot, user_id, FAMILY_PROMPT, FAMILY_NOTE_CANCEL)
             await remove_menu(callback)
+        elif prefix == FAMILY_NOTE_CANCEL:
+            await remove_menu(callback)
+            await self._say(user_id, *await self.family_view(member, 0))
         elif prefix == "famd":
             await self._edit(callback, *await self._confirm_family_delete(member, args[0]))
         elif prefix == "famy":

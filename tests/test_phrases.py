@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from telegram_fakes import prompt_cancel
 
 from lunagpt.assistant import phrases
 from lunagpt.models import AssistantMember
@@ -63,9 +64,14 @@ async def test_turned_down_bad_length_and_too_many(db_sessions: async_sessionmak
     desk = phrases.PhraseDesk(telegram, db_sessions)
 
     await desk.suggest(kid, "ой")
-    assert _texts(telegram, KID)[-1] == phrases.TOO_SHORT
+    fresh = _texts(telegram, KID)[-1]
+    assert fresh == f"{phrases.TOO_SHORT}\n{phrases.PROMPT}"
+    assert prompt_cancel(telegram.send_message.call_args.kwargs["reply_markup"]) == phrases.PHRASE_CANCEL
+    answer = MagicMock(spec=Message)
+    answer.reply_to_message = MagicMock(text=fresh, from_user=MagicMock(is_bot=True))
+    assert desk.is_reply(answer)  # the fresh prompt is answered like the first one
     await desk.suggest(kid, "первая\nвторая строка")
-    assert _texts(telegram, KID)[-1] == phrases.TOO_SHORT
+    assert _texts(telegram, KID)[-1] == f"{phrases.TOO_SHORT}\n{phrases.PROMPT}"
 
     await desk.suggest(kid, "😼 Шиплю на трудный вопрос…")
     await desk.handle(_callback("cpn:1"), mom, "cpn", ["1"])

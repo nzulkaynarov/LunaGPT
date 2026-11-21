@@ -7,17 +7,18 @@ from datetime import date
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import CallbackQuery, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import access
-from lunagpt.assistant.telegram import DANGER, SUCCESS, is_reply_to_prompt, remove_menu
+from lunagpt.assistant.telegram import DANGER, SUCCESS, is_reply_to_prompt, remove_menu, send_prompt
 from lunagpt.models import AssistantCatStory, AssistantMember
 
 logger = logging.getLogger("lunagpt.assistant.stories")
 
-STORY_PREFIXES = {"csi", "csa", "csl", "csy", "csn", "csx"}
+STORY_PREFIXES = {"csi", "csa", "csl", "csy", "csn", "csx", "csq"}
+STORY_CANCEL = "csq"  # "✖ Отмена" under the story prompt: the stories screen, removed then, comes back
 PHRASE_ASK = "cpa"  # a child's "make up a phrase" button lives here, next to the stories
 ADULT_STORY_PREFIXES = {"csy", "csn", "csx"}
 MIN_LENGTH = 10
@@ -36,7 +37,8 @@ INTRO = (
     "Расскажи её повадку или смешной случай, и я буду помнить это как своё. "
     "Родители сначала посмотрят рассказ."
 )
-TOO_SHORT = f"Расскажи чуть подробнее: от {MIN_LENGTH} до {MAX_LENGTH} знаков. Попробуй ещё раз."
+TOO_SHORT = f"Расскажи чуть подробнее: хотя бы {MIN_LENGTH} знаков."
+TOO_LONG = f"Слишком длинно: уложись в {MAX_LENGTH} знаков."
 TOO_MANY = "У тебя уже есть истории, которые ждут родителей. Дождись их ответа 🙂"
 SENT = "✨ Отправила историю родителям. Когда одобрят, я буду её помнить."
 ADDED = "✅ Запомнила историю."
@@ -127,13 +129,13 @@ class StoryDesk:
 
     # ---------- telling ----------
 
-    async def ask(self, chat_id: int) -> None:
-        await self._bot.send_message(chat_id, PROMPT, reply_markup=ForceReply())
+    async def ask(self, chat_id: int, problem: str = "") -> None:
+        await send_prompt(self._bot, chat_id, PROMPT, STORY_CANCEL, problem)
 
     async def tell(self, member: AssistantMember, text: str, photo_file_id: str | None = None) -> None:
         text = " ".join(text.split())
         if not MIN_LENGTH <= len(text) <= MAX_LENGTH:
-            await self._bot.send_message(member.telegram_id, TOO_SHORT)
+            await self.ask(member.telegram_id, TOO_SHORT if len(text) < MIN_LENGTH else TOO_LONG)
             return
         adult = member.role in access.ADULT_ROLES
         async with self._sessions() as db:
@@ -180,6 +182,10 @@ class StoryDesk:
         if prefix == "csa":
             await self.ask(member.telegram_id)
             await remove_menu(callback)
+            return
+        if prefix == STORY_CANCEL:
+            await remove_menu(callback)
+            await self.view(member)
             return
         if prefix == "csl":
             await self._list(callback, member, int(args[0]))

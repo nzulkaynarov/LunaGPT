@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from telegram_fakes import prompt_cancel
 
 from lunagpt.assistant import about, stories
 from lunagpt.models import AssistantMember
@@ -80,7 +81,10 @@ async def test_limits_and_parents_stories(db_sessions: async_sessionmaker[AsyncS
     telegram = _telegram()
     desk = stories.StoryDesk(telegram, db_sessions)
     await desk.tell(people["kid"], "мяу")
-    assert _last(telegram, KID) == stories.TOO_SHORT
+    assert _last(telegram, KID) == f"{stories.TOO_SHORT}\n{stories.PROMPT}"
+    await desk.tell(people["kid"], "мяу " * stories.MAX_LENGTH)
+    assert _last(telegram, KID) == f"{stories.TOO_LONG}\n{stories.PROMPT}"
+    assert prompt_cancel(telegram.send_message.call_args.kwargs["reply_markup"]) == stories.STORY_CANCEL
     for n in range(stories.MAX_PENDING):
         await desk.tell(people["kid"], f"История номер {n} про Луну")
     await desk.tell(people["kid"], "Ещё одна история про Луну")
@@ -115,3 +119,46 @@ async def test_list_brief_and_removal(db_sessions: async_sessionmaker[AsyncSessi
 @pytest.mark.parametrize("text", ["расскажи смешную историю", "расскажи историю про себя", "ты помнишь как"])
 def test_story_questions_bring_in_the_memories(text: str) -> None:
     assert about.is_about_question(text)
+
+
+def _answer_to(prompt: str) -> MagicMock:
+    answer = MagicMock(spec=Message)
+    answer.reply_to_message = MagicMock(text=prompt, from_user=MagicMock(is_bot=True))
+    return answer
+
+
+@pytest.mark.asyncio
+async def test_a_too_short_story_brings_a_fresh_prompt_that_still_works(
+    db_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    people = await _family(db_sessions)
+    telegram = _telegram()
+    desk = stories.StoryDesk(telegram, db_sessions)
+    await desk.tell(people["kid"], "", photo_file_id="file-1")  # a photo with no caption tells nothing yet
+    fresh = _last(telegram, KID)
+    assert fresh.startswith(stories.TOO_SHORT) and desk.is_reply(_answer_to(fresh))
+    await desk.tell(people["kid"], STORY)
+    assert _last(telegram, KID) == stories.SENT
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_story_prompt_brings_the_stories_back(
+    db_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    people = await _family(db_sessions)
+    telegram = _telegram()
+    desk = stories.StoryDesk(telegram, db_sessions)
+    menu = _callback("csa")
+    menu.message.delete = AsyncMock()
+    await desk.handle(menu, people["kid"], "csa", [])
+    menu.message.delete.assert_awaited_once()  # the stories screen made way for the prompt
+    asked = telegram.send_message.call_args
+    assert asked.args == (KID, stories.PROMPT)
+    cancel = _callback(prompt_cancel(asked.kwargs["reply_markup"]))
+    cancel.message.delete = AsyncMock()
+    await desk.handle(cancel, people["kid"], stories.STORY_CANCEL, [])
+    cancel.message.delete.assert_awaited_once()
+    shown = telegram.send_message.call_args
+    assert shown.args[1].startswith("🐈 Истории про Луну")
+    buttons = [b.callback_data for row in shown.kwargs["reply_markup"].inline_keyboard for b in row]
+    assert "csa" in buttons and stories.PHRASE_ASK in buttons

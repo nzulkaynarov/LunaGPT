@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
 from aiogram import Bot
-from aiogram.types import CallbackQuery, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -17,14 +17,23 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from lunagpt.assistant import llm, reminders, school
 from lunagpt.assistant.gcal import CalendarError, Event, GoogleCalendar
 from lunagpt.assistant.reminder_desk import local_now
-from lunagpt.assistant.telegram import DANGER, SUCCESS, edit_screen, is_reply_to_prompt, send_long
+from lunagpt.assistant.telegram import (
+    DANGER,
+    SUCCESS,
+    edit_screen,
+    is_reply_to_prompt,
+    remove_menu,
+    send_long,
+    send_prompt,
+)
 from lunagpt.models import AssistantMember, AssistantTask
 
 logger = logging.getLogger("lunagpt.assistant.calendar_desk")
 
 # Tasks copied from Luna start with this mark; the brief and chat already list tasks, so they skip these events.
 TASK_MARK = "📝 "
-CALENDAR_PREFIXES = frozenset({"cal", "calc", "calx", "caly", "caln"})
+CALENDAR_PREFIXES = frozenset({"cal", "calc", "calx", "caly", "caln", "calq"})
+LINK_CANCEL = "calq"  # "✖ Отмена" under the address prompt; the calendar screen stays above it
 CALENDAR_REQUEST = re.compile(
     r"^\s*(?:добавь|запиши|внеси|поставь|создай)\s+(?:в\s+(?:мой\s+)?календар\w*|встречу|событие)|"
     # "посмотри в календарь" only reads it; an event needs a verb that adds.
@@ -41,10 +50,11 @@ CACHE_SECONDS = 300
 GUESTS_NO_CALENDAR = "Календарь подключают только члены семьи."
 TAKEN = "Этот календарь уже подключён у другого человека. Если это твой, попроси его отключить календарь у себя."
 LINK_PROMPT = "Напиши ответом на это сообщение адрес своего Google-календаря (обычно это твой Gmail)."
+NOT_AN_ADDRESS = "Это не похоже на адрес календаря."
 NOT_CONFIGURED = "Google Calendar ещё не подключён к Luna. Владельцу нужно один раз его настроить."
 NOT_SHARED = (
-    "Не получается открыть этот календарь. Проверь, что открыла доступ адресу {email} "
-    "с правом «Вносить изменения в мероприятия», и пришли адрес ещё раз."
+    "Не получается открыть этот календарь. Проверь, что доступ открыт адресу {email} "
+    "с правом «Вносить изменения в мероприятия»."
 )
 UNAVAILABLE = "Google сейчас не отвечает, попробуй чуть позже."
 NOT_LINKED = "Сначала подключи календарь: «🗓 Мой день» → «📅 Календарь»."
@@ -233,7 +243,10 @@ class CalendarDesk:
     async def handle(self, callback: CallbackQuery, member: AssistantMember, prefix: str, args: list[str]) -> None:
         user_id = member.telegram_id
         if prefix == "calc":
-            await self._bot.send_message(user_id, LINK_PROMPT, reply_markup=ForceReply())
+            await send_prompt(self._bot, user_id, LINK_PROMPT, LINK_CANCEL)
+            return
+        if prefix == LINK_CANCEL:
+            await remove_menu(callback)
             return
         if prefix == "calx":
             await self._set_calendar_id(user_id, None)
@@ -267,19 +280,17 @@ class CalendarDesk:
             await send_long(self._bot, user_id, GUESTS_NO_CALENDAR)
             return
         if not CALENDAR_ID.match(calendar_id):
-            await self._bot.send_message(
-                user_id, f"Это не похоже на адрес календаря. {LINK_PROMPT}", reply_markup=ForceReply()
-            )
+            await send_prompt(self._bot, user_id, LINK_PROMPT, LINK_CANCEL, NOT_AN_ADDRESS)
             return
         if await self._linked_by_someone_else(user_id, calendar_id):
             # The service account reads every calendar shared with it, so an address alone proves nothing.
-            await send_long(self._bot, user_id, TAKEN)
+            await send_prompt(self._bot, user_id, LINK_PROMPT, LINK_CANCEL, TAKEN)
             return
         try:
             await self._calendar.check(calendar_id)
         except CalendarError as exc:
-            message = NOT_SHARED.format(email=self._calendar.email) if exc.kind == "not_shared" else UNAVAILABLE
-            await send_long(self._bot, user_id, message)
+            problem = NOT_SHARED.format(email=self._calendar.email) if exc.kind == "not_shared" else UNAVAILABLE
+            await send_prompt(self._bot, user_id, LINK_PROMPT, LINK_CANCEL, problem)
             return
         await self._set_calendar_id(user_id, calendar_id)
         connected = "📅 Календарь подключён."

@@ -3,7 +3,9 @@
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-from lunagpt.assistant.telegram import to_plain
+from aiogram.types import InlineKeyboardMarkup
+
+from lunagpt.assistant.telegram import CANCEL, to_plain
 
 
 def fake_bot() -> MagicMock:
@@ -18,6 +20,14 @@ def last_sent(bot: MagicMock) -> tuple[str, Any]:
         if name == "send_rich_message":
             return to_plain(args[1].html), kwargs.get("reply_markup")
     raise AssertionError("nothing was sent")
+
+
+def prompt_cancel(markup: Any) -> str:
+    """The callback of "✖ Отмена" under a "reply to this message" prompt; fails when the markup is no such prompt."""
+    assert isinstance(markup, InlineKeyboardMarkup) and markup.force_reply is True
+    [[button]] = markup.inline_keyboard
+    assert button.text == CANCEL
+    return str(button.callback_data)
 
 
 def edited(message: MagicMock) -> str:

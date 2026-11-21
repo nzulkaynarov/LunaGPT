@@ -10,17 +10,26 @@ import uuid
 from datetime import date, datetime, timedelta
 
 from aiogram import Bot
-from aiogram.types import CallbackQuery, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import access, lists
-from lunagpt.assistant.telegram import Rich, edit_screen, esc, is_reply_to_prompt, remove_menu, send_long
+from lunagpt.assistant.telegram import (
+    Rich,
+    edit_screen,
+    esc,
+    is_reply_to_prompt,
+    remove_menu,
+    send_long,
+    send_prompt,
+)
 from lunagpt.models import AssistantFamilyList, AssistantFamilyListItem, AssistantMember
 
 logger = logging.getLogger("lunagpt.assistant.lists")
 
-LIST_PREFIXES = {"flo", "flt", "fla", "flc", "flb", "flm"}
+LIST_PREFIXES = {"flo", "flt", "fla", "flc", "flb", "flm", "flq"}
+LIST_CANCEL = "flq"  # "✖ Отмена" under "what to add": the list, removed when it was asked, comes back
 MAX_LISTS = 12  # for the family, and again for each person
 MAX_OPEN_ITEMS = 100
 MAX_SHOWN = 40
@@ -38,7 +47,7 @@ OVERVIEW = (
 ADD_PROMPT_HEAD = "➕ Что добавить в список"
 ADD_PROMPT = ADD_PROMPT_HEAD + " «{name}»? Можно несколько: через запятую или с новой строки.\nОтветь на это сообщение."
 PROMPT_NAME = re.compile(r"«([^»]+)»")
-NOTHING_TO_ADD = "Не поняла, что добавить. Напиши пункты через запятую."
+NOTHING_TO_ADD = "Не поняла, что добавить."
 TOO_MANY_LISTS = f"Списков уже {MAX_LISTS}. Сначала очисти какой-нибудь из них."
 LIST_FULL = f"В списке уже {MAX_OPEN_ITEMS} пунктов. Сначала отметь или убери лишнее."
 LIST_GONE = "Этого списка уже нет."
@@ -258,10 +267,19 @@ class ListDesk:
     async def _send_list(self, member: AssistantMember, list_id: int, note: str = "") -> None:
         view = await self._list_view(member, list_id)
         if view is None:
-            await self._bot.send_message(member.telegram_id, LIST_GONE)
+            await self._send_gone(member)
             return
         screen = Rich((f"<p>{esc(note)}</p>" if note else "") + view[0])
         await send_long(self._bot, member.telegram_id, screen, view[1])
+
+    async def _send_gone(self, member: AssistantMember) -> None:
+        """A list that went away leads to all the lists, never to a dead end."""
+        text, markup = await self._overview(member)
+        await self._bot.send_message(member.telegram_id, f"{LIST_GONE}\n\n{text}", reply_markup=markup)
+
+    async def _ask_add(self, member: AssistantMember, target: AssistantFamilyList, problem: str = "") -> None:
+        prompt = ADD_PROMPT.format(name=label(target))
+        await send_prompt(self._bot, member.telegram_id, prompt, f"{LIST_CANCEL}:{target.id}", problem)
 
     # ---------- by voice or text ----------
 
@@ -338,26 +356,29 @@ class ListDesk:
         """The answer to "what to add?": the list is the one named in the prompt."""
         prompt = (message.reply_to_message.text if message.reply_to_message else "") or ""
         named = PROMPT_NAME.search(prompt)
-        items = lists.split_items(text)
-        if named is None or not items:
-            await self._bot.send_message(member.telegram_id, NOTHING_TO_ADD)
-            return
-        shown = named.group(1)
+        shown = named.group(1) if named else ""
         personal = shown.startswith((LOCK + " ", OLD_LOCK + " "))
+        items = lists.split_items(text)
+        name = shown.removeprefix(LOCK + " ").removeprefix(OLD_LOCK + " ")
         async with self._sessions() as db:
-            name = shown.removeprefix(LOCK + " ").removeprefix(OLD_LOCK + " ")
-            target = await self._named(db, member, name, personal, create=False)
-            if target is None:
-                await self._bot.send_message(member.telegram_id, LIST_GONE)
-                return
-            added = await self._add(db, target, items, member.telegram_id)
-        await self._send_list(member, target.id, self._added_note(label(target), items, added))
+            target = await self._named(db, member, name, personal, create=False) if name else None
+            added = await self._add(db, target, items, member.telegram_id) if target and items else []
+        if target is None:
+            await self._send_gone(member)
+        elif not items:
+            await self._ask_add(member, target, NOTHING_TO_ADD)
+        else:
+            await self._send_list(member, target.id, self._added_note(label(target), items, added))
 
     # ---------- buttons ----------
 
     async def handle(self, callback: CallbackQuery, member: AssistantMember, prefix: str, args: list[str]) -> None:
         if prefix == "flb":
             await self._edit(callback, *await self._overview(member))
+            return
+        if prefix == LIST_CANCEL:
+            await remove_menu(callback)
+            await self._send_list(member, int(args[0]))
             return
         if prefix == "flm":
             async with self._sessions() as db:
@@ -375,9 +396,7 @@ class ListDesk:
             async with self._sessions() as db:
                 target = await self._visible(db, member, list_id)
             if target is not None:
-                await self._bot.send_message(
-                    member.telegram_id, ADD_PROMPT.format(name=label(target)), reply_markup=ForceReply()
-                )
+                await self._ask_add(member, target)
                 await remove_menu(callback)
             return
         if prefix == "flc" and await self._clear(list_id):

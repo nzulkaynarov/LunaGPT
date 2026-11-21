@@ -4,17 +4,20 @@ import logging
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import CallbackQuery, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import access
-from lunagpt.assistant.telegram import DANGER, SUCCESS, edit_screen, is_reply_to_prompt
+from lunagpt.assistant.telegram import DANGER, SUCCESS, edit_screen, is_reply_to_prompt, send_prompt
 from lunagpt.models import AssistantCatPhrase, AssistantMember
 
 logger = logging.getLogger("lunagpt.assistant.phrases")
 
 PHRASE_PREFIXES = {"cpy", "cpn", "cpx"}
+# "✖ Отмена" under a child's phrase prompt; like the button that asks, it is the child's, and the stories
+# screen the phrase button sits on comes back.
+PHRASE_CANCEL = "cpq"
 MIN_LENGTH = 5
 MAX_LENGTH = 100
 MAX_PENDING = 3
@@ -22,7 +25,7 @@ PROMPT = (
     "😺 Придумай, что Луна пишет, пока думает над ответом. Например: «🐾 Ловлю ответ за хвост…»\n"
     "Напиши фразу ответом на это сообщение."
 )
-TOO_SHORT = f"Фраза должна быть от {MIN_LENGTH} до {MAX_LENGTH} знаков, в одну строку. Попробуй ещё раз."
+TOO_SHORT = f"Фраза должна быть от {MIN_LENGTH} до {MAX_LENGTH} знаков, в одну строку."
 TOO_MANY = "У тебя уже есть фразы, которые ждут родителей. Дождись их ответа 🙂"
 SENT = "✨ Отправила фразу родителям. Если одобрят, она будет появляться, пока я думаю."
 APPROVED_KID = "🎉 Родители одобрили твою фразу! Теперь она появляется, пока я думаю:\n«{text}»"
@@ -56,13 +59,13 @@ class PhraseDesk:
         found: bool = is_reply_to_prompt(message, PROMPT)
         return found
 
-    async def ask(self, member: AssistantMember) -> None:
-        await self._bot.send_message(member.telegram_id, PROMPT, reply_markup=ForceReply())
+    async def ask(self, member: AssistantMember, problem: str = "") -> None:
+        await send_prompt(self._bot, member.telegram_id, PROMPT, PHRASE_CANCEL, problem)
 
     async def suggest(self, member: AssistantMember, text: str) -> None:
         text = text.strip()
         if not MIN_LENGTH <= len(text) <= MAX_LENGTH or "\n" in text:
-            await self._bot.send_message(member.telegram_id, TOO_SHORT)
+            await self.ask(member, TOO_SHORT)
             return
         async with self._sessions() as db:
             waiting = await db.scalar(

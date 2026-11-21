@@ -8,7 +8,7 @@ import pytest
 from aiogram.types import Message
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from telegram_fakes import edited, fake_bot, last_sent
+from telegram_fakes import edited, fake_bot, last_sent, prompt_cancel
 
 from lunagpt.assistant import list_desk, lists
 from lunagpt.models import AssistantFamilyList, AssistantFamilyListItem, AssistantMember
@@ -33,7 +33,7 @@ def _telegram() -> MagicMock:
 
 def _callback(data: str) -> MagicMock:
     callback = MagicMock(data=data, answer=AsyncMock())
-    callback.message = MagicMock(spec=Message, edit_text=AsyncMock())
+    callback.message = MagicMock(spec=Message, edit_text=AsyncMock(), delete=AsyncMock())
     return callback
 
 
@@ -279,4 +279,58 @@ async def test_the_list_screen_goes_away_when_its_add_prompt_opens(
     tap.message.delete = AsyncMock()
     await desk.handle(tap, people["mom"], "fla", [shopping])
     assert _sent(telegram)[0] == list_desk.ADD_PROMPT.format(name="Покупки")
+    assert prompt_cancel(_sent(telegram)[1]) == f"{list_desk.LIST_CANCEL}:{shopping}"
     tap.message.delete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_add_prompt_brings_the_list_back(db_sessions: async_sessionmaker[AsyncSession]) -> None:
+    people = await _family(db_sessions)
+    telegram = _telegram()
+    desk = list_desk.ListDesk(telegram, db_sessions)
+    await desk.view(people["kid"])
+    shopping = _buttons(_sent(telegram)[1])[0][1].split(":")[1]
+    await desk.handle(_callback(f"fla:{shopping}"), people["kid"], "fla", [shopping])
+    cancel = _callback(prompt_cancel(_sent(telegram)[1]))
+    await desk.handle(cancel, people["kid"], list_desk.LIST_CANCEL, [shopping])
+    cancel.message.delete.assert_awaited_once()
+    text, markup = _sent(telegram)
+    assert text.startswith("🛒 Покупки") and ("➕ Добавить", f"fla:{shopping}") in _buttons(markup)
+
+
+@pytest.mark.asyncio
+async def test_cancelling_for_a_list_that_went_away_shows_all_lists(
+    db_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    people = await _family(db_sessions)
+    telegram = _telegram()
+    desk = list_desk.ListDesk(telegram, db_sessions)
+    cancel = _callback(f"{list_desk.LIST_CANCEL}:9999")
+    await desk.handle(cancel, people["kid"], list_desk.LIST_CANCEL, ["9999"])
+    text, markup = _sent(telegram)
+    assert text.startswith(list_desk.LIST_GONE) and list_desk.OVERVIEW in text
+    assert [b[0] for b in _buttons(markup)][:2] == ["🛒 Покупки · 0", "🧹 Дела по дому · 0"]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_answer_brings_a_fresh_prompt_that_still_works(
+    db_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    people = await _family(db_sessions)
+    telegram = _telegram()
+    desk = list_desk.ListDesk(telegram, db_sessions)
+    await desk.view(people["mom"])
+    shopping = _buttons(_sent(telegram)[1])[0][1].split(":")[1]
+    reply = MagicMock(spec=Message)
+    prompt = list_desk.ADD_PROMPT.format(name="Покупки")
+    reply.reply_to_message = MagicMock(text=prompt, from_user=MagicMock(is_bot=True))
+    await desk.add_from_reply(people["mom"], reply, " , ; ")
+    fresh, markup = _sent(telegram)
+    assert fresh == f"{list_desk.NOTHING_TO_ADD}\n{prompt}"
+    assert prompt_cancel(markup) == f"{list_desk.LIST_CANCEL}:{shopping}"
+
+    again = MagicMock(spec=Message)
+    again.reply_to_message = MagicMock(text=fresh, from_user=MagicMock(is_bot=True))
+    assert desk.is_add_reply(again)
+    await desk.add_from_reply(people["mom"], again, "молоко")
+    assert "✅ Добавила в «Покупки»: молоко" in _sent(telegram)[0]

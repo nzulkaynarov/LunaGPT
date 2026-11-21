@@ -9,7 +9,7 @@ import pytest
 from aiogram.types import Message
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from telegram_fakes import fake_bot, last_sent
+from telegram_fakes import fake_bot, last_sent, prompt_cancel
 
 from lunagpt.assistant import brief, reminder_desk, reminders
 from lunagpt.assistant.reminders import ReminderParts
@@ -321,3 +321,34 @@ def test_button_colours_mean_the_same_everywhere() -> None:
     assert styles(reminder_desk.ring_keyboard(1))["✅ Готово"] == SUCCESS
     assert styles(reminder_desk.ring_keyboard(1))["⏰ +10 мин"] is None
     assert styles(school_desk._confirm("sk"))["✅ Сохранить"] == SUCCESS
+
+
+@pytest.mark.asyncio
+async def test_city_prompt_can_be_cancelled_and_an_unknown_city_asks_again(
+    db_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    member = await _member(db_sessions)
+    telegram = _telegram()
+    geocode = AsyncMock(side_effect=[None, brief.Place("Ташкент", 41.3, 69.2)])
+    desk = reminder_desk.ReminderDesk(telegram, db_sessions, AsyncMock(), geocode)
+    await desk.handle(_callback("rbc"), member, "rbc", [])
+    text, markup = last_sent(telegram)
+    assert text == reminder_desk.CITY_PROMPT and prompt_cancel(markup) == reminder_desk.CITY_CANCEL
+
+    cancel = _callback(reminder_desk.CITY_CANCEL)
+    cancel.message.delete = AsyncMock()
+    telegram.reset_mock()
+    await desk.handle(cancel, member, reminder_desk.CITY_CANCEL, [])
+    cancel.message.delete.assert_awaited_once()  # the brief screen that asked stays above it
+    cancel.message.edit_text.assert_not_awaited()
+    assert not telegram.mock_calls
+
+    await desk.set_city(member, "Нигдеград")
+    fresh, markup = last_sent(telegram)
+    assert fresh == f"{reminder_desk.CITY_NOT_FOUND}\n{reminder_desk.CITY_PROMPT}"
+    assert prompt_cancel(markup) == reminder_desk.CITY_CANCEL
+    answer = MagicMock(spec=Message)
+    answer.reply_to_message = MagicMock(text=fresh, from_user=MagicMock(is_bot=True))
+    assert desk.is_city_reply(answer)
+    await desk.set_city(member, "ташкент")
+    assert "🏙 Город для погоды: Ташкент" in [str(call.args[1]) for call in telegram.send_message.call_args_list]

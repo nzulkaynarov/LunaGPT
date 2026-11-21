@@ -10,6 +10,7 @@ import pytest
 from aiogram.types import Message
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from telegram_fakes import prompt_cancel
 
 from lunagpt.assistant import calendar_desk, school_desk
 from lunagpt.assistant.calendar_desk import EventParts, plan
@@ -262,8 +263,60 @@ async def test_nobody_links_a_calendar_someone_else_linked(db_sessions: async_se
     desk = calendar_desk.CalendarDesk(telegram, db_sessions, _calendar(google), AsyncMock())
     await desk.link(mama, "mama@gmail.com")
     await desk.link(kid, "mama@gmail.com")
-    assert telegram.send_message.call_args.args[1] == calendar_desk.TAKEN
+    asked = telegram.send_message.call_args
+    assert asked.args[1] == f"{calendar_desk.TAKEN}\n{calendar_desk.LINK_PROMPT}"
+    assert prompt_cancel(asked.kwargs["reply_markup"]) == calendar_desk.LINK_CANCEL
     await desk.link(guest, "guest@gmail.com")
     assert telegram.send_message.call_args.args[1] == calendar_desk.GUESTS_NO_CALENDAR
     async with db_sessions() as db:
         assert (await db.get(AssistantMember, 2)).google_calendar_id is None  # type: ignore[union-attr]
+
+
+def _answer_to(prompt: str) -> MagicMock:
+    answer = MagicMock(spec=Message)
+    answer.reply_to_message = MagicMock(text=prompt, from_user=MagicMock(is_bot=True))
+    return answer
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("address", "google", "problem"),
+    [
+        ("не адрес", FakeGoogle(), calendar_desk.NOT_AN_ADDRESS),
+        ("papa@gmail.com", FakeGoogle(), calendar_desk.NOT_SHARED.format(email=SA_EMAIL)),
+        ("mama@gmail.com", None, calendar_desk.UNAVAILABLE),
+    ],
+)
+async def test_a_wrong_address_brings_a_fresh_prompt_that_still_works(
+    db_sessions: async_sessionmaker[AsyncSession], address: str, google: FakeGoogle | None, problem: str
+) -> None:
+    member = await _member(db_sessions)
+    telegram = MagicMock(send_message=AsyncMock())
+    down = GoogleCalendar(_credentials(), 5, httpx.MockTransport(lambda request: httpx.Response(503)))
+    desk = calendar_desk.CalendarDesk(telegram, db_sessions, _calendar(google) if google else down, AsyncMock())
+    await desk.link(member, address)
+    asked = telegram.send_message.call_args
+    assert asked.args[1] == f"{problem}\n{calendar_desk.LINK_PROMPT}" and "ещё раз" not in problem
+    assert prompt_cancel(asked.kwargs["reply_markup"]) == calendar_desk.LINK_CANCEL
+    assert desk.is_link_reply(_answer_to(asked.args[1]))
+
+    desk._calendar = _calendar(FakeGoogle())  # Google is back, or the address is right this time
+    await desk.link(member, "mama@gmail.com")
+    assert "📅 Календарь подключён." in [call.args[1] for call in telegram.send_message.call_args_list]
+
+
+@pytest.mark.asyncio
+async def test_the_address_prompt_can_be_cancelled(db_sessions: async_sessionmaker[AsyncSession]) -> None:
+    member = await _member(db_sessions)
+    telegram = MagicMock(send_message=AsyncMock())
+    desk = calendar_desk.CalendarDesk(telegram, db_sessions, _calendar(FakeGoogle()), AsyncMock())
+    await desk.handle(_callback("calc"), member, "calc", [])
+    asked = telegram.send_message.call_args
+    assert asked.args[1] == calendar_desk.LINK_PROMPT
+    cancel = _callback(prompt_cancel(asked.kwargs["reply_markup"]))
+    cancel.message.delete = AsyncMock()
+    telegram.send_message.reset_mock()
+    await desk.handle(cancel, member, calendar_desk.LINK_CANCEL, [])
+    cancel.message.delete.assert_awaited_once()  # the calendar screen that asked stays above it
+    cancel.message.edit_text.assert_not_awaited()
+    telegram.send_message.assert_not_awaited()

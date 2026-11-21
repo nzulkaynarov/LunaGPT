@@ -8,11 +8,13 @@ from typing import Any
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
-from aiogram.types import CallbackQuery, InputRichMessage, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, InputRichMessage, Message
 
 # Button colours (Bot API 9.4): green agrees or marks done, red refuses, switches off or deletes.
 SUCCESS = "success"
 DANGER = "danger"
+CANCEL = "✖ Отмена"
+CANCELLED = "Отменила"  # the short note on a pressed "✖ Отмена" of a prompt
 MESSAGE_LIMIT = 4000  # Telegram rejects messages above 4096 characters
 RICH_MESSAGE_LIMIT = 32000  # Telegram rejects rich messages above 32768 characters
 # Code and display math stay as they are; an inline formula cannot open on a digit or a space, or close after a space.
@@ -139,8 +141,24 @@ def is_reply_to_prompt(message: Message, prompt: str) -> bool:
     return bool(reply and reply.from_user and reply.from_user.is_bot and prompt in (reply.text or ""))
 
 
+def prompt_markup(cancel: str) -> InlineKeyboardMarkup:
+    """The keyboard of a "reply to this message" prompt: the reply field opens at once and "✖ Отмена" calls the
+    prompt off. Bot API 10.3 lets an inline keyboard carry force_reply; it has no input field placeholder."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=CANCEL, callback_data=cancel)]], force_reply=True
+    )
+
+
+async def send_prompt(bot: Bot, chat_id: int, prompt: str, cancel: str, problem: str = "") -> None:
+    """Ask for an answer by reply. After a wrong answer the same prompt comes again with one line above it saying
+    what was wrong, so the person always has a prompt to answer; answers are matched by the prompt text."""
+    text = f"{problem}\n{prompt}" if problem else prompt
+    await bot.send_message(chat_id, text, reply_markup=prompt_markup(cancel))
+
+
 async def remove_menu(callback: CallbackQuery) -> None:
-    """The menu whose button opened a "reply to this message" prompt goes away: the answer brings a fresh one."""
+    """The menu whose button opened a "reply to this message" prompt goes away: the answer brings a fresh one.
+    A prompt whose "✖ Отмена" was pressed goes away the same way."""
     if not isinstance(callback.message, Message):
         return
     with suppress(TelegramAPIError):  # too old to delete, or already gone

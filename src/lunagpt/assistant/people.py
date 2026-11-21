@@ -16,7 +16,6 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import (
     CallbackQuery,
-    ForceReply,
     FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -29,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import access, phones
 from lunagpt.assistant.pi_client import PiClient, PiConflictError, PiNotFoundError, PiUnavailableError
-from lunagpt.assistant.telegram import DANGER, edit_screen, is_reply_to_prompt
+from lunagpt.assistant.telegram import DANGER, edit_screen, is_reply_to_prompt, remove_menu, send_prompt
 from lunagpt.config import settings
 from lunagpt.models import AssistantApplication, AssistantMember
 
@@ -61,8 +60,10 @@ PEOPLE_PREFIXES = frozenset(
         "pmy",
         "pen",
         "pep",
+        "pq",
     }
 )
+PEOPLE_CANCEL = "pq"  # "✖ Отмена" under the name, number and search prompts; the card or the list stays above
 REPLY_INTERVAL_SECONDS = 3600
 NOTIFICATIONS_PER_HOUR = 10
 MAX_LISTED = 30
@@ -565,8 +566,8 @@ class PeopleDesk:
     def is_edit_reply(message: Message) -> bool:
         return is_reply_to_prompt(message, "Карточка №") and bool(_edit_target(message))
 
-    async def _ask_edit(self, chat_id: int, prompt: str, telegram_id: int) -> None:
-        await self._bot.send_message(chat_id, prompt.format(id=telegram_id), reply_markup=ForceReply())
+    async def _ask_edit(self, chat_id: int, prompt: str, telegram_id: int, problem: str = "") -> None:
+        await send_prompt(self._bot, chat_id, prompt.format(id=telegram_id), PEOPLE_CANCEL, problem)
 
     async def apply_edit(self, actor: AssistantMember, message: Message) -> None:
         """The prompt only says which card; the right to change it is decided again here."""
@@ -580,7 +581,7 @@ class PeopleDesk:
             problem, values = self._new_name(message)
         if problem:
             prompt = PHONE_PROMPT if field == "phone" else NAME_PROMPT
-            await self._ask_edit(actor.telegram_id, f"{problem}\n{prompt}", telegram_id)
+            await self._ask_edit(actor.telegram_id, prompt, telegram_id, problem)
             return
         async with self._sessions() as db:
             member = await db.get(AssistantMember, telegram_id, with_for_update=True)
@@ -613,15 +614,14 @@ class PeopleDesk:
     def is_search_reply(message: Message) -> bool:
         return bool(is_reply_to_prompt(message, SEARCH_PROMPT))
 
-    async def _ask_number(self, chat_id: int, prefix: str = "") -> None:
-        markup = ForceReply(input_field_placeholder="+998 90 123 45 67")
-        await self._bot.send_message(chat_id, f"{prefix}{SEARCH_PROMPT}", reply_markup=markup)
+    async def _ask_number(self, chat_id: int, problem: str = "") -> None:
+        await send_prompt(self._bot, chat_id, SEARCH_PROMPT, PEOPLE_CANCEL, problem)
 
     async def search(self, chat_id: int, message: Message) -> None:
         phone = phones.from_telegram(message.contact.phone_number) if message.contact else None
         phone = phone or phones.from_adult(message.text or "")
         if phone is None:
-            await self._ask_number(chat_id, f"{NOT_A_NUMBER}\n")
+            await self._ask_number(chat_id, NOT_A_NUMBER)
             return
         text, markup = await self._search_result(phone)
         await self._bot.send_message(chat_id, text, reply_markup=markup)
@@ -685,6 +685,8 @@ class PeopleDesk:
             await self._ask_edit(actor.telegram_id, PHONE_PROMPT, int(args[0]))
         elif prefix == "pf":
             await self._ask_number(actor.telegram_id)
+        elif prefix == PEOPLE_CANCEL:
+            await remove_menu(callback)
         elif prefix == "pls":
             await self._edit(callback, *await self._section(args[0]))
         elif prefix == "pc":

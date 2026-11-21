@@ -34,19 +34,20 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import access, live_reply, updates, usage
-from lunagpt.assistant.calendar_desk import CALENDAR_PREFIXES, CalendarDesk, is_calendar_request
+from lunagpt.assistant.calendar_desk import CALENDAR_PREFIXES, LINK_CANCEL, CalendarDesk, is_calendar_request
 from lunagpt.assistant.chat_context import ChatContext
 from lunagpt.assistant.dialogue import Dialogue
 from lunagpt.assistant.feedback import FeedbackDesk
 from lunagpt.assistant.gcal import GoogleCalendar
 from lunagpt.assistant.internet_desk import BTN_ASK_TIME, BTN_QUIZ, INTERNET_PREFIXES, InternetDesk
-from lunagpt.assistant.list_desk import LIST_PREFIXES, ListDesk
+from lunagpt.assistant.list_desk import LIST_CANCEL, LIST_PREFIXES, ListDesk
 from lunagpt.assistant.lists import is_list_request
 from lunagpt.assistant.llm import SCHEDULED_TASK, QuizQuestion, ReplyOptions, transcribe_voice
 from lunagpt.assistant.memories import Memory
 from lunagpt.assistant.memory_desk import (
     BTN_STORY,
     FAMILY_MEMORY_PREFIXES,
+    FAMILY_NOTE_CANCEL,
     FAMILY_PROMPT,
     MEMORY_PREFIXES,
     MemoryDesk,
@@ -73,10 +74,10 @@ from lunagpt.assistant.menu import (
     main_keyboard,
     menu_layout,
 )
-from lunagpt.assistant.people import PEOPLE_PREFIXES, PeopleDesk
-from lunagpt.assistant.phrases import PHRASE_PREFIXES, PhraseDesk
+from lunagpt.assistant.people import PEOPLE_CANCEL, PEOPLE_PREFIXES, PeopleDesk
+from lunagpt.assistant.phrases import PHRASE_CANCEL, PHRASE_PREFIXES, PhraseDesk
 from lunagpt.assistant.pi_client import PiClient
-from lunagpt.assistant.reminder_desk import REMINDER_PREFIXES, ReminderDesk
+from lunagpt.assistant.reminder_desk import CITY_CANCEL, REMINDER_PREFIXES, ReminderDesk
 from lunagpt.assistant.reminders import is_reminder_request
 from lunagpt.assistant.school_desk import SCHOOL_PREFIXES, SchoolDesk, is_school_text, photo_kind
 from lunagpt.assistant.speech import (
@@ -87,8 +88,15 @@ from lunagpt.assistant.speech import (
     without_voice_refusals,
     without_voice_words,
 )
-from lunagpt.assistant.stories import ADULT_STORY_PREFIXES, PHRASE_ASK, STORY_PREFIXES, StoryDesk
-from lunagpt.assistant.telegram import edit_screen, is_reply_to_prompt, remove_menu, send_long, send_model_reply
+from lunagpt.assistant.stories import ADULT_STORY_PREFIXES, PHRASE_ASK, STORY_CANCEL, STORY_PREFIXES, StoryDesk
+from lunagpt.assistant.telegram import (
+    CANCELLED,
+    edit_screen,
+    is_reply_to_prompt,
+    remove_menu,
+    send_long,
+    send_model_reply,
+)
 from lunagpt.assistant.waiting import cat_is_thinking
 from lunagpt.config import settings
 from lunagpt.langfuse_api import Langfuse
@@ -120,6 +128,10 @@ CANNOT_SAY = "Этот ответ вслух не прочитать: он дл�
 VOICE_NOT_HEARD = "Не расслышала слов в этом голосовом. Попробуй ещё раз."
 UPDATE_CHECK_SECONDS = 600
 RESTARTED_TEXT = updates.RESTARTED
+# "✖ Отмена" under every "reply to this message" prompt: the prompt goes, and the press is answered "Отменила".
+PROMPT_CANCELS = frozenset(
+    {PEOPLE_CANCEL, CITY_CANCEL, LINK_CANCEL, LIST_CANCEL, FAMILY_NOTE_CANCEL, STORY_CANCEL, PHRASE_CANCEL}
+)
 FAMILY_REQUEST = re.compile(
     r"^\s*(?:запомни|запиши|сохрани)\s+(?:для\s+(?:всей\s+)?(?:семьи|всех)|в\s+(?:семейн\w+|общ\w+)\s+памят\w+)"
     r"[\s:,—-]*(?:что\s+)?(?P<fact>\S.*)$",
@@ -335,6 +347,9 @@ class LunaBot:
         if await self._raised_alarm(member, text):
             return
         if member.role in access.FAMILY_ROLES and is_reply_to_prompt(message, FAMILY_PROMPT):
+            if self.dialogue.over_rate_limit(user_id):
+                await self._send(user_id, TOO_FAST)  # the prompt stays, so the note can be sent again in a minute
+                return
             await self._chat(member, text, family_note=text)
             await self._drop_prompt(message)
             return
@@ -463,7 +478,7 @@ class LunaBot:
         if access.access_ended(member) and prefix != updates.UPDATE_PREFIX:
             await callback.answer(ACCESS_ENDED, show_alert=True)
             return
-        await callback.answer()
+        await callback.answer(CANCELLED if prefix in PROMPT_CANCELS else None)
         feature = usage.feature_of_prefix(prefix)
         if feature is not None:
             await self._count(user_id, feature)
@@ -478,6 +493,9 @@ class LunaBot:
         elif prefix == PHRASE_ASK:
             await self.phrases.ask(member)
             await remove_menu(callback)
+        elif prefix == PHRASE_CANCEL:
+            await remove_menu(callback)
+            await self.stories.view(member)
         elif prefix in ("sh", "shs", "shl"):  # buttons of a device list sent before the move to HomeSec
             await self._edit(callback, SHARED_MOVED, None)
         elif prefix in MEMORY_PREFIXES or prefix in FAMILY_MEMORY_PREFIXES:
@@ -503,7 +521,7 @@ class LunaBot:
     def _callback_allowed(role: str, prefix: str) -> bool:
         if prefix == updates.UPDATE_PREFIX:
             return role in access.ROLES
-        if prefix in INTERNET_PREFIXES or prefix == PHRASE_ASK:
+        if prefix in INTERNET_PREFIXES or prefix in (PHRASE_ASK, PHRASE_CANCEL):
             return role == "kid"
         if prefix in ("fhp", "fhi"):
             return role in access.ADULT_ROLES

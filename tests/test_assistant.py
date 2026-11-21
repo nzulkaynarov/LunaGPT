@@ -19,11 +19,13 @@ import pytest
 from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
 from aiogram.types import Document, Message, Update
+from telegram_fakes import prompt_cancel
 
 from lunagpt.assistant import (
     access,
     audio,
     bot,
+    calendar_desk,
     dialogue,
     internet_desk,
     list_desk,
@@ -31,13 +33,15 @@ from lunagpt.assistant import (
     memory_desk,
     menu,
     monitor,
+    people,
     phrases,
+    reminder_desk,
     speech,
     stories,
 )
 from lunagpt.assistant.monitor import AvailabilityTracker
 from lunagpt.assistant.pi_client import PiClient, PiConflictError, PiNotFoundError, PiUnavailableError
-from lunagpt.assistant.telegram import split_message
+from lunagpt.assistant.telegram import CANCELLED, split_message
 from lunagpt.models import AssistantMember
 
 
@@ -2098,3 +2102,119 @@ def test_the_pi_knows_a_linked_person_by_id() -> None:
     linked.homesec_person_id = 42
     assert internet_desk.pi_person(linked) == "42"  # a rename on the Pi does not break the internet screen
     assert internet_desk.pi_person(_member("kid", 6)) == "Тест"
+
+
+@pytest.mark.parametrize(
+    ("role", "prefix", "allowed"),
+    [
+        ("owner", people.PEOPLE_CANCEL, True),
+        ("kid", people.PEOPLE_CANCEL, False),
+        ("guest", reminder_desk.CITY_CANCEL, True),
+        ("guest", calendar_desk.LINK_CANCEL, True),
+        ("kid", list_desk.LIST_CANCEL, True),
+        ("guest", list_desk.LIST_CANCEL, False),
+        ("kid", memory_desk.FAMILY_NOTE_CANCEL, True),
+        ("guest", memory_desk.FAMILY_NOTE_CANCEL, False),
+        ("adult", stories.STORY_CANCEL, True),
+        ("guest", stories.STORY_CANCEL, False),
+        ("kid", phrases.PHRASE_CANCEL, True),
+        ("adult", phrases.PHRASE_CANCEL, False),
+    ],
+)
+def test_a_prompts_cancel_is_open_to_whoever_gets_that_prompt(role: str, prefix: str, allowed: bool) -> None:
+    assert bot.LunaBot._callback_allowed(role, prefix) is allowed
+    assert prefix in bot.PROMPT_CANCELS
+
+
+def _pressed(data: str, user_id: int = 1) -> MagicMock:
+    callback = _callback(data, user_id)
+    callback.message.delete = AsyncMock()
+    return callback
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_prompt_goes_away_and_says_so(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, send, _ = harness
+    _as_member(monkeypatch, _member("guest", 5))
+    cancel = _pressed(reminder_desk.CITY_CANCEL, 5)
+    await instance.on_callback(cancel)
+    cancel.answer.assert_awaited_once_with(CANCELLED)
+    cancel.message.delete.assert_awaited_once()
+    send.assert_not_awaited()  # the brief screen that asked is still above
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_family_note_brings_family_memory_back(
+    harness: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance, memory = _with_memory(harness, monkeypatch, "kid")
+    memory.family.list_facts = AsyncMock(return_value=[])
+    _, send, _ = harness
+    ask = _pressed("fama")
+    await instance.on_callback(ask)
+    ask.message.delete.assert_awaited_once()  # the family memory made way for the prompt
+    assert _sent(send) == bot.FAMILY_PROMPT
+    cancel = _pressed(prompt_cancel(send.call_args.kwargs["reply_markup"]))
+    await instance.on_callback(cancel)
+    cancel.message.delete.assert_awaited_once()
+    assert _sent(send) == "🏠 Общая память пока пуста."
+    assert "➕ Добавить" in _labels(send.call_args.kwargs["reply_markup"])
+    memory.family.add.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_family_note_over_the_rate_limit_keeps_its_prompt(
+    harness: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance, memory = _with_memory(harness, monkeypatch, "adult")
+    _, send, _ = harness
+    monkeypatch.setattr(instance.dialogue, "over_rate_limit", MagicMock(return_value=True))
+    await instance.on_message(_reply_to("дача в августе", bot.FAMILY_PROMPT))
+    assert _sent(send) == bot.TOO_FAST
+    instance._bot.delete_message.assert_not_awaited()
+    memory.family.add.assert_not_awaited()
+
+    monkeypatch.setattr(instance.dialogue, "over_rate_limit", MagicMock(return_value=False))
+    await instance.on_message(_reply_to("дача в августе", bot.FAMILY_PROMPT))  # the same prompt, a minute later
+    memory.family.add.assert_awaited_once_with(1, "Тест", "дача в августе")
+    instance._bot.delete_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_phrase_brings_the_stories_back(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, send, _ = harness
+    instance.stories.view = AsyncMock()
+    _as_member(monkeypatch, _member("kid", 5))
+    ask = _pressed(stories.PHRASE_ASK, 5)
+    await instance.on_callback(ask)
+    ask.message.delete.assert_awaited_once()
+    assert _sent(send) == phrases.PROMPT
+    cancel = _pressed(prompt_cancel(send.call_args.kwargs["reply_markup"]), 5)
+    await instance.on_callback(cancel)
+    cancel.answer.assert_awaited_once_with(CANCELLED)
+    cancel.message.delete.assert_awaited_once()
+    instance.stories.view.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("prompt", "text", "problem", "cancel"),
+    [
+        (stories.PROMPT, "мяу", stories.TOO_SHORT, stories.STORY_CANCEL),
+        (phrases.PROMPT, "ой", phrases.TOO_SHORT, phrases.PHRASE_CANCEL),
+    ],
+)
+async def test_a_wrong_answer_leaves_a_fresh_prompt_in_place_of_the_old_one(
+    harness: Any, monkeypatch: pytest.MonkeyPatch, prompt: str, text: str, problem: str, cancel: str
+) -> None:
+    instance, send, answer = harness
+    _as_member(monkeypatch, _member("kid", 5))
+    reply = _message(text, 5)
+    reply.reply_to_message.from_user.is_bot = True
+    reply.reply_to_message.message_id = 77
+    reply.reply_to_message.text = prompt
+    await instance.on_message(reply)
+    assert _sent(send) == f"{problem}\n{prompt}"
+    assert prompt_cancel(send.call_args.kwargs["reply_markup"]) == cancel
+    instance._bot.delete_message.assert_awaited_once_with(reply.chat.id, 77)  # only the answered one goes
+    answer.assert_not_awaited()

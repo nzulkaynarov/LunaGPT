@@ -11,9 +11,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import pytest_asyncio
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import ForceReply, InlineKeyboardMarkup, Message, ReplyKeyboardRemove
+from aiogram.types import InlineKeyboardMarkup, Message, ReplyKeyboardRemove
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from telegram_fakes import prompt_cancel
 
 from lunagpt.assistant import access, people
 from lunagpt.assistant.people import PeopleDesk
@@ -453,7 +454,13 @@ async def test_search_asks_again_when_text_is_not_a_number(desk: Any) -> None:
     desk._bot.send_message.reset_mock()
     await desk.search(OWNER, _search_message("Миша"))
     call = desk._bot.send_message.await_args
-    assert people.NOT_A_NUMBER in call.args[1] and isinstance(call.kwargs["reply_markup"], ForceReply)
+    assert call.args[1] == f"{people.NOT_A_NUMBER}\n{people.SEARCH_PROMPT}"
+    assert prompt_cancel(call.kwargs["reply_markup"]) == people.PEOPLE_CANCEL
+    answer = _search_message("+998 91 000 00 00")
+    answer.reply_to_message = MagicMock(text=call.args[1], from_user=MagicMock(is_bot=True))
+    assert PeopleDesk.is_search_reply(answer)  # the fresh prompt is answered like the first one
+    text, _, _ = await _search(desk, "+998 91 000 00 00")
+    assert "никого нет" in text
 
 
 @pytest.mark.asyncio
@@ -494,7 +501,22 @@ async def test_search_button_opens_a_forced_reply(desk: Any) -> None:
     desk._bot.send_message.reset_mock()
     await _press_as(desk, "pf")
     call = desk._bot.send_message.await_args
-    assert call.args == (OWNER, people.SEARCH_PROMPT) and isinstance(call.kwargs["reply_markup"], ForceReply)
+    assert call.args == (OWNER, people.SEARCH_PROMPT)
+    assert prompt_cancel(call.kwargs["reply_markup"]) == people.PEOPLE_CANCEL
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("opened_by", ["pf", f"pen:{NEW}", f"pep:{NEW}"])
+async def test_cancel_removes_the_prompt_and_keeps_the_screen_above(desk: Any, opened_by: str) -> None:
+    await _press_as(desk, opened_by)
+    assert prompt_cancel(desk._bot.send_message.await_args.kwargs["reply_markup"]) == people.PEOPLE_CANCEL
+    desk._bot.send_message.reset_mock()
+    cancel = _press(people.PEOPLE_CANCEL)
+    cancel.message.delete = AsyncMock()
+    await desk.handle(cancel, _actor(), people.PEOPLE_CANCEL, [])
+    cancel.message.delete.assert_awaited_once()  # the screen that opened the prompt is still above it
+    cancel.message.edit_text.assert_not_awaited()
+    desk._bot.send_message.assert_not_awaited()
 
 
 async def _guest(desk: Any) -> None:
@@ -668,10 +690,17 @@ async def test_bad_input_asks_again_and_changes_nothing(desk: Any, sessions: Any
     await _guest(desk)
     await desk.apply_edit(_actor(), _edit_reply(_phone_prompt(), "Миша"))
     call = desk._bot.send_message.await_args
-    assert people.NOT_A_NUMBER in call.args[1] and isinstance(call.kwargs["reply_markup"], ForceReply)
+    assert call.args[1] == f"{people.NOT_A_NUMBER}\n{_phone_prompt()}"
+    assert prompt_cancel(call.kwargs["reply_markup"]) == people.PEOPLE_CANCEL
     await desk.apply_edit(_actor(), _edit_reply(_name_prompt(), "   "))
+    call = desk._bot.send_message.await_args
+    assert call.args[1] == f"{people.NOT_A_NAME}\n{_name_prompt()}"
     member = await _member(sessions)
     assert member is not None and member.name == "Новый" and member.phone == PHONE
+
+    await desk.apply_edit(_actor(), _edit_reply(call.args[1], "Марат"))  # the fresh prompt takes the answer
+    member = await _member(sessions)
+    assert member is not None and member.name == "Марат"
 
 
 @pytest.mark.asyncio
