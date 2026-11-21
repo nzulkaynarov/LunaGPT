@@ -14,12 +14,13 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from lunagpt.assistant import llm, reminders, school
+from lunagpt.assistant import access, llm, reminders, school
 from lunagpt.assistant.gcal import CalendarError, Event, GoogleCalendar
 from lunagpt.assistant.reminder_desk import local_now
 from lunagpt.assistant.telegram import (
     DANGER,
     SUCCESS,
+    Previews,
     edit_screen,
     is_reply_to_prompt,
     remove_menu,
@@ -32,8 +33,10 @@ logger = logging.getLogger("lunagpt.assistant.calendar_desk")
 
 # Tasks copied from Luna start with this mark; the brief and chat already list tasks, so they skip these events.
 TASK_MARK = "📝 "
-CALENDAR_PREFIXES = frozenset({"cal", "calc", "calx", "caly", "caln", "calq"})
+CALENDAR_PREFIXES = frozenset({"cal", "calc", "calx", "calxy", "caly", "caln", "calq"})
 LINK_CANCEL = "calq"  # "✖ Отмена" under the address prompt; the calendar screen stays above it
+UNLINK = "calx"  # "🔌 Отключить" asks first: linking again means sending the address again
+UNLINK_YES = "calxy"
 CALENDAR_REQUEST = re.compile(
     r"^\s*(?:добавь|запиши|внеси|поставь|создай)\s+(?:в\s+(?:мой\s+)?календар\w*|встречу|событие)|"
     # "посмотри в календарь" only reads it; an event needs a verb that adds.
@@ -47,7 +50,10 @@ DEFAULT_MINUTES = 60
 CALENDAR_MODELS = ["luna-fast", "luna-smart", "luna-local"]
 WEEK_DAYS = 7
 CACHE_SECONDS = 300
-GUESTS_NO_CALENDAR = "Календарь подключают только члены семьи."
+GUESTS_NO_CALENDAR = (
+    "📅 Календарь — только для членов семьи. А напомнить могу: напиши, например, "
+    "«напомни в четверг в 15:00 стоматолог»."
+)
 TAKEN = "Этот календарь уже подключён у другого человека. Если это твой, попроси его отключить календарь у себя."
 LINK_PROMPT = "Напиши ответом на это сообщение адрес своего Google-календаря (обычно это твой Gmail)."
 NOT_AN_ADDRESS = "Это не похоже на адрес календаря."
@@ -61,6 +67,10 @@ NOT_LINKED = "Сначала подключи календарь: «🗓 Мой 
 NOT_UNDERSTOOD = "Не поняла, на когда. Напиши, например: «добавь в календарь стоматолог в четверг в 15:00»."
 NOT_PARSED = "Не получилось разобрать событие, попробуй ещё раз чуть позже."
 EXPIRED = "Это уже неактуально, напиши ещё раз."
+CONFIRM_UNLINK = (
+    "🔌 Отключить календарь?\n\nСобытия в самом Google Calendar останутся, но я перестану показывать их "
+    "и добавлять новые. Чтобы подключить его снова, нужно будет ещё раз прислать адрес."
+)
 SHORT_DAYS = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
 
 EXTRACT_PROMPT = (
@@ -171,7 +181,7 @@ class CalendarDesk:
         self._sessions = session_factory
         self._calendar = calendar
         self._extract = extract
-        self._pending: dict[int, PlannedEvent] = {}
+        self._pending: Previews[PlannedEvent] = Previews()
         self._cache: dict[int, tuple[float, list[Event]]] = {}
 
     async def _calendar_id(self, user_id: int) -> str | None:
@@ -231,31 +241,49 @@ class CalendarDesk:
             events = await self.week(user_id)
         except CalendarError as exc:
             text = NOT_SHARED.format(email=self._calendar.email) if exc.kind == "not_shared" else UNAVAILABLE
-            keyboard = [[_button("🔌 Отключить", "calx", DANGER)], back]
+            keyboard = [[_button("🔌 Отключить", UNLINK, DANGER)], back]
             return f"📅 {text}", InlineKeyboardMarkup(inline_keyboard=keyboard)
         today = local_now().date()
         lines = [f"📅 Календарь {calendar_id} на неделю:\n"]
         lines += [f"• {event_when(e, today)} — {e.title}" for e in events] or ["Событий нет."]
         lines.append("\nДобавить: «добавь в календарь стоматолог в четверг в 15:00».")
-        keyboard = [[_button("🔌 Отключить", "calx", DANGER)], back]
+        keyboard = [[_button("🔌 Отключить", UNLINK, DANGER)], back]
         return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def _guest_view() -> tuple[str, InlineKeyboardMarkup]:
+        return GUESTS_NO_CALENDAR, InlineKeyboardMarkup(inline_keyboard=[[_button("← Мой день", "rm")]])
+
+    @staticmethod
+    def _confirm_unlink() -> tuple[str, InlineKeyboardMarkup]:
+        markup = InlineKeyboardMarkup(
+            inline_keyboard=[[_button("Да, отключить", UNLINK_YES, DANGER)], [_button("← Назад", "cal")]]
+        )
+        return CONFIRM_UNLINK, markup
 
     async def handle(self, callback: CallbackQuery, member: AssistantMember, prefix: str, args: list[str]) -> None:
         user_id = member.telegram_id
-        if prefix == "calc":
-            await send_prompt(self._bot, user_id, LINK_PROMPT, LINK_CANCEL)
-            return
+        token = args[0] if args else None
         if prefix == LINK_CANCEL:
             await remove_menu(callback)
             return
-        if prefix == "calx":
+        if member.role not in access.FAMILY_ROLES:  # a guest's older screen may still carry calendar buttons
+            await self._edit(callback, *self._guest_view())
+            return
+        if prefix == "calc":
+            await send_prompt(self._bot, user_id, LINK_PROMPT, LINK_CANCEL)
+            return
+        if prefix == UNLINK:
+            await self._edit(callback, *self._confirm_unlink())
+            return
+        if prefix == UNLINK_YES:
             await self._set_calendar_id(user_id, None)
         elif prefix == "caly":
-            await self._edit(callback, await self._add_pending(user_id), None)
+            await self._edit(callback, await self._add_pending(user_id, token), None)
             return
         elif prefix == "caln":
-            self._pending.pop(user_id, None)
-            await self._edit(callback, "Отменила, в календарь ничего не добавила.", None)
+            cancelled = self._pending.take(user_id, token) is not None
+            await self._edit(callback, "Отменила, в календарь ничего не добавила." if cancelled else EXPIRED, None)
             return
         await self._edit(callback, *await self.view(user_id))
 
@@ -276,7 +304,7 @@ class CalendarDesk:
         if self._calendar is None:
             await send_long(self._bot, user_id, NOT_CONFIGURED)
             return
-        if member.role == "guest":
+        if member.role not in access.FAMILY_ROLES:
             await send_long(self._bot, user_id, GUESTS_NO_CALENDAR)
             return
         if not CALENDAR_ID.match(calendar_id):
@@ -307,6 +335,9 @@ class CalendarDesk:
 
     async def request_event(self, member: AssistantMember, text: str) -> None:
         user_id = member.telegram_id
+        if member.role not in access.FAMILY_ROLES:  # guests keep their plans in reminders
+            await send_long(self._bot, user_id, GUESTS_NO_CALENDAR)
+            return
         if self._calendar is None:
             await send_long(self._bot, user_id, NOT_CONFIGURED)
             return
@@ -329,15 +360,15 @@ class CalendarDesk:
         if planned is None:
             await send_long(self._bot, user_id, NOT_UNDERSTOOD)
             return
-        self._pending[user_id] = planned
+        token = self._pending.keep(user_id, planned)
         keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[[_button("✅ Добавить", "caly", SUCCESS), _button("✖ Отмена", "caln")]]
+            inline_keyboard=[[_button("✅ Добавить", f"caly:{token}", SUCCESS), _button("✖ Отмена", f"caln:{token}")]]
         )
         preview = f"📅 Добавить в календарь?\n\n{planned.title}\n{event_when(planned, now.date())}"
         await send_long(self._bot, user_id, preview, keyboard)
 
-    async def _add_pending(self, user_id: int) -> str:
-        planned = self._pending.pop(user_id, None)
+    async def _add_pending(self, user_id: int, token: str | None) -> str:
+        planned = self._pending.take(user_id, token)
         calendar_id = await self._calendar_id(user_id)
         if planned is None or self._calendar is None or not calendar_id:
             return EXPIRED

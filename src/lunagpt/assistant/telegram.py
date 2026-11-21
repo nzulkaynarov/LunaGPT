@@ -2,6 +2,7 @@
 
 import html
 import re
+import secrets
 from collections.abc import Iterable, Sequence
 from contextlib import suppress
 from typing import Any
@@ -154,6 +155,28 @@ async def send_prompt(bot: Bot, chat_id: int, prompt: str, cancel: str, problem:
     what was wrong, so the person always has a prompt to answer; answers are matched by the prompt text."""
     text = f"{problem}\n{prompt}" if problem else prompt
     await bot.send_message(chat_id, text, reply_markup=prompt_markup(cancel))
+
+
+class Previews[T]:
+    """The one preview per person that waits for "✅": a newer preview replaces it. Each preview's buttons carry
+    its own token, so a press on an older one finds nothing instead of saving what the newest one shows."""
+
+    def __init__(self) -> None:
+        self._waiting: dict[int, tuple[str, T]] = {}
+
+    def keep(self, user_id: int, item: T) -> str:
+        """Hold the item until its preview is answered; the token goes into the preview's buttons."""
+        token = secrets.token_hex(4)
+        self._waiting[user_id] = (token, item)
+        return token
+
+    def take(self, user_id: int, token: str | None) -> T | None:
+        """The item this preview showed, once; None when a newer preview replaced it or it was answered."""
+        waiting = self._waiting.get(user_id)
+        if waiting is None or token is None or waiting[0] != token:
+            return None
+        del self._waiting[user_id]
+        return waiting[1]
 
 
 async def remove_menu(callback: CallbackQuery) -> None:

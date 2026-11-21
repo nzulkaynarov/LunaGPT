@@ -164,6 +164,14 @@ async def _member(db_sessions: async_sessionmaker[AsyncSession], telegram_id: in
     return member
 
 
+async def _guest(db_sessions: async_sessionmaker[AsyncSession]) -> AssistantMember:
+    guest = AssistantMember(telegram_id=3, name="Гость", role="guest")
+    async with db_sessions() as db:
+        db.add(guest)
+        await db.commit()
+    return guest
+
+
 def _callback(data: str, user_id: int = 1) -> MagicMock:
     callback = MagicMock(data=data, answer=AsyncMock())
     callback.from_user.id = user_id
@@ -260,6 +268,42 @@ async def test_snooze_rings_again_later(db_sessions: async_sessionmaker[AsyncSes
 
 
 @pytest.mark.asyncio
+async def test_snooze_of_a_deleted_reminder_says_so_and_drops_the_buttons(
+    db_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    member = await _member(db_sessions)
+    desk = reminder_desk.ReminderDesk(_telegram(), db_sessions)
+    callback = _callback("rmz:404:10")
+    await desk.handle(callback, member, "rmz", ["404", "10"])
+    shown = callback.message.edit_text.call_args
+    assert shown.args == (f"🔔 дело\n\n{reminder_desk.SNOOZE_GONE}",) and shown.kwargs["reply_markup"] is None
+    async with db_sessions() as db:
+        assert await db.scalar(select(AssistantReminder)) is None  # nothing rings later
+
+
+@pytest.mark.asyncio
+async def test_done_closes_a_ring_and_keeps_a_repeating_series(db_sessions: async_sessionmaker[AsyncSession]) -> None:
+    member = await _member(db_sessions)
+    now = datetime.now(UTC)
+    async with db_sessions() as db:
+        series = AssistantReminder(member_id=1, text="таблетка", due_at=now + timedelta(days=1), repeat="daily")
+        one_off = AssistantReminder(member_id=1, text="дело", due_at=now)  # rang, but not closed in time
+        db.add_all([series, one_off])
+        await db.commit()
+    finish = AsyncMock(return_value=True)
+    desk = reminder_desk.ReminderDesk(_telegram(), db_sessions, finish_task=finish)
+    for row in (series, one_off):
+        callback = _callback(f"rmok:{row.id}")
+        await desk.handle(callback, member, "rmok", [str(row.id)])
+        shown = callback.message.edit_text.call_args
+        assert shown.args == ("✅ 🔔 дело",) and shown.kwargs["reply_markup"] is None
+    finish.assert_not_awaited()  # neither is homework
+    async with db_sessions() as db:
+        assert (await db.get(AssistantReminder, series.id)).done_at is None  # type: ignore[union-attr]
+        assert (await db.get(AssistantReminder, one_off.id)).done_at is not None  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
 async def test_brief_settings_and_morning_send(
     db_sessions: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -301,6 +345,8 @@ async def test_my_day_shows_the_calendar_only_once_google_is_connected(
     assert "cal" not in [b.callback_data for row in markup.inline_keyboard for b in row]
     _, markup = await shown.view(member)
     assert "cal" in [b.callback_data for row in markup.inline_keyboard for b in row]
+    _, markup = await shown.view(await _guest(db_sessions))
+    assert "cal" not in [b.callback_data for row in markup.inline_keyboard for b in row]  # guests cannot link one
 
 
 @pytest.mark.parametrize("value", ["abcd", "2560", "9", "07:30", ""])
@@ -320,7 +366,7 @@ def test_button_colours_mean_the_same_everywhere() -> None:
 
     assert styles(reminder_desk.ring_keyboard(1))["✅ Готово"] == SUCCESS
     assert styles(reminder_desk.ring_keyboard(1))["⏰ +10 мин"] is None
-    assert styles(school_desk._confirm("sk"))["✅ Сохранить"] == SUCCESS
+    assert styles(school_desk._confirm("sk", "token"))["✅ Сохранить"] == SUCCESS
 
 
 @pytest.mark.asyncio

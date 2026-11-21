@@ -34,3 +34,11 @@ def edited(message: MagicMock) -> str:
     """What a redrawn message shows now."""
     call = message.edit_text.call_args
     return str(call.args[0]) if call.args else to_plain(call.kwargs["rich_message"].html)
+
+
+def pressed(markup: Any, text: str) -> tuple[str, str, list[str]]:
+    """What a press on the button with this text sends: its data, then the prefix and arguments the bot routes."""
+    assert isinstance(markup, InlineKeyboardMarkup)
+    data = next(str(b.callback_data) for row in markup.inline_keyboard for b in row if b.text == text)
+    prefix, *args = data.split(":")
+    return data, prefix, args

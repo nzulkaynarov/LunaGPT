@@ -16,12 +16,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from lunagpt.assistant import school
 from lunagpt.assistant.reminder_desk import local_now, to_utc
 from lunagpt.assistant.reminders import when_text
-from lunagpt.assistant.telegram import DANGER, SUCCESS, Rich, edit_screen, rich_table, send_long
+from lunagpt.assistant.telegram import DANGER, SUCCESS, Previews, Rich, edit_screen, rich_table, send_long
 from lunagpt.models import AssistantMember, AssistantReminder, AssistantSchedule, AssistantTask
 
 logger = logging.getLogger("lunagpt.assistant.school_desk")
 
-SCHOOL_PREFIXES = frozenset({"sk", "skx", "sky", "skn", "tk", "tkd", "tky", "tkn"})
+SCHOOL_PREFIXES = frozenset({"sk", "skx", "skxy", "sky", "skn", "tk", "tkd", "tky", "tkn"})
 MAX_OPEN_TASKS = 100
 LIST_LIMIT = 15
 # A photo caption that asks to keep the homework; "реши задачу" or "помоги с домашкой" stay a question.
@@ -31,6 +31,7 @@ NOT_READ = "Не получилось прочитать, попробуй ещ�
 NO_SCHEDULE = "Не нашла здесь расписание уроков. Пришли фото расписания или напиши его текстом."
 NO_TASKS = "Не нашла здесь заданий. Напиши, например: «задали по математике № 125 к пятнице»."
 EXPIRED = "Это уже неактуально, пришли ещё раз."
+CONFIRM_DELETE = "🗑 Удалить расписание целиком?\n\nЧтобы вернуть его, нужно будет прислать расписание заново."
 
 
 class TaskMirror(Protocol):
@@ -57,9 +58,12 @@ def _button(text: str, data: str, style: str | None = None) -> InlineKeyboardBut
     return InlineKeyboardButton(text=text, callback_data=data, style=style)
 
 
-def _confirm(prefix: str) -> InlineKeyboardMarkup:
+def _confirm(prefix: str, token: str) -> InlineKeyboardMarkup:
+    """The buttons of one preview; the token ties them to it, so an older preview cannot save a newer one."""
     return InlineKeyboardMarkup(
-        inline_keyboard=[[_button("✅ Сохранить", f"{prefix}y", SUCCESS), _button("✖ Отмена", f"{prefix}n")]]
+        inline_keyboard=[
+            [_button("✅ Сохранить", f"{prefix}y:{token}", SUCCESS), _button("✖ Отмена", f"{prefix}n:{token}")]
+        ]
     )
 
 
@@ -92,8 +96,8 @@ class SchoolDesk:
         self._read_schedule = read_schedule
         self._read_tasks = read_tasks
         self.mirror = mirror
-        self._pending_schedule: dict[int, dict[str, list[str]]] = {}
-        self._pending_tasks: dict[int, list[Planned]] = {}
+        self._pending_schedule: Previews[dict[str, list[str]]] = Previews()
+        self._pending_tasks: Previews[list[Planned]] = Previews()
 
     @staticmethod
     def _metadata(member: AssistantMember) -> dict[str, object]:
@@ -124,9 +128,9 @@ class SchoolDesk:
         if not found.days:
             await send_long(self._bot, user_id, NO_SCHEDULE)
             return
-        self._pending_schedule[user_id] = found.days
+        token = self._pending_schedule.keep(user_id, found.days)
         preview = f"📚 Прочитала расписание:\n\n{school.timetable_text(found.days)}\n\nСохранить?"
-        await send_long(self._bot, user_id, preview, _confirm("sk"))
+        await send_long(self._bot, user_id, preview, _confirm("sk", token))
 
     async def read_tasks(
         self, member: AssistantMember, text: str, image: bytes | None = None, image_type: str = "image/jpeg"
@@ -146,7 +150,7 @@ class SchoolDesk:
             due = school.due_date(item, days, now.date())
             remind_at = school.reminder_time(due, now) if due else None
             planned.append(Planned(item.subject.strip(), item.task.strip(), due, remind_at))
-        self._pending_tasks[user_id] = planned
+        token = self._pending_tasks.keep(user_id, planned)
         lines = ["📝 Записала:\n"]
         for p in planned:
             line = f"• {school.task_line(p.subject, p.task)} — {school.due_text(p.due, now.date())}"
@@ -156,20 +160,24 @@ class SchoolDesk:
         if any(p.due is None for p in planned):
             lines.append("\nСрок не написан, а в расписании такого урока нет: такие задания будут в списке без даты.")
         lines.append("\nСохранить?")
-        await send_long(self._bot, user_id, "\n".join(lines), _confirm("tk"))
+        await send_long(self._bot, user_id, "\n".join(lines), _confirm("tk", token))
 
     # ---------- saving and menus ----------
 
     async def handle(self, callback: CallbackQuery, member: AssistantMember, prefix: str, args: list[str]) -> None:
         user_id = member.telegram_id
+        token = args[0] if args else None
         if prefix == "sky":
-            await self._edit(callback, await self._save_schedule(user_id), None)
+            await self._edit(callback, await self._save_schedule(user_id, token), None)
         elif prefix == "tky":
-            await self._edit(callback, await self._save_tasks(user_id), None)
+            await self._edit(callback, await self._save_tasks(user_id, token), None)
         elif prefix in ("skn", "tkn"):
-            (self._pending_schedule if prefix == "skn" else self._pending_tasks).pop(user_id, None)
-            await self._edit(callback, "Отменила, ничего не сохранила.", None)
+            pending = self._pending_schedule if prefix == "skn" else self._pending_tasks
+            cancelled = pending.take(user_id, token) is not None
+            await self._edit(callback, "Отменила, ничего не сохранила." if cancelled else EXPIRED, None)
         elif prefix == "skx":
+            await self._edit(callback, *self._confirm_delete())
+        elif prefix == "skxy":
             async with self._sessions() as db:
                 await db.execute(delete(AssistantSchedule).where(AssistantSchedule.member_id == user_id))
                 await db.commit()
@@ -177,7 +185,7 @@ class SchoolDesk:
         elif prefix == "sk":
             await self._edit(callback, *await self.schedule_view(user_id))
         elif prefix == "tkd":
-            await self._done(user_id, int(args[0]))
+            await self.mark_done(user_id, int(args[0]))
             await self._edit(callback, *await self.tasks_view(user_id))
         elif prefix == "tk":
             await self._edit(callback, *await self.tasks_view(user_id))
@@ -187,8 +195,15 @@ class SchoolDesk:
         if isinstance(callback.message, Message):
             await edit_screen(callback.message, text, markup)
 
-    async def _save_schedule(self, user_id: int) -> str:
-        days = self._pending_schedule.pop(user_id, None)
+    @staticmethod
+    def _confirm_delete() -> tuple[str, InlineKeyboardMarkup]:
+        markup = InlineKeyboardMarkup(
+            inline_keyboard=[[_button("Да, удалить", "skxy", DANGER)], [_button("← Назад", "sk")]]
+        )
+        return CONFIRM_DELETE, markup
+
+    async def _save_schedule(self, user_id: int, token: str | None) -> str:
+        days = self._pending_schedule.take(user_id, token)
         if days is None:
             return EXPIRED
         async with self._sessions() as db:
@@ -204,8 +219,8 @@ class SchoolDesk:
             "Теперь спрашивай «что завтра?», а уроки на день будут в утренней сводке."
         )
 
-    async def _save_tasks(self, user_id: int) -> str:
-        planned = self._pending_tasks.pop(user_id, None)
+    async def _save_tasks(self, user_id: int, token: str | None) -> str:
+        planned = self._pending_tasks.take(user_id, token)
         if planned is None:
             return EXPIRED
         async with self._sessions() as db:
@@ -230,11 +245,12 @@ class SchoolDesk:
                 text += f"\nВ Google Calendar добавила: {copied}."
         return text
 
-    async def _done(self, user_id: int, task_id: int) -> None:
+    async def mark_done(self, user_id: int, task_id: int) -> bool:
+        """Mark this person's open task done, with its reminders and calendar copy gone; False if nothing was open."""
         async with self._sessions() as db:
             task = await db.get(AssistantTask, task_id)
-            if task is None or task.member_id != user_id:
-                return
+            if task is None or task.member_id != user_id or task.done_at is not None:
+                return False
             task.done_at = datetime.now().astimezone()
             event_id = task.google_event_id
             await db.execute(delete(AssistantReminder).where(AssistantReminder.task_id == task_id))
@@ -244,6 +260,7 @@ class SchoolDesk:
                 await self.mirror.remove_task(user_id, event_id)
             except Exception:
                 logger.warning("could not remove a done task from the calendar", exc_info=True)
+        return True
 
     # ---------- reading back ----------
 

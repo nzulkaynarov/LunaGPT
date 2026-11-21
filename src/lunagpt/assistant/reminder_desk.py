@@ -50,12 +50,15 @@ HOW_TO = "Чтобы добавить, напиши или скажи: «нап�
 NOT_UNDERSTOOD = "Не поняла, когда напомнить. Напиши, например: «напомни завтра в 9 позвонить бабушке»."
 NOT_PARSED = "Не получилось разобрать напоминание, попробуй ещё раз чуть позже."
 TOO_MANY = f"У тебя уже {MAX_ACTIVE} напоминаний. Удали лишние в «🗓 Мой день»."
+SNOOZE_GONE = "Это напоминание уже удалено, отложить его нельзя."
+HOMEWORK_DONE = "📝 Задание отметила как сделанное."
 
 ExtractFn = Callable[[str, datetime, dict[str, object]], Awaitable[reminders.ReminderParts | None]]
 GeocodeFn = Callable[[str], Awaitable[brief.Place | None]]
 ForecastFn = Callable[[float, float], Awaitable[brief.Forecast | None]]
 ExtraBriefFn = Callable[[int, date], Awaitable[list[str]]]
 TaskFn = Callable[[AssistantMember, str], Awaitable[None]]  # Luna carries out a task she was given for this time
+FinishTaskFn = Callable[[int, int], Awaitable[bool]]  # marks a person's homework done; False when nothing was open
 DO = "do"
 
 
@@ -101,6 +104,7 @@ class ReminderDesk:
         extra_brief: ExtraBriefFn | None = None,
         run_task: TaskFn | None = None,
         calendar: bool = False,
+        finish_task: FinishTaskFn | None = None,
     ) -> None:
         self._bot = bot
         self._sessions = session_factory
@@ -110,6 +114,7 @@ class ReminderDesk:
         self._extra_brief = extra_brief
         self.run_task = run_task  # set by the bot, which owns the chat that carries a task out
         self.calendar = calendar  # the calendar button only shows once the owner has connected Google
+        self._finish_task = finish_task  # "✅ Готово" on a homework reminder marks the homework done
         self._background: set[asyncio.Task[None]] = set()
 
     def _spawn(self, work: Coroutine[Any, Any, None]) -> None:
@@ -273,7 +278,7 @@ class ReminderDesk:
         keyboard = [numbers[i : i + 5] for i in range(0, len(numbers), 5)]
         if member.role == "kid":  # the school timetable and homework are children's
             keyboard.append([_button("📚 Расписание", "sk"), _button("📝 Домашка", "tk")])
-        if self.calendar:
+        if self.calendar and member.role in access.FAMILY_ROLES:  # guests cannot link a calendar
             keyboard.append([_button("📅 Календарь", "cal")])
         keyboard.append([_button("☀️ Утренняя сводка", "rb")])
         return Rich("".join(parts)), InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -306,7 +311,7 @@ class ReminderDesk:
             await self._snooze(callback, user_id, int(args[0]), int(args[1]))
             return
         if prefix == "rmok":
-            await self._mark_done(callback)
+            await self._mark_done(callback, user_id, int(args[0]) if args else None)
             return
         if prefix == "rmd":
             await self._delete(user_id, int(args[0]))
@@ -355,11 +360,17 @@ class ReminderDesk:
         async with self._sessions() as db:
             row = await db.get(AssistantReminder, reminder_id)
             if row is None or row.member_id != user_id:
+                ring = callback.message.text if isinstance(callback.message, Message) else None
+                await self._edit(callback, f"{ring or '🔔 Напоминание'}\n\n{SNOOZE_GONE}", None)
                 return
-            # A snooze is a new one-off ring, so a repeating series keeps its own schedule.
+            # A snooze is a new one-off ring, so a repeating series keeps its own schedule; homework stays tied
+            # to its task, so "Готово" on the later ring still marks it done.
             db.add(
                 AssistantReminder(
-                    member_id=user_id, text=row.text, due_at=datetime.now(UTC) + timedelta(minutes=minutes)
+                    member_id=user_id,
+                    text=row.text,
+                    due_at=datetime.now(UTC) + timedelta(minutes=minutes),
+                    task_id=row.task_id,
                 )
             )
             await db.commit()
@@ -367,9 +378,21 @@ class ReminderDesk:
         later = to_local(datetime.now(UTC) + timedelta(minutes=minutes))
         await self._edit(callback, f"🔔 {text or 'Напоминание'}\n⏰ Напомню ещё раз в {later:%H:%M}", None)
 
-    async def _mark_done(self, callback: CallbackQuery) -> None:
+    async def _mark_done(self, callback: CallbackQuery, user_id: int, reminder_id: int | None) -> None:
+        """A one-off reminder is closed when it rings and a repeating one keeps its schedule, so "Готово" closes
+        only a one-off still open; on homework it also marks the task done."""
+        task_id = None
+        async with self._sessions() as db:
+            row = await db.get(AssistantReminder, reminder_id) if reminder_id is not None else None
+            if row is not None and row.member_id == user_id:
+                task_id = row.task_id
+                if row.done_at is None and row.repeat == "none":
+                    row.done_at = datetime.now(UTC)
+                    await db.commit()
+        finished = task_id is not None and self._finish_task is not None and await self._finish_task(user_id, task_id)
         if isinstance(callback.message, Message):
-            await callback.message.edit_text(f"✅ {callback.message.text or ''}".strip(), reply_markup=None)
+            text = f"✅ {callback.message.text or ''}".strip()
+            await callback.message.edit_text(f"{text}\n{HOMEWORK_DONE}" if finished else text, reply_markup=None)
 
     # ---------- city for the weather ----------
 

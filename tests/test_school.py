@@ -1,17 +1,18 @@
 """Timetable and tasks: reading, deadlines from the timetable, saving, reminders and the brief."""
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiogram.types import Message
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from telegram_fakes import edited
+from telegram_fakes import edited, pressed
 
-from lunagpt.assistant import school, school_desk
+from lunagpt.assistant import reminder_desk, school, school_desk
 from lunagpt.assistant.reminder_desk import to_local
 from lunagpt.assistant.school import TaskItem, TaskList, Timetable
+from lunagpt.assistant.telegram import DANGER
 from lunagpt.models import AssistantMember, AssistantReminder, AssistantSchedule, AssistantTask
 
 NOW = datetime(2026, 11, 11, 10, 30)  # a Wednesday
@@ -124,14 +125,25 @@ async def test_schedule_is_previewed_saved_used_and_deleted(db_sessions: async_s
     async with db_sessions() as db:
         assert await db.get(AssistantSchedule, 1) is None  # nothing stored before "Сохранить"
 
-    save = _callback("sky")
-    await desk.handle(save, member, "sky", [])
+    data, prefix, args = pressed(preview.kwargs["reply_markup"], "✅ Сохранить")
+    save = _callback(data)
+    await desk.handle(save, member, prefix, args)
     assert "Расписание сохранено" in _edited(save)
     assert await desk.timetable(1) == DAYS
     assert await desk.brief_lines(1, date(2026, 11, 13)) == ["📚 Уроки: математика, информатика"]
 
-    remove = _callback("skx")
-    await desk.handle(remove, member, "skx", [])
+    _, markup = await desk.schedule_view(1)
+    data, prefix, args = pressed(markup, "🗑 Удалить расписание")
+    remove = _callback(data)
+    await desk.handle(remove, member, prefix, args)
+    asked = remove.message.edit_text.call_args
+    assert asked.args[0] == school_desk.CONFIRM_DELETE  # the whole timetable is big: it asks first
+    assert await desk.timetable(1) == DAYS
+    confirm = asked.kwargs["reply_markup"]
+    assert pressed(confirm, "← Назад")[1] == "sk"
+    assert [b.style for row in confirm.inline_keyboard for b in row if b.text == "Да, удалить"] == [DANGER]
+    data, prefix, args = pressed(confirm, "Да, удалить")
+    await desk.handle(_callback(data), member, prefix, args)
     assert await desk.timetable(1) == {}
 
 
@@ -159,7 +171,8 @@ async def test_tasks_get_deadlines_reminders_and_can_be_done(
     assert "• Русский язык: упр. 48 — на завтра, напомню сегодня в 18:00" in preview
     assert "• Биология: доклад — без срока" in preview
 
-    await desk.handle(_callback("tky"), member, "tky", [])
+    data, prefix, args = pressed(telegram.send_message.call_args.kwargs["reply_markup"], "✅ Сохранить")
+    await desk.handle(_callback(data), member, prefix, args)
     async with db_sessions() as db:
         tasks = list(await db.scalars(select(AssistantTask).order_by(AssistantTask.id)))
         reminders = list(await db.scalars(select(AssistantReminder).order_by(AssistantReminder.due_at)))
@@ -210,3 +223,76 @@ async def test_nothing_is_saved_when_cancelled_or_unreadable(db_sessions: async_
 )
 def test_homework_to_write_down_versus_help_with_it(text: str, is_homework: bool) -> None:
     assert school.is_task_request(text) is is_homework
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["schedule", "tasks"])
+async def test_an_older_preview_never_saves_the_newer_one(
+    db_sessions: async_sessionmaker[AsyncSession], kind: str
+) -> None:
+    member = await _member(db_sessions)
+    telegram = MagicMock(send_message=AsyncMock())
+    first = Timetable(days={"mon": ["математика"]})
+    second = Timetable(days={"tue": ["история"]})
+    tasks = [TaskList(items=[TaskItem(task="старое")]), TaskList(items=[TaskItem(task="новое")])]
+    desk = school_desk.SchoolDesk(
+        telegram, db_sessions, AsyncMock(side_effect=[first, second]), AsyncMock(side_effect=tasks)
+    )
+    read = desk.read_schedule if kind == "schedule" else desk.read_tasks
+    await read(member, "запиши")
+    old = telegram.send_message.call_args.kwargs["reply_markup"]
+    await read(member, "запиши")
+    new = telegram.send_message.call_args.kwargs["reply_markup"]
+
+    for text in ("✅ Сохранить", "✖ Отмена"):
+        data, prefix, args = pressed(old, text)
+        stale = _callback(data)
+        await desk.handle(stale, member, prefix, args)
+        shown = stale.message.edit_text.call_args
+        assert shown.args == (school_desk.EXPIRED,) and shown.kwargs["reply_markup"] is None  # buttons gone
+    data, prefix, args = pressed(new, "✅ Сохранить")
+    await desk.handle(_callback(data), member, prefix, args)
+    async with db_sessions() as db:
+        saved = [t.text for t in await db.scalars(select(AssistantTask))]
+    if kind == "schedule":
+        assert await desk.timetable(1) == second.days
+    else:
+        assert saved == ["новое"]
+    again = _callback(data)
+    await desk.handle(again, member, prefix, args)
+    assert _edited(again) == school_desk.EXPIRED  # a preview is saved once
+
+
+@pytest.mark.asyncio
+async def test_done_on_a_homework_reminder_marks_the_homework_done(
+    db_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    member = await _member(db_sessions)
+    rang = datetime.now(UTC)
+    async with db_sessions() as db:
+        task = AssistantTask(member_id=1, subject="Математика", text="№ 125", due_on=date(2026, 11, 13))
+        db.add(task)
+        await db.flush()
+        text = "📝 Завтра сдавать — Математика: № 125"
+        ring = AssistantReminder(member_id=1, text=text, due_at=rang, done_at=rang, task_id=task.id)
+        db.add(ring)
+        await db.commit()
+    desk = school_desk.SchoolDesk(MagicMock(send_message=AsyncMock()), db_sessions)
+    reminders = reminder_desk.ReminderDesk(MagicMock(send_message=AsyncMock()), db_sessions, finish_task=desk.mark_done)
+
+    snooze = _callback(f"rmz:{ring.id}:10")
+    snooze.message.text = "🔔 📝 Завтра сдавать — Математика: № 125"
+    await reminders.handle(snooze, member, "rmz", [str(ring.id), "10"])
+    async with db_sessions() as db:
+        later = await db.scalar(select(AssistantReminder).where(AssistantReminder.done_at.is_(None)))
+    assert later is not None and later.task_id == task.id  # the later ring is still this homework's
+
+    done = _callback(f"rmok:{later.id}")
+    done.message.text = "🔔 📝 Завтра сдавать — Математика: № 125"
+    await reminders.handle(done, member, "rmok", [str(later.id)])
+    shown = done.message.edit_text.call_args
+    assert shown.args[0] == f"✅ 🔔 📝 Завтра сдавать — Математика: № 125\n{reminder_desk.HOMEWORK_DONE}"
+    assert shown.kwargs["reply_markup"] is None
+    assert await desk.open_tasks(1) == []
+    async with db_sessions() as db:
+        assert await db.scalar(select(AssistantReminder).where(AssistantReminder.task_id == task.id)) is None

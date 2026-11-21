@@ -10,12 +10,13 @@ import pytest
 from aiogram.types import Message
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from telegram_fakes import prompt_cancel
+from telegram_fakes import edited, pressed, prompt_cancel
 
 from lunagpt.assistant import calendar_desk, school_desk
 from lunagpt.assistant.calendar_desk import EventParts, plan
 from lunagpt.assistant.gcal import CalendarError, GoogleCalendar
 from lunagpt.assistant.school import TaskItem, TaskList
+from lunagpt.assistant.telegram import DANGER
 from lunagpt.models import AssistantMember, AssistantTask
 
 NOW = datetime(2026, 11, 11, 10, 30)  # a Wednesday
@@ -176,15 +177,27 @@ async def test_link_add_brief_and_chat(
     await desk.request_event(member, "добавь в календарь родительское собрание завтра в 18:30")
     preview = telegram.send_message.call_args
     assert "Родительское собрание\nзавтра 18:30–19:30" in preview.args[1]
-    confirm = _callback("caly")
-    await desk.handle(confirm, member, "caly", [])
+    data, prefix, args = pressed(preview.kwargs["reply_markup"], "✅ Добавить")
+    confirm = _callback(data)
+    await desk.handle(confirm, member, prefix, args)
     assert "✅ Добавила в календарь" in confirm.message.edit_text.call_args.args[0]
     assert google.created[0]["summary"] == "Родительское собрание"
 
     assert await desk.brief_lines(1, date(2026, 11, 11)) == ["📅 В календаре:", "• 15:00 — Стоматолог"]
     assert "сегодня 15:00–16:00: Стоматолог" in await desk.planner_text(1)
 
-    await desk.handle(_callback("calx"), member, "calx", [])
+    _, markup = await desk.view(1)
+    data, prefix, args = pressed(markup, "🔌 Отключить")
+    unlink = _callback(data)
+    await desk.handle(unlink, member, prefix, args)
+    asked = unlink.message.edit_text.call_args
+    assert asked.args[0] == calendar_desk.CONFIRM_UNLINK  # linking again takes the address again: it asks first
+    assert "сегодня 15:00–16:00: Стоматолог" in await desk.planner_text(1)
+    confirm_markup = asked.kwargs["reply_markup"]
+    assert pressed(confirm_markup, "← Назад")[1] == "cal"
+    assert [b.style for row in confirm_markup.inline_keyboard for b in row if b.text == "Да, отключить"] == [DANGER]
+    data, prefix, args = pressed(confirm_markup, "Да, отключить")
+    await desk.handle(_callback(data), member, prefix, args)
     assert await desk.planner_text(1) == ""
 
 
@@ -222,8 +235,9 @@ async def test_tasks_with_a_deadline_follow_into_the_calendar(
     found = TaskList(items=[TaskItem(subject="Математика", task="№ 125", due="fri")])
     desk = school_desk.SchoolDesk(telegram, db_sessions, read_tasks=AsyncMock(return_value=found), mirror=calendar)
     await desk.read_tasks(member, "задали")
-    save = _callback("tky")
-    await desk.handle(save, member, "tky", [])
+    data, prefix, args = pressed(telegram.send_message.call_args.kwargs["reply_markup"], "✅ Сохранить")
+    save = _callback(data)
+    await desk.handle(save, member, prefix, args)
     assert "В Google Calendar добавила: 1" in save.message.edit_text.call_args.args[0]
     assert google.created[1]["summary"] == "📝 Математика: № 125"
 
@@ -320,3 +334,62 @@ async def test_the_address_prompt_can_be_cancelled(db_sessions: async_sessionmak
     cancel.message.delete.assert_awaited_once()  # the calendar screen that asked stays above it
     cancel.message.edit_text.assert_not_awaited()
     telegram.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_older_preview_never_adds_the_newer_event(
+    db_sessions: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(calendar_desk, "local_now", lambda: NOW)
+    member = await _member(db_sessions)
+    async with db_sessions() as db:
+        (await db.get(AssistantMember, 1)).google_calendar_id = "mama@gmail.com"  # type: ignore[union-attr]
+        await db.commit()
+    google = FakeGoogle()
+    telegram = MagicMock(send_message=AsyncMock())
+    extract = AsyncMock(
+        side_effect=[EventParts(title="Стоматолог", day="thu", time="15:00"), EventParts(title="Собрание", day="fri")]
+    )
+    desk = calendar_desk.CalendarDesk(telegram, db_sessions, _calendar(google), extract)
+    await desk.request_event(member, "добавь в календарь стоматолог в четверг в 15:00")
+    old = telegram.send_message.call_args.kwargs["reply_markup"]
+    await desk.request_event(member, "добавь в календарь собрание в пятницу")
+    new = telegram.send_message.call_args.kwargs["reply_markup"]
+
+    for text in ("✅ Добавить", "✖ Отмена"):
+        data, prefix, args = pressed(old, text)
+        stale = _callback(data)
+        await desk.handle(stale, member, prefix, args)
+        shown = stale.message.edit_text.call_args
+        assert shown.args == (calendar_desk.EXPIRED,) and shown.kwargs["reply_markup"] is None
+    assert google.created == []
+    data, prefix, args = pressed(new, "✅ Добавить")
+    await desk.handle(_callback(data), member, prefix, args)
+    again = _callback(data)
+    await desk.handle(again, member, prefix, args)
+    assert [event["summary"] for event in google.created] == ["Собрание"]
+    assert edited(again.message) == calendar_desk.EXPIRED
+
+
+@pytest.mark.asyncio
+async def test_guests_are_offered_reminders_instead_of_the_calendar(
+    db_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    guest = AssistantMember(telegram_id=3, name="Гость", role="guest")
+    async with db_sessions() as db:
+        db.add(guest)
+        await db.commit()
+    telegram = MagicMock(send_message=AsyncMock())
+    extract = AsyncMock()
+    desk = calendar_desk.CalendarDesk(telegram, db_sessions, _calendar(FakeGoogle()), extract)
+    await desk.request_event(guest, "добавь в календарь стоматолог в четверг в 15:00")
+    said = telegram.send_message.call_args.args[1]
+    assert said == calendar_desk.GUESTS_NO_CALENDAR and "Мой день" not in said and "«напомни" in said
+    extract.assert_not_awaited()
+
+    old_button = _callback("calc")  # a screen sent before the button was hidden
+    await desk.handle(old_button, guest, "calc", [])
+    shown = old_button.message.edit_text.call_args
+    assert shown.args == (calendar_desk.GUESTS_NO_CALENDAR,)
+    assert pressed(shown.kwargs["reply_markup"], "← Мой день")[1] == "rm"
+    telegram.send_message.assert_awaited_once()  # no address prompt was sent

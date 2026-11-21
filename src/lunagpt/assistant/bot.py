@@ -208,7 +208,12 @@ class LunaBot:
         self.calendar = CalendarDesk(bot, session_factory, calendar)
         self.school = SchoolDesk(bot, session_factory, mirror=self.calendar)
         self.reminders = ReminderDesk(
-            bot, session_factory, extra_brief=self._brief_extra, run_task=self._run_task, calendar=calendar is not None
+            bot,
+            session_factory,
+            extra_brief=self._brief_extra,
+            run_task=self._run_task,
+            calendar=calendar is not None,
+            finish_task=self.school.mark_done,
         )
         self.phrases = PhraseDesk(bot, session_factory)
         self.stories = StoryDesk(bot, session_factory)
