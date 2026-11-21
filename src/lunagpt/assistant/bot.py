@@ -19,6 +19,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
+    MessageGenerationStopped,
     PhotoSize,
     ReactionTypeCustomEmoji,
     ReactionTypeEmoji,
@@ -32,7 +33,7 @@ from aiohttp import ClientError
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from lunagpt.assistant import access, updates, usage
+from lunagpt.assistant import access, live_reply, updates, usage
 from lunagpt.assistant.calendar_desk import CALENDAR_PREFIXES, CalendarDesk, is_calendar_request
 from lunagpt.assistant.chat_context import ChatContext
 from lunagpt.assistant.dialogue import Dialogue
@@ -631,6 +632,7 @@ class LunaBot:
         else:
             self.dialogue.keep_photo(user_id, image, image_type)
         waiting = await self.context.waiting(member, text, speak, image is not None)
+        live = live_reply.LiveReply(self._bot, user_id, waiting)
         await self._react(user_id, message_id, THINKING_REACTION)
         async with self._locks[user_id]:
             async with (
@@ -653,8 +655,11 @@ class LunaBot:
                     about=await self.context.about(current, text),
                     actions=await self.context.actions(current),
                     trace_id=trace_id,
+                    on_text=live.update,
                 )
-                reply = await self._answer(member.role, user_id, history, text, facts, options)
+                reply, stopped = await live.run(self._answer(member.role, user_id, history, text, facts, options))
+                if stopped:
+                    reply = f"{reply}\n\n{live_reply.STOPPED_MARK}" if reply.strip() else live_reply.STOPPED_MARK
             # Later turns keep only a mark of the photo: its bytes are never stored or sent again.
             said = f"[фото] {text}" if image is not None and not earlier_photo else text
             await self.dialogue.add(user_id, said, reply)
@@ -665,7 +670,7 @@ class LunaBot:
         sent = await send_model_reply(self._bot, user_id, reply)
         await self.feedback.remember(user_id, sent, trace_id)
         await self._react(user_id, message_id, DONE_REACTION if member.role == "kid" else None)
-        if speak:
+        if speak and not stopped:
             await self._send_voice_reply(user_id, reply)
         if self._memory and text != PHOTO_DEFAULT and not scheduled:
             task = asyncio.create_task(self._memory.remember(user_id, member.role, text))
@@ -782,10 +787,16 @@ async def on_error(event: ErrorEvent) -> bool:
     return True
 
 
+async def on_stop(event: MessageGenerationStopped) -> None:
+    """The person pressed "stop" on an answer being written."""
+    live_reply.stop(event.chat.id, event.draft_id)
+
+
 def build_router(luna: LunaBot) -> Router:
     router = Router()
     router.message.register(luna.on_message, F.chat.type == "private")
     router.callback_query.register(luna.on_callback)
     router.message_reaction.register(luna.feedback.on_reaction, F.chat.type == "private")
+    router.stopped_message_generation.register(on_stop)
     router.errors.register(on_error)
     return router

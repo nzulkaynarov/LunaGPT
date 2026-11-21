@@ -127,6 +127,12 @@ class Waiting:
         self._rest = itertools.cycle(self._rng.sample(pool, len(pool)))
         self._searches: list[str] = []
         self.changed = asyncio.Event()
+        self.answering = False
+
+    def answer_started(self) -> None:
+        """The answer itself is showing now, so the cat stops talking."""
+        self.answering = True
+        self.changed.set()
 
     def searching(self, query: str) -> None:
         """Called from the model loop when it searches; the phrase shows right away."""
@@ -153,7 +159,7 @@ async def _pause(waiting: Waiting, seconds: float) -> None:
 async def _show_phrases(bot: Bot, chat_id: int, waiting: Waiting) -> None:
     draft_id = random.randint(1, MAX_DRAFT_ID)
     await _pause(waiting, FIRST_PHRASE_AFTER_SECONDS)
-    while True:
+    while not waiting.answering:
         try:
             await bot.send_message_draft(chat_id, draft_id, text=waiting.next_phrase())
         except TelegramAPIError as exc:

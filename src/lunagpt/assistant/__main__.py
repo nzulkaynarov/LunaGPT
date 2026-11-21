@@ -44,7 +44,9 @@ async def main() -> None:
     logger.info("Luna AI Assistant started as @%s", me.username)
     await asyncio.gather(
         dispatcher.start_polling(
-            bot, allowed_updates=["message", "callback_query", "message_reaction"], handle_signals=False
+            bot,
+            allowed_updates=["message", "callback_query", "message_reaction", "stopped_message_generation"],
+            handle_signals=False,
         ),
         supervise("pi", lambda: watch_pi(bot, pi, async_session_factory)),
         supervise("heartbeats", lambda: send_heartbeats(pi, async_session_factory)),

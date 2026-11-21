@@ -366,6 +366,7 @@ class ReplyOptions:
     on_search: Callable[[str], None] | None = None  # shows the search in the waiting phrases
     actions: tuple["Action", ...] = ()  # what the chat model may do: lists, reminders
     trace_id: str | None = None  # the bot's id for this reply, so a reaction to it can score the trace
+    on_text: Callable[[str], None] | None = None  # the answer so far, while the model writes it
 
 
 def age_band(age: int | None) -> str:
@@ -427,6 +428,60 @@ async def _chat(
     return message
 
 
+async def _stream_chat(
+    client: httpx.AsyncClient,
+    payload: dict[str, Any],
+    on_cost: Callable[[float], None] | None,
+    on_text: Callable[[str], None],
+    timeout: float = MODEL_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    """The same call as _chat, read as it is written: on_text gets the growing answer. The gateway sends no cost
+    header for a stream, so the price comes from the usage in its last chunk."""
+    body = {**payload, "stream": True, "stream_options": {"include_usage": True}}
+    content = ""
+    calls: dict[int, dict[str, Any]] = {}
+    cost = 0.0
+    async with client.stream(
+        "POST",
+        settings.litellm_endpoint,
+        json=body,
+        headers={"Authorization": f"Bearer {settings.litellm_assistant_key}"},
+        timeout=timeout,
+    ) as response:
+        response.raise_for_status()
+        async for line in response.aiter_lines():
+            if not line.startswith("data:"):
+                continue
+            data = line.removeprefix("data:").strip()
+            if data == "[DONE]":
+                break
+            chunk = json.loads(data)
+            if "error" in chunk:
+                raise ValueError("the model stream reported an error")
+            cost = float((chunk.get("usage") or {}).get("cost") or cost)
+            for choice in chunk.get("choices") or []:
+                delta = choice.get("delta") or {}
+                for part in delta.get("tool_calls") or []:
+                    call = calls.setdefault(
+                        int(part.get("index", 0)),
+                        {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+                    )
+                    call["id"] = part.get("id") or call["id"]
+                    function = part.get("function") or {}
+                    call["function"]["name"] += function.get("name") or ""
+                    call["function"]["arguments"] += function.get("arguments") or ""
+                if delta.get("content"):
+                    content += delta["content"]
+                    if not calls:
+                        on_text(content)
+    if on_cost is not None:
+        on_cost(cost)
+    message: dict[str, Any] = {"role": "assistant", "content": content}
+    if calls:
+        message["tool_calls"] = [calls[index] for index in sorted(calls)]
+    return message
+
+
 async def _run_model(
     client: httpx.AsyncClient,
     model: str,
@@ -451,7 +506,10 @@ async def _run_model(
             payload["tools"] = tools
         if options.local_only:
             payload["disable_fallbacks"] = True
-        message = await _chat(client, payload, options.on_cost)
+        if options.on_text is not None:
+            message = await _stream_chat(client, payload, options.on_cost, options.on_text)
+        else:
+            message = await _chat(client, payload, options.on_cost)
         tool_calls = message.get("tool_calls") or []
         if not tool_calls:
             return str(message.get("content") or "").strip()
@@ -696,7 +754,8 @@ async def generate_reply(
 
 def _tracked(action: Action, performed: list[str]) -> Action:
     async def run(arguments: dict[str, Any]) -> str:
-        result = await action.run(arguments)
+        # Shielded: when the person presses "stop", an action already under way still finishes.
+        result = await asyncio.shield(action.run(arguments))
         performed.append(result)
         return result
 
