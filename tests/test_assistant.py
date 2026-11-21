@@ -730,6 +730,10 @@ async def test_time_request_offers_quiz(harness: Any, monkeypatch: pytest.Monkey
     pi.request_time = AsyncMock(return_value=7)
     pi.quiz_available = AsyncMock(return_value=True)
     await instance.on_message(_message(bot.BTN_ASK_TIME, 5))
+    assert _sent(send) == internet_desk.ASK_WHY  # first the reason, by a tap
+    pi.request_time.assert_not_awaited()
+    await instance.on_callback(_callback("nta:s", 5))
+    pi.request_time.assert_awaited_once_with("Тест", "Доделать уроки")
     access.track_time_request.assert_awaited()
     assert bot.BTN_QUIZ in _sent(send)
 
@@ -752,7 +756,7 @@ async def test_no_request_is_sent_at_bedtime(harness: Any, monkeypatch: pytest.M
     instance, send, pi = _kid_with_pi(harness, monkeypatch)
     pi.restriction = AsyncMock(return_value=BEDTIME)
     pi.request_time = AsyncMock(return_value=7)
-    await instance.on_message(_message(bot.BTN_ASK_TIME, 5))
+    await instance.on_callback(_callback("nta:n", 5))
     pi.request_time.assert_not_awaited()
     assert "08:00" in _sent(send)
 
@@ -763,7 +767,7 @@ async def test_pause_request_asks_to_open_without_quiz(harness: Any, monkeypatch
     pi.restriction = AsyncMock(return_value=PAUSE)
     pi.request_time = AsyncMock(return_value=7)
     pi.quiz_available = AsyncMock(return_value=True)
-    await instance.on_message(_message(bot.BTN_ASK_TIME, 5))
+    await instance.on_callback(_callback("nta:n", 5))
     pi.request_time.assert_awaited_once()
     assert "открыть интернет" in _sent(send) and bot.BTN_QUIZ not in _sent(send)
 
@@ -795,7 +799,7 @@ async def test_time_request_failures_are_explained(
 ) -> None:
     instance, send, pi = _kid_with_pi(harness, monkeypatch)
     pi.request_time = AsyncMock(side_effect=error)
-    await instance.on_message(_message(bot.BTN_ASK_TIME, 5))
+    await instance.on_callback(_callback("nta:n", 5))
     assert expected in _sent(send)
 
 
@@ -1928,7 +1932,49 @@ async def test_internet_screen_offers_asking_and_the_quiz(harness: Any, monkeypa
     await instance.on_message(_message(menu.BTN_INTERNET, 5))
     assert _sent(send).startswith("⏳ Интернет")
     buttons = [b.callback_data for row in send.call_args.kwargs["reply_markup"].inline_keyboard for b in row]
-    assert buttons == ["nta", "ntq"]
+    assert buttons == ["nta", "ntd", "ntq"]
+
+
+@pytest.mark.asyncio
+async def test_a_done_chore_reaches_parents_as_the_reason_and_the_photo(
+    harness: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance, send, pi = _kid_with_pi(harness, monkeypatch)
+    pi.request_time = AsyncMock(return_value=7)
+    pi.quiz_available = AsyncMock(return_value=False)
+    monkeypatch.setattr(access, "adult_chat_ids", AsyncMock(return_value=[1, 2]))
+    instance._bot.send_photo = AsyncMock()
+
+    pressed = _callback("ntd", 5)
+    await instance.on_callback(pressed)
+    assert pressed.message.edit_text.call_args.args[0] == internet_desk.CHORE_PROMPT
+    await instance.on_message(_message("убрал комнату", 5))
+    pi.request_time.assert_awaited_once_with("Тест", "Сделал дело: убрал комнату")
+    assert "Запрос отправлен родителям" in _sent(send)
+    instance._bot.send_photo.assert_not_awaited()  # words only: the reason is enough
+
+    # the next message is an ordinary chat again, not a second chore
+    await instance.on_message(_message("расскажи про космос", 5))
+    assert pi.request_time.await_count == 1 and _sent(send) == "ответ"
+
+
+@pytest.mark.asyncio
+async def test_a_chore_wait_can_be_cancelled_and_a_menu_tap_ends_it(
+    harness: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance, send, pi = _kid_with_pi(harness, monkeypatch)
+    pi.request_time = AsyncMock(return_value=7)
+    cancel = _callback("ntx", 5)
+    await instance.on_callback(_callback("ntd", 5))
+    await instance.on_callback(cancel)
+    assert cancel.message.edit_text.call_args.args[0] == internet_desk.CHORE_CANCELLED
+    await instance.on_message(_message("убрал комнату", 5))
+    pi.request_time.assert_not_awaited()
+
+    await instance.on_callback(_callback("ntd", 5))
+    await instance.on_message(_message(menu.BTN_HELP, 5))
+    await instance.on_message(_message("убрал комнату", 5))
+    pi.request_time.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -316,6 +316,9 @@ class LunaBot:
             await self.stories.tell(member, (message.caption or "").strip(), picture.file_id)
             await self._drop_prompt(message)
             return
+        if picture is not None and member.role == "kid" and self.internet.awaiting_chore(user_id):
+            await self.internet.chore(member, (message.caption or "").strip(), picture.file_id)
+            return
         if picture is not None:
             await self._count(user_id, "photo")
             await self._photo(member, (message.caption or "").strip(), picture, message.message_id)
@@ -356,6 +359,10 @@ class LunaBot:
             await self._drop_prompt(message)
             return
         if await self._menu_action(member, text):
+            self.internet.forget_chore(user_id)  # a menu tap means the child moved on
+            return
+        if member.role == "kid" and self.internet.awaiting_chore(user_id):
+            await self.internet.chore(member, text)
             return
         if text.startswith("/start"):
             await self._send(user_id, BACK_AGAIN.format(name=member.name), main_keyboard(member.role))
@@ -430,7 +437,7 @@ class LunaBot:
         elif text == BTN_INTERNET and kid:
             await self.internet.view(member)
         elif text == BTN_ASK_TIME and kid:
-            await self.internet.ask(member, "")
+            await self.internet.ask_why(member)
         elif text == BTN_QUIZ and kid:
             await self.internet.start_quiz(member)
         elif text == BTN_STORY and family:

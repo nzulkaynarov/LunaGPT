@@ -11,21 +11,40 @@ from typing import Any
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import access
 from lunagpt.assistant.llm import QuizQuestion
 from lunagpt.assistant.pi_client import PiClient, PiConflictError, PiNotFoundError, PiUnavailableError
-from lunagpt.assistant.telegram import send_long
+from lunagpt.assistant.telegram import edit_screen, send_long
 from lunagpt.models import AssistantMember
 
 logger = logging.getLogger("lunagpt.assistant.internet")
 
 QuizFn = Callable[[int, int | None], Awaitable[QuizQuestion | None]]
 
-INTERNET_PREFIXES = {"nta", "ntq", "quiz"}
+INTERNET_PREFIXES = {"nta", "ntd", "ntx", "ntv", "ntq", "quiz"}
 BTN_ASK_TIME = "🙏 Попросить время"
+BTN_CHORE = "✅ Сделал дело"
+# Why the child asks: parents decide faster when they see a reason, and a tap needs no typing.
+REASONS = {
+    "s": "📚 Доделать уроки",
+    "g": "🎮 Доиграть или досмотреть",
+    "f": "💬 Договорить с другом",
+    "n": "🙏 Просто прошу",
+}
+ASK_WHY = "🙏 Зачем нужно время? Родители увидят причину и решат."
+CHORE_PROMPT = (
+    "✅ Что ты сделал? Напиши одним сообщением или пришли фото с подписью, например «убрал комнату».\n"
+    "Родители увидят и решат, сколько минут дать."
+)
+CHORE_WAIT = timedelta(minutes=10)
+CHORE_CANCELLED = "Хорошо, ничего не отправила."
+CHORE_NO_WORDS = "сделал дело (на фото)"
+ALREADY_ASKED = "Запрос уже отправлен, дождись ответа родителей."
+NO_ANSWER = "Родители пока не ответили на твою просьбу. Можно попросить ещё раз или подойти к ним 💬"
+WHOLE_DAY_MINUTES = 720  # what HomeSec records for "until the end of the day"
 BTN_QUIZ = "🎯 Викторина +15 мин"
 TIME_POLL_SECONDS = 30
 TIME_REQUEST_TTL = timedelta(hours=24)
@@ -67,7 +86,18 @@ def _inline(text: str, data: str) -> InlineKeyboardButton:
 
 
 def internet_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[_inline(BTN_ASK_TIME, "nta")], [_inline(BTN_QUIZ, "ntq")]])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[_inline(BTN_ASK_TIME, "nta"), _inline(BTN_CHORE, "ntd")], [_inline(BTN_QUIZ, "ntq")]]
+    )
+
+
+def reasons_keyboard() -> InlineKeyboardMarkup:
+    rows = [[_inline(label, f"nta:{code}")] for code, label in REASONS.items()]
+    return InlineKeyboardMarkup(inline_keyboard=[*rows, [_inline("← Назад", "ntv")]])
+
+
+def chore_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[_inline("✖ Отмена", "ntx")]])
 
 
 def quiz_keyboard(options: list[str]) -> InlineKeyboardMarkup:
@@ -93,13 +123,33 @@ class InternetDesk:
         self._make_quiz = make_quiz
         self._today = today
         self._quizzes: dict[int, QuizQuestion] = {}
+        self._chores: dict[int, datetime] = {}  # who is about to say what they did, and until when
 
     async def _say(self, chat_id: int, text: str, reply_markup: InlineKeyboardMarkup | None = None) -> None:
         await send_long(self._bot, chat_id, text, reply_markup)
 
     async def handle(self, callback: CallbackQuery, member: AssistantMember, prefix: str, args: list[str]) -> None:
-        if prefix == "nta":
-            await self.ask(member, "")
+        message = callback.message if isinstance(callback.message, Message) else None
+        if prefix == "nta" and not args:
+            if message is not None:
+                await edit_screen(message, ASK_WHY, reasons_keyboard())
+        elif prefix == "nta":
+            reason = REASONS.get(args[0], "")
+            if message is not None:  # the picker has done its job: no buttons left to press twice
+                await edit_screen(message, f"🙏 Прошу время: {reason.split(' ', 1)[-1].lower()}", None)
+            await self.ask(member, reason.split(" ", 1)[-1])
+        elif prefix == "ntd":
+            self._chores[member.telegram_id] = datetime.now(UTC) + CHORE_WAIT
+            if message is not None:
+                await edit_screen(message, CHORE_PROMPT, chore_keyboard())
+        elif prefix == "ntx":
+            self.forget_chore(member.telegram_id)
+            if message is not None:
+                await edit_screen(message, CHORE_CANCELLED, None)
+        elif prefix == "ntv":
+            if message is not None:
+                text, markup = await self._view(member)
+                await edit_screen(message, text, markup)
         elif prefix == "ntq":
             await self.start_quiz(member)
         elif prefix == "quiz":
@@ -123,52 +173,91 @@ class InternetDesk:
             return f"🎉 Верно! Тебе начислено +{minutes} минут."
         return f"Не совсем. Правильный ответ: {quiz.options[quiz.correct]}. Завтра будет новый шанс!"
 
-    async def view(self, member: AssistantMember) -> None:
+    async def _view(self, member: AssistantMember) -> tuple[str, InlineKeyboardMarkup | None]:
         try:
             restriction = await self._pi.restriction(pi_person(member))
             rows = await self._pi.quota(pi_person(member))
         except PiNotFoundError:
-            await self._say(member.telegram_id, NO_DEVICE)
-            return
+            return NO_DEVICE, None
         except PiUnavailableError:
-            await self._say(member.telegram_id, PI_OFFLINE)
-            return
+            return PI_OFFLINE, None
         lines = [describe_restriction(restriction)] if restriction else []
         lines += [
             f"{r['device']}, {r['category_label']}: {r['used_minutes']} из {r['limit_minutes']} мин" for r in rows
         ]
         if not rows:
             lines.append("Лимитов на сегодня нет.")
-        await self._say(member.telegram_id, "⏳ Интернет\n\n" + "\n".join(lines), internet_keyboard())
+        return "⏳ Интернет\n\n" + "\n".join(lines), internet_keyboard()
+
+    async def view(self, member: AssistantMember) -> None:
+        self.forget_chore(member.telegram_id)
+        await self._say(member.telegram_id, *await self._view(member))
+
+    async def ask_why(self, member: AssistantMember) -> None:
+        """The typed «🙏 Попросить время»: the same reasons as under the button."""
+        await self._say(member.telegram_id, ASK_WHY, reasons_keyboard())
+
+    # ---------- "I did a chore" ----------
+
+    def awaiting_chore(self, user_id: int) -> bool:
+        until = self._chores.get(user_id)
+        if until is not None and until < datetime.now(UTC):
+            del self._chores[user_id]
+            return False
+        return until is not None
+
+    def forget_chore(self, user_id: int) -> None:
+        self._chores.pop(user_id, None)
+
+    async def chore(self, member: AssistantMember, said: str, photo_file_id: str | None = None) -> None:
+        """What the child did goes to the parents as the reason of a time request; a photo goes to them here."""
+        self.forget_chore(member.telegram_id)
+        what = said.strip()[:200] or CHORE_NO_WORDS
+        if not await self._request(member, f"Сделал дело: {what}"):
+            return
+        if photo_file_id is None:
+            return
+        async with self._sessions() as db:
+            parents = await access.adult_chat_ids(db)
+        caption = f"✅ {member.name}: «{what}»\nПросьба о времени пришла в бот HomeSec, ответить можно там."
+        for parent in parents:
+            try:
+                await self._bot.send_photo(parent, photo_file_id, caption=caption)
+            except TelegramAPIError as exc:
+                logger.warning("could not show a chore photo to a parent: %s", type(exc).__name__)
 
     async def ask(self, member: AssistantMember, reason: str) -> None:
+        await self._request(member, reason)
+
+    async def _request(self, member: AssistantMember, reason: str) -> bool:
+        """Send a time request to the parents and tell the child what happened; True when it went out."""
         user_id = member.telegram_id
         try:
             restriction = await self._pi.restriction(pi_person(member))
         except PiUnavailableError:
             await self._say(user_id, PI_OFFLINE)
-            return
+            return False
         if restriction and restriction["kind"] == "bedtime":
             # Parents do not open bedtime at night, so nobody is woken up for it.
             await self._say(user_id, describe_restriction(restriction) + BEDTIME_GOODNIGHT)
-            return
+            return False
         try:
             request_id = await self._pi.request_time(pi_person(member), reason)
         except PiConflictError:
-            await self._say(user_id, "Запрос уже отправлен, дождись ответа родителей.")
-            return
+            await self._say(user_id, ALREADY_ASKED)
+            return False
         except PiNotFoundError:
             await self._say(user_id, NO_DEVICE)
-            return
+            return False
         except PiUnavailableError:
             await self._say(user_id, PI_OFFLINE)
-            return
+            return False
         async with self._sessions() as db:
             await access.track_time_request(db, request_id, user_id)
         if restriction:
             text = "✅ Попросила родителей открыть интернет. Сообщу, когда они ответят."
             await self._say(user_id, f"{describe_restriction(restriction)}\n\n{text}")
-            return  # quiz minutes would not lift a pause
+            return True  # quiz minutes would not lift a pause
         text = "✅ Запрос отправлен родителям. Сообщу, когда они ответят."
         quiz = None
         try:
@@ -178,6 +267,7 @@ class InternetDesk:
         except (PiNotFoundError, PiUnavailableError):
             pass
         await self._say(user_id, text, quiz)
+        return True
 
     async def start_quiz(self, member: AssistantMember) -> None:
         user_id = member.telegram_id
@@ -213,17 +303,19 @@ async def report_time_decisions(bot: Bot, pi: PiClient, session_factory: async_s
         except PiUnavailableError:
             continue
         state = status.get("status") if isinstance(status, dict) else None
+        minutes = int(status.get("minutes") or 0) if isinstance(status, dict) else 0
         if state == "pending":
-            if now - request.created_at > TIME_REQUEST_TTL:
-                async with session_factory() as db:
-                    await access.finish_time_request(db, request.request_id)
-            continue
-        if state != "approved":
+            if now - request.created_at <= TIME_REQUEST_TTL:
+                continue
+            text = NO_ANSWER  # a child is never left waiting for an answer that will not come
+        elif state != "approved":
             text = "Родители пока не добавили время. Поговори с ними 💬"
+        elif minutes >= WHOLE_DAY_MINUTES:
+            text = "🎉 Родители открыли интернет до конца дня!"
         elif status.get("category") == "pause":
-            text = f"🎉 Родители открыли интернет на {status.get('minutes', 0)} минут!"
+            text = f"🎉 Родители открыли интернет на {minutes} минут!"
         else:
-            text = f"🎉 Родители добавили {status.get('minutes', 0)} минут!"
+            text = f"🎉 Родители добавили {minutes} минут!"
         try:
             await send_long(bot, request.telegram_id, text)
         except TelegramAPIError as exc:  # a blocked bot must not hold up everyone else's decisions
