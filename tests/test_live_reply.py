@@ -9,6 +9,7 @@ import httpx
 import pytest
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import SendRichMessageDraft
+from aiogram.types import InputRichMessage
 
 from lunagpt.assistant import live_reply, llm
 from lunagpt.assistant.waiting import Waiting
@@ -115,7 +116,7 @@ async def test_stop_keeps_what_was_written_and_ends_the_wait() -> None:
 async def test_a_refused_rich_draft_falls_back_to_plain_text(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(live_reply, "DRAFT_EVERY_SECONDS", 0)
     bot = _bot()
-    method = SendRichMessageDraft(chat_id=7, draft_id=1, rich_message={"markdown": "x"})
+    method = SendRichMessageDraft(chat_id=7, draft_id=1, rich_message=InputRichMessage(markdown="x"))
     bot.send_rich_message_draft.side_effect = TelegramBadRequest(method, "can't parse")
     live = live_reply.LiveReply(bot, 7)
 
