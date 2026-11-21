@@ -140,7 +140,7 @@ async def test_an_action_under_way_finishes_even_when_stopped() -> None:
 
     performed: list[str] = []
     action = llm._tracked(llm.Action(schema={"function": {"name": "add"}}, run=add_item), performed)
-    task = asyncio.create_task(action.run({}))
+    task: asyncio.Task[str] = asyncio.ensure_future(action.run({}))
     await asyncio.sleep(0.005)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):

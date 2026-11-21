@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import school
 from lunagpt.assistant.reminder_desk import local_now, to_utc
-from lunagpt.assistant.reminders import when_text
+from lunagpt.assistant.reminders import WEEKDAYS, when_text
 from lunagpt.assistant.telegram import DANGER, SUCCESS, Previews, Rich, edit_screen, rich_table, send_long
 from lunagpt.models import AssistantMember, AssistantReminder, AssistantSchedule, AssistantTask
 
@@ -296,7 +296,7 @@ class SchoolDesk:
             text = "📚 Расписания пока нет.\n\nПришли фото расписания с подписью «расписание» или напиши его текстом."
             return text, InlineKeyboardMarkup(inline_keyboard=[back])
         keyboard = [[_button("🗑 Удалить расписание", "skx", DANGER)], back]
-        rows = [(school.SHORT_DAYS[school.WEEKDAYS.index(d)], ", ".join(days[d])) for d in school.WEEKDAYS if d in days]
+        rows = [(school.SHORT_DAYS[WEEKDAYS.index(d)], ", ".join(days[d])) for d in WEEKDAYS if d in days]
         screen = Rich("<h3>📚 Расписание</h3>" + rich_table(rows))
         return screen, InlineKeyboardMarkup(inline_keyboard=keyboard)
 

@@ -1,9 +1,10 @@
 """What Luna knows about herself: recognising the question, what each role may read, and the prompt."""
 
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import (
     about,
@@ -135,7 +136,9 @@ async def test_bot_adds_facts_only_for_questions_about_luna(monkeypatch: pytest.
     session.__aenter__.return_value = AsyncMock()
     desks: dict[str, Any] = {name: MagicMock() for name in ("reminders", "lists", "school", "calendar", "phrases")}
     stories = MagicMock(memories=AsyncMock(return_value=""))
-    context = chat_context.ChatContext(lambda: session, stories=stories, **desks)
+    context = chat_context.ChatContext(
+        cast(async_sessionmaker[AsyncSession], lambda: session), stories=stories, **desks
+    )
     member = AssistantMember(telegram_id=1, name="Зарина", role="kid")
     assert "собрал Хозяин" in await context.about(member, "кто тебя создал?")
     assert await context.about(member, "который час?") == ""

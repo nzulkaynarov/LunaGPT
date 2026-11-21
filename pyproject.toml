@@ -46,6 +46,11 @@ python_version = "3.12"
 strict = true
 ignore_missing_imports = true
 disallow_subclassing_any = false
+# src/lunagpt is a namespace package (no __init__.py). Without these two settings mypy named the
+# modules "assistant.*", so every "from lunagpt… import" resolved to Any and cross-module types
+# went unchecked. tests is on the path because the tests import their helpers as top-level modules.
+mypy_path = "src,tests"
+explicit_package_bases = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

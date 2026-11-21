@@ -1,7 +1,7 @@
 """Family lists: the family adds lines by voice, text or a button and ticks them off; guests never see them."""
 
 from datetime import date, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -46,7 +46,7 @@ def _buttons(markup: Any) -> list[tuple[str, str]]:
 
 
 def _hears(monkeypatch: pytest.MonkeyPatch, reply: str | None) -> None:
-    monkeypatch.setattr(lists.llm, "complete_json_text", AsyncMock(return_value=reply))
+    monkeypatch.setattr("lunagpt.assistant.lists.llm.complete_json_text", AsyncMock(return_value=reply))
 
 
 @pytest.mark.parametrize(
@@ -526,7 +526,7 @@ def _answer_to(prompt: str) -> MagicMock:
 async def _named_by(desk: list_desk.ListDesk, member: AssistantMember, name: str) -> tuple[str, Any]:
     """Answer "how to name it" with this name; the question that comes next."""
     await desk.name_from_reply(member, name)
-    return _sent(desk._bot)
+    return _sent(cast(MagicMock, desk._bot))
 
 
 @pytest.mark.asyncio

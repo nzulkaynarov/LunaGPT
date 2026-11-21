@@ -31,6 +31,7 @@ from lunagpt.assistant import (
     list_desk,
     lists,
     llm,
+    memories,
     memory_desk,
     menu,
     monitor,
@@ -734,13 +735,13 @@ async def test_time_request_offers_quiz(harness: Any, monkeypatch: pytest.Monkey
     instance, send, pi = _kid_with_pi(harness, monkeypatch)
     pi.request_time = AsyncMock(return_value=7)
     pi.quiz_available = AsyncMock(return_value=True)
-    await instance.on_message(_message(bot.BTN_ASK_TIME, 5))
+    await instance.on_message(_message(internet_desk.BTN_ASK_TIME, 5))
     assert _sent(send) == internet_desk.ASK_WHY  # first the reason, by a tap
     pi.request_time.assert_not_awaited()
     await instance.on_callback(_callback("nta:s", 5))
     pi.request_time.assert_awaited_once_with("Тест", "Доделать уроки")
-    access.track_time_request.assert_awaited()
-    assert bot.BTN_QUIZ in _sent(send)
+    cast(AsyncMock, access.track_time_request).assert_awaited()
+    assert internet_desk.BTN_QUIZ in _sent(send)
 
 
 BEDTIME = {"kind": "bedtime", "until": "2026-11-12T08:00", "pause_until": None, "open_until": None}
@@ -774,7 +775,7 @@ async def test_pause_request_asks_to_open_without_quiz(harness: Any, monkeypatch
     pi.quiz_available = AsyncMock(return_value=True)
     await instance.on_callback(_callback("nta:n", 5))
     pi.request_time.assert_awaited_once()
-    assert "открыть интернет" in _sent(send) and bot.BTN_QUIZ not in _sent(send)
+    assert "открыть интернет" in _sent(send) and internet_desk.BTN_QUIZ not in _sent(send)
 
 
 def test_open_window_is_described() -> None:
@@ -786,7 +787,7 @@ def test_open_window_is_described() -> None:
 async def test_ordinary_kid_message_never_mentions_quiz(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     instance, send, _ = _kid_with_pi(harness, monkeypatch)
     await instance.on_message(_message("расскажи про космос", 5))
-    instance.internet._make_quiz.assert_not_awaited()
+    cast(AsyncMock, instance.internet._make_quiz).assert_not_awaited()
     assert _sent(send) == "ответ"
 
 
@@ -814,7 +815,7 @@ async def test_quiz_correct_answer_awards_minutes(harness: Any, monkeypatch: pyt
     pi.quiz_available = AsyncMock(return_value=True)
     pi.quiz_result = AsyncMock(return_value=15)
     instance.internet._make_quiz = AsyncMock(return_value=QUIZ)
-    await instance.on_message(_message(bot.BTN_QUIZ, 5))
+    await instance.on_message(_message(internet_desk.BTN_QUIZ, 5))
     assert send.call_args.kwargs["reply_markup"].inline_keyboard[1][0].callback_data == "quiz:1"
     callback = MagicMock(data="quiz:1", answer=AsyncMock())
     callback.from_user.id = 5
@@ -865,7 +866,8 @@ async def test_reconcile_follows_pi_and_keeps_removed_people_as_guests(monkeypat
     assert result.missing_links == [(3, 5)]
     assert (renamed.name, renamed.role) == ("Миша", "kid")
     db.delete.assert_not_awaited()  # nobody's memory, reminders or lists are ever deleted by a sync
-    assert (removed.role, removed.homesec_person_id) == ("guest", None)
+    assert removed.role == "guest"
+    assert removed.homesec_person_id is None
     assert result.left_family == ["Тест"]
     assert (owner.role, owner.homesec_person_id) == ("owner", 98)  # the owner survives a missing profile
     assert unlinked_guest.name == "Тест"
@@ -1086,7 +1088,7 @@ async def test_quiz_uses_a_varied_topic_on_cloud_models(monkeypatch: pytest.Monk
         }
 
     monkeypatch.setattr(llm, "_chat", fake_chat)
-    monkeypatch.setattr(llm.random, "choice", lambda topics: "космос")
+    monkeypatch.setattr("lunagpt.assistant.llm.random.choice", lambda topics: "космос")
     quiz = await llm.generate_quiz(1)
     assert quiz is not None and quiz.correct == 2
     assert payloads[0]["model"] == "luna-fast"
@@ -1152,7 +1154,8 @@ async def test_memory_view_pages_and_delete_buttons(harness: Any, monkeypatch: p
     instance, _ = _with_memory(harness, monkeypatch, "owner", count=10)
     text, markup = await instance.memories.view(_member("owner"), 1)
     assert "9. факт 8" in text and "(10)" in text
-    data = [b.callback_data for row in markup.inline_keyboard for b in row]
+    assert markup is not None
+    data = [b.callback_data or "" for row in markup.inline_keyboard for b in row]
     assert all(len(item.encode()) <= 64 for item in data)
     assert "mem:0" in data and "mem:2" not in data and "memc" in data
 
@@ -1455,12 +1458,14 @@ async def test_a_family_note_with_list_words_goes_to_family_memory(
 ) -> None:
     instance, memory = _with_memory(harness, monkeypatch, "kid")
     _, _, answer = harness
-    instance.lists.request = AsyncMock(return_value="✅")
-    instance.school.handle_text = AsyncMock()
+    lists_request = AsyncMock(return_value="✅")
+    school_text = AsyncMock()
+    monkeypatch.setattr(instance.lists, "request", lists_request)
+    monkeypatch.setattr(instance.school, "handle_text", school_text)
     await instance.on_message(_message(text))
     memory.family.add.assert_awaited_once_with(1, "Тест", fact)
-    instance.lists.request.assert_not_awaited()
-    instance.school.handle_text.assert_not_awaited()
+    lists_request.assert_not_awaited()
+    school_text.assert_not_awaited()
     answer.assert_not_awaited()
 
 
@@ -1493,7 +1498,7 @@ def _reply_to(text: str, prompt: str) -> Any:
 async def test_answer_to_the_family_prompt_is_kept_word_for_word(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     instance, memory = _with_memory(harness, monkeypatch, "adult")
     _, send, _ = harness
-    await instance.on_message(_reply_to("дача в августе", bot.FAMILY_PROMPT))
+    await instance.on_message(_reply_to("дача в августе", memory_desk.FAMILY_PROMPT))
     memory.family.add.assert_awaited_once_with(1, "Тест", "дача в августе")
     # the family memory that made way for the prompt comes back, the outcome on top
     assert _sent(send) == f"{memory_desk.FAMILY_REPLIES['saved']}\n\n🏠 Общая память пока пуста."
@@ -1508,11 +1513,13 @@ async def test_a_full_family_memory_shows_what_can_be_deleted(
     instance, memory = _with_memory(harness, monkeypatch, "adult")
     _, send, _ = harness
     fact = MagicMock(id=uuid.uuid4(), content="код домофона 12", author_name="Тест", author_id=1)
-    memory.family.add = AsyncMock(return_value=memory_desk.FAMILY_FULL)
+    memory.family.add = AsyncMock(return_value=memories.FAMILY_FULL)
     memory.family.list_facts = AsyncMock(return_value=[fact])
     said = "дача в августе"
-    await instance.on_message(_reply_to(said, bot.FAMILY_PROMPT) if prompt else _message(f"запомни для семьи {said}"))
-    assert _sent(send).startswith(memory_desk.FAMILY_REPLIES[memory_desk.FAMILY_FULL])
+    await instance.on_message(
+        _reply_to(said, memory_desk.FAMILY_PROMPT) if prompt else _message(f"запомни для семьи {said}")
+    )
+    assert _sent(send).startswith(memory_desk.FAMILY_REPLIES[memories.FAMILY_FULL])
     assert "код домофона 12" in _sent(send)
     assert {"🗑 1", "➕ Добавить"} <= set(_labels(send.call_args.kwargs["reply_markup"]))
 
@@ -1526,16 +1533,17 @@ async def test_a_family_request_that_names_a_list_goes_to_the_list(
     harness: Any, monkeypatch: pytest.MonkeyPatch, text: str
 ) -> None:
     instance, memory = _with_memory(harness, monkeypatch, "adult")
-    instance.lists.request = AsyncMock(return_value="✅ Добавила в «Покупки»: молоко")
+    lists_request = AsyncMock(return_value="✅ Добавила в «Покупки»: молоко")
+    monkeypatch.setattr(instance.lists, "request", lists_request)
     await instance.on_message(_message(text))
-    instance.lists.request.assert_awaited_once()
+    lists_request.assert_awaited_once()
     memory.family.add.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_guest_answering_the_family_prompt_writes_nothing(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     instance, memory = _with_memory(harness, monkeypatch, "guest")
-    await instance.on_message(_reply_to("дача в августе", bot.FAMILY_PROMPT))
+    await instance.on_message(_reply_to("дача в августе", memory_desk.FAMILY_PROMPT))
     memory.family.add.assert_not_awaited()
 
 
@@ -1679,7 +1687,7 @@ async def test_photo_stays_attached_to_follow_ups_for_a_while(harness: Any, monk
     assert instance.dialogue.history[5][-2]["content"] == "что это за порода?"  # no second photo mark
 
     clock = time.monotonic() + dialogue.PHOTO_KEPT_SECONDS + 1
-    monkeypatch.setattr(dialogue.time, "monotonic", lambda: clock)
+    monkeypatch.setattr("lunagpt.assistant.dialogue.time.monotonic", lambda: clock)
     await instance.on_message(_message("а теперь про футбол", 5))
     assert answer.call_args.args[5].image is None
 
@@ -1833,7 +1841,7 @@ async def test_story_button_reply_and_photo_reach_the_story_desk(harness: Any, m
     instance.stories.view = AsyncMock()
     instance.stories.tell = AsyncMock()
     _as_member(monkeypatch, _member("kid", 5))
-    await instance.on_message(_message(bot.BTN_STORY, 5))
+    await instance.on_message(_message(memory_desk.BTN_STORY, 5))
     instance.stories.view.assert_awaited_once()
 
     reply = _photo_message("Луна спит на батарее")
@@ -1845,7 +1853,7 @@ async def test_story_button_reply_and_photo_reach_the_story_desk(harness: Any, m
     answer.assert_not_awaited()
 
     _as_member(monkeypatch, _member("guest", 7))
-    await instance.on_message(_message(bot.BTN_STORY, 7))
+    await instance.on_message(_message(memory_desk.BTN_STORY, 7))
     instance.stories.view.assert_awaited_once()  # guests have no stories
     assert not bot.LunaBot._callback_allowed("kid", "csy") and bot.LunaBot._callback_allowed("kid", "csa")
     assert not bot.LunaBot._callback_allowed("guest", "csl")
@@ -2049,7 +2057,7 @@ async def test_an_answered_prompt_leaves_the_chat(harness: Any, monkeypatch: pyt
 
     instance._bot.delete_message.reset_mock()
     await instance.on_message(_message("просто вопрос", 5))  # an ordinary message deletes nothing
-    instance._bot.delete_message.assert_not_awaited()
+    cast(AsyncMock, instance._bot.delete_message).assert_not_awaited()
     answer.assert_awaited_once()
 
 
@@ -2126,7 +2134,7 @@ async def test_a_done_chore_reaches_parents_as_the_reason_and_the_photo(
     pi.request_time = AsyncMock(return_value=7)
     pi.quiz_available = AsyncMock(return_value=False)
     monkeypatch.setattr(access, "adult_chat_ids", AsyncMock(return_value=[1, 2]))
-    instance._bot.send_photo = AsyncMock()
+    monkeypatch.setattr(instance._bot, "send_photo", AsyncMock())
 
     pressed = _callback("ntd", 5)
     await instance.on_callback(pressed)
@@ -2134,7 +2142,7 @@ async def test_a_done_chore_reaches_parents_as_the_reason_and_the_photo(
     await instance.on_message(_message("убрал комнату", 5))
     pi.request_time.assert_awaited_once_with("Тест", "Сделал дело: убрал комнату")
     assert "Запрос отправлен родителям" in _sent(send)
-    instance._bot.send_photo.assert_not_awaited()  # words only: the reason is enough
+    cast(AsyncMock, instance._bot.send_photo).assert_not_awaited()  # words only: the reason is enough
 
     # the next message is an ordinary chat again, not a second chore
     await instance.on_message(_message("расскажи про космос", 5))
@@ -2343,7 +2351,7 @@ async def test_cancelling_the_family_note_brings_family_memory_back(
     ask = _pressed("fama")
     await instance.on_callback(ask)
     ask.message.delete.assert_awaited_once()  # the family memory made way for the prompt
-    assert _sent(send) == bot.FAMILY_PROMPT
+    assert _sent(send) == memory_desk.FAMILY_PROMPT
     cancel = _pressed(prompt_cancel(send.call_args.kwargs["reply_markup"]))
     await instance.on_callback(cancel)
     cancel.message.delete.assert_awaited_once()
@@ -2359,15 +2367,15 @@ async def test_a_family_note_over_the_rate_limit_keeps_its_prompt(
     instance, memory = _with_memory(harness, monkeypatch, "adult")
     _, send, _ = harness
     monkeypatch.setattr(instance.dialogue, "over_rate_limit", MagicMock(return_value=True))
-    await instance.on_message(_reply_to("дача в августе", bot.FAMILY_PROMPT))
+    await instance.on_message(_reply_to("дача в августе", memory_desk.FAMILY_PROMPT))
     assert _sent(send) == bot.TOO_FAST
-    instance._bot.delete_message.assert_not_awaited()
+    cast(AsyncMock, instance._bot.delete_message).assert_not_awaited()
     memory.family.add.assert_not_awaited()
 
     monkeypatch.setattr(instance.dialogue, "over_rate_limit", MagicMock(return_value=False))
-    await instance.on_message(_reply_to("дача в августе", bot.FAMILY_PROMPT))  # the same prompt, a minute later
+    await instance.on_message(_reply_to("дача в августе", memory_desk.FAMILY_PROMPT))  # the same prompt, a minute later
     memory.family.add.assert_awaited_once_with(1, "Тест", "дача в августе")
-    instance._bot.delete_message.assert_awaited_once()
+    cast(AsyncMock, instance._bot.delete_message).assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -2452,7 +2460,7 @@ async def test_an_answer_to_my_days_question_sets_it_and_the_question_goes(
     assert instance.reminders.create_from_prompt.await_args.kwargs == {"asked": prompt}  # it may keep an answer
     instance.reminders.create.assert_not_awaited()
     answer.assert_not_awaited()
-    instance._bot.delete_message.assert_awaited_once()  # the answered question leaves the chat
+    cast(AsyncMock, instance._bot.delete_message).assert_awaited_once()  # the answered question leaves the chat
     assert (await instance.dialogue.turns(5))[-1]["content"] == "🔔 Напомню завтра в 09:00: позвонить"
 
 
@@ -2470,7 +2478,7 @@ async def test_too_fast_an_answer_keeps_the_question(harness: Any, monkeypatch: 
     assert _sent(send) == bot.TOO_FAST
     instance.reminders.create_from_prompt.assert_not_awaited()
     instance.calendar.request_event.assert_not_awaited()
-    instance._bot.delete_message.assert_not_awaited()  # still there to answer in a minute
+    cast(AsyncMock, instance._bot.delete_message).assert_not_awaited()  # still there to answer in a minute
     answer.assert_not_awaited()
 
 
@@ -2487,7 +2495,7 @@ async def test_an_answer_to_the_calendars_question_goes_the_phrases_way(
     call = instance.calendar.request_event.await_args
     assert call.args[1] == "стоматолог в четверг в 15:00"
     assert call.kwargs == {"from_screen": True, "asked": calendar_desk.EVENT_PROMPT}  # it may keep an answer
-    instance._bot.delete_message.assert_awaited_once()
+    cast(AsyncMock, instance._bot.delete_message).assert_awaited_once()
     answer.assert_not_awaited()
 
 

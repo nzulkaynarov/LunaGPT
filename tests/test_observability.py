@@ -2,7 +2,7 @@
 
 import json
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -87,7 +87,7 @@ def test_reactions_read_as_good_bad_or_no_opinion() -> None:
 @pytest.mark.asyncio
 async def test_a_reaction_scores_the_reply_and_can_change_or_go(sessions: Any) -> None:
     langfuse = FakeLangfuse()
-    desk = FeedbackDesk(sessions, langfuse)
+    desk = FeedbackDesk(sessions, cast(Langfuse, langfuse))
     await desk.remember(OWNER, [10, 11], "trace-1")
 
     await desk.on_reaction(_reaction(11, "👎"))
@@ -101,7 +101,7 @@ async def test_a_reaction_scores_the_reply_and_can_change_or_go(sessions: Any) -
 @pytest.mark.asyncio
 async def test_reactions_elsewhere_are_ignored(sessions: Any) -> None:
     langfuse = FakeLangfuse()
-    desk = FeedbackDesk(sessions, langfuse)
+    desk = FeedbackDesk(sessions, cast(Langfuse, langfuse))
     await desk.remember(OWNER, [10], "trace-1")
     await desk.on_reaction(_reaction(99, "👍"))  # a menu or a reminder, not a reply
     bot_event = _reaction(10, "👍")
@@ -112,7 +112,7 @@ async def test_reactions_elsewhere_are_ignored(sessions: Any) -> None:
 
 @pytest.mark.asyncio
 async def test_old_reply_traces_are_forgotten(sessions: Any) -> None:
-    desk = FeedbackDesk(sessions, FakeLangfuse())
+    desk = FeedbackDesk(sessions, cast(Langfuse, FakeLangfuse()))
     await desk.remember(OWNER, [1], "old")
     async with sessions() as db:
         await db.execute(update(AssistantReplyTrace).values(created_at=datetime.now(UTC) - timedelta(days=31)))
@@ -201,7 +201,7 @@ async def test_a_run_scores_and_links_every_case() -> None:
         lambda output, expected: (output == "ok", "" if output == "ok" else "wrong"),
     )
     langfuse = FakeLangfuse()
-    result = await runner.run_suite(suite, langfuse, "run-1")
+    result = await runner.run_suite(suite, cast(Langfuse, langfuse), "run-1")
     assert (result.passed, result.total) == (1, 3)
     assert sorted(result.failures) == ["b: wrong", "c: error: ValueError: model down"]
     assert sorted(value for _, _, value, _ in langfuse.scores.values()) == [0, 0, 1]

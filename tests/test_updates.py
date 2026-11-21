@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import bot, menu, updates
+from lunagpt.config import settings
 from lunagpt.models import AssistantMember
 
 
@@ -29,7 +30,7 @@ def test_the_notice_is_a_cat_joke_and_guests_hear_no_family_news() -> None:
 
 
 def test_notices_wait_for_the_daytime() -> None:
-    offset = bot.settings.luna_utc_offset_hours
+    offset = settings.luna_utc_offset_hours
     assert updates.is_daytime(datetime(2026, 11, 13, 10 - offset, tzinfo=UTC))
     assert not updates.is_daytime(datetime(2026, 11, 13, (23 - offset) % 24, tzinfo=UTC))
 
@@ -62,11 +63,13 @@ async def test_each_person_is_told_once_and_the_button_brings_the_menu(
     assert kid is not None
     callback = MagicMock(data="upd", answer=AsyncMock())
     callback.message = MagicMock(spec=Message, delete=AsyncMock())
-    luna._send = AsyncMock()
+    send = AsyncMock()
+    monkeypatch.setattr(luna, "_send", send)
     await luna._restart(callback, kid)
     callback.message.delete.assert_awaited_once()
-    assert luna._send.await_args.args[1] == updates.RESTARTED
-    assert "⏳ Интернет" in str(luna._send.await_args.args[2])
+    assert send.await_args is not None
+    assert send.await_args.args[1] == updates.RESTARTED
+    assert "⏳ Интернет" in str(send.await_args.args[2])
 
 
 @pytest.mark.asyncio

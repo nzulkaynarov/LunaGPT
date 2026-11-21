@@ -14,6 +14,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import cast  # noqa: E402
 
 NOWHERE = "http://127.0.0.1:9"
 TEST_IMAGE = "pgvector/pgvector:0.8.7-pg17"
@@ -93,7 +94,7 @@ if not os.environ.get("CI"):
 
 import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
-from sqlalchemy import text  # noqa: E402
+from sqlalchemy import Table, text  # noqa: E402
 from sqlalchemy.engine import make_url  # noqa: E402
 from sqlalchemy.exc import OperationalError  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine  # noqa: E402
@@ -156,7 +157,7 @@ async def db_sessions() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     engine = create_async_engine(url.set(database=name))
     async with engine.begin() as connection:
         await connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-        await connection.run_sync(Base.metadata.create_all, tables=TABLES)
+        await connection.run_sync(Base.metadata.create_all, tables=cast(list[Table], TABLES))
     yield async_sessionmaker(engine, expire_on_commit=False)
     await engine.dispose()
     async with admin.connect() as connection:
