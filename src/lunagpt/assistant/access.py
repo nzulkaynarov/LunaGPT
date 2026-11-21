@@ -21,6 +21,7 @@ REJECTED = "rejected"
 EXPIRED = "expired"
 PENDING_TTL = timedelta(days=30)
 MAX_PENDING_APPLICATIONS = 100
+ACCESS_ENDED = "Срок доступа закончился. Попроси взрослого из семьи его продлить."
 
 
 async def get_member(db: AsyncSession, telegram_id: int) -> AssistantMember | None:

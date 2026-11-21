@@ -1155,6 +1155,16 @@ async def test_clear_all_asks_first(harness: Any, monkeypatch: pytest.MonkeyPatc
     memory.forget_all.assert_awaited_once_with(1)
 
 
+@pytest.mark.asyncio
+async def test_clearing_memory_brings_the_memory_screen_back(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, _ = _with_memory(harness, monkeypatch, "kid")
+    callback = _callback("memy")
+    await instance.on_callback(callback)
+    shown = callback.message.edit_text.await_args
+    assert shown.args[0].startswith(f"{memory_desk.FORGOT_ALL}\n\nПока ничего о тебе не запомнила")
+    assert [b.callback_data for row in shown.kwargs["reply_markup"].inline_keyboard for b in row] == ["fam:0", "csi"]
+
+
 @pytest.mark.parametrize("role", ["owner", "adult", "kid", "guest"])
 def test_memory_button_is_for_every_member(role: str) -> None:
     assert menu.BTN_MEMORY in str(menu.main_keyboard(role).keyboard)
@@ -1253,6 +1263,24 @@ async def test_guest_whose_time_ended_is_told_and_costs_nothing(harness: Any, mo
     await instance.on_message(_message("вопрос"))
     answer.assert_not_awaited()
     assert _sent(send) == bot.ACCESS_ENDED
+
+
+@pytest.mark.parametrize("button", [menu.BTN_DAY, menu.BTN_MEMORY, "🔔 Напоминания"])
+@pytest.mark.asyncio
+async def test_guest_whose_time_ended_gets_the_reason_instead_of_a_screen(
+    harness: Any, monkeypatch: pytest.MonkeyPatch, button: str
+) -> None:
+    instance, send, answer = harness
+    _guest_ready(monkeypatch, access_until=datetime.now(UTC) - timedelta(minutes=1))
+    instance.reminders.view = AsyncMock()
+    instance.memories.view = AsyncMock()
+    await instance.on_message(_message(button))
+    assert _sent(send) == bot.ACCESS_ENDED
+    instance.reminders.view.assert_not_awaited()
+    instance.memories.view.assert_not_awaited()
+    answer.assert_not_awaited()
+    await instance.on_message(_message(menu.BTN_HELP))  # help still explains what Luna is
+    assert _sent(send) == menu.HELP_TEXT["guest"]
 
 
 @pytest.mark.asyncio
@@ -1966,6 +1994,9 @@ async def test_buttons_of_the_old_menu_still_work(harness: Any, monkeypatch: pyt
         ("owner", "fhp", True),
         ("adult", "fhi", True),
         ("kid", "fhp", False),
+        ("adult", people.FAMILY_HOME, True),
+        ("kid", people.FAMILY_HOME, False),
+        ("guest", people.FAMILY_HOME, False),
         ("kid", "nta", True),
         ("kid", "ntq", True),
         ("adult", "nta", False),
@@ -1989,6 +2020,17 @@ async def test_family_menu_opens_people_for_adults_only(harness: Any, monkeypatc
         "fhi",
     ]
     answer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_people_lead_back_to_the_family_menu(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance, _, _ = harness
+    _as_member(monkeypatch, _member("owner", 5))
+    callback = _callback(people.FAMILY_HOME, 5)
+    await instance.on_callback(callback)
+    shown = callback.message.edit_text.await_args
+    assert shown.args[0] == menu.FAMILY_MENU
+    assert [b.callback_data for row in shown.kwargs["reply_markup"].inline_keyboard for b in row] == ["fhp", "fhi"]
 
 
 @pytest.mark.asyncio

@@ -309,7 +309,34 @@ async def test_summary_counts_every_state(desk: Any, sessions: Any) -> None:
     text, markup = await desk.summary()
     labels = [row[0].text for row in markup.inline_keyboard]
     assert text == "👥 Люди"
-    assert labels == ["Семья: 2", "Гости: 1", "В ожидании: 1", "Отказано: 1", "🔎 Найти по номеру"]
+    assert labels == ["Семья: 2", "Гости: 1", "В ожидании: 1", "Отказано: 1", "🔎 Найти по номеру", "← Назад"]
+    assert markup.inline_keyboard[-1][0].callback_data == people.FAMILY_HOME  # back to «🏠 Семья»
+
+
+@pytest.mark.asyncio
+async def test_application_and_its_outcome_lead_back_to_the_waiting_ones(desk: Any) -> None:
+    await _apply(desk)
+    assert _shown(await _press_as(desk, f"app:{NEW}"))[1][-1] == "pls:p"
+    text, data = _shown(await _press_as(desk, f"apg:{NEW}", _actor("adult", ADULT)))
+    assert text == "✅ Новый: гость. Решил(а): Аня" and data == ["pls:p"]
+    other = desk._bot.edit_message_text.await_args  # the owner's copy of the card says the same
+    assert other.kwargs["chat_id"] == OWNER
+    assert other.kwargs["reply_markup"].inline_keyboard[0][0].callback_data == "pls:p"
+    assert _shown(await _press_as(desk, f"apr:{NEW}")) == (people.ALREADY_DECIDED, ["pls:p"])
+    assert _shown(await _press_as(desk, "pls:p"))[0] == "В ожидании: пока никого"
+
+
+@pytest.mark.asyncio
+async def test_nobody_free_in_homesec_is_explained_with_a_refresh(desk: Any) -> None:
+    desk._pi.people = AsyncMock(return_value=[PI_PEOPLE[2], PI_PEOPLE[3]])  # one already linked, one a guest
+    await _apply(desk)
+    text, data = _shown(await _press_as(desk, f"app:{NEW}"))
+    assert text.endswith(f"Кто это? {people.NOBODY_FREE}")
+    assert data == [f"app:{NEW}", f"apg:{NEW}", f"apr:{NEW}", "pls:p"]
+    await _press_as(desk, f"apg:{NEW}")
+    assert _shown(await _press_as(desk, f"pgf:{NEW}")) == (people.NOBODY_FREE, [f"pgf:{NEW}", f"pc:{NEW}"])
+    desk._pi.people = AsyncMock(return_value=PI_PEOPLE)  # someone was added in HomeSec
+    assert _shown(await _press_as(desk, f"pgf:{NEW}"))[0] == "Кто это из семьи?"
 
 
 @pytest.mark.asyncio

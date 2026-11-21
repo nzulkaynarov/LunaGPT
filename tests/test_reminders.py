@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram_fakes import fake_bot, last_sent, prompt_cancel
 
-from lunagpt.assistant import brief, reminder_desk, reminders
+from lunagpt.assistant import access, brief, reminder_desk, reminders
 from lunagpt.assistant.reminders import ReminderParts
 from lunagpt.assistant.telegram import Rich, to_plain
 from lunagpt.models import AssistantMember, AssistantReminder
@@ -398,3 +398,68 @@ async def test_city_prompt_can_be_cancelled_and_an_unknown_city_asks_again(
     assert desk.is_city_reply(answer)
     await desk.set_city(member, "ташкент")
     assert "🏙 Город для погоды: Ташкент" in [str(call.args[1]) for call in telegram.send_message.call_args_list]
+
+
+async def _ended_guest(db_sessions: async_sessionmaker[AsyncSession], **values: Any) -> AssistantMember:
+    guest = AssistantMember(
+        telegram_id=3, name="Гость", role="guest", access_until=datetime.now(UTC) - timedelta(hours=1), **values
+    )
+    async with db_sessions() as db:
+        db.add(guest)
+        await db.commit()
+    return guest
+
+
+def _texts(telegram: MagicMock) -> list[str]:
+    return [str(c.args[1]) for c in telegram.send_message.call_args_list]
+
+
+@pytest.mark.asyncio
+async def test_guest_whose_access_ended_hears_it_once_instead_of_rings(
+    db_sessions: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    guest = await _ended_guest(db_sessions, brief_time="07:30")
+    past = datetime.now(UTC) - timedelta(minutes=1)
+    async with db_sessions() as db:
+        db.add(AssistantReminder(member_id=3, text="разово", due_at=past))
+        db.add(AssistantReminder(member_id=3, text="каждый день", due_at=past, repeat="daily"))
+        await db.commit()
+    telegram = _telegram()
+    desk = reminder_desk.ReminderDesk(telegram, db_sessions)
+    assert await desk.ring_due() == 0
+    assert _texts(telegram) == [reminder_desk.PAUSED]  # two rings stopped, one notice
+    assert reminder_desk.PAUSED.startswith(f"🔕 {access.ACCESS_ENDED}")
+    async with db_sessions() as db:
+        series = await db.scalar(select(AssistantReminder).where(AssistantReminder.text == "каждый день"))
+        assert series is not None and series.done_at is None  # the series waits for the access to come back
+        series.due_at = past
+        await db.commit()
+    assert await desk.ring_due() == 0
+    monkeypatch.setattr(reminder_desk, "local_now", lambda: datetime(2026, 11, 11, 7, 31))
+    assert await desk.send_briefs() == 0
+    assert _texts(telegram) == [reminder_desk.PAUSED]  # the next skipped ring and the brief are quiet: the guest knows
+    text, _ = await desk.view(guest)
+    assert "каждый день" in to_plain(text) and "Срок доступа" not in to_plain(text)  # the notice is no reminder
+
+
+@pytest.mark.asyncio
+async def test_brief_of_a_guest_whose_access_ended_gives_way_to_the_same_single_notice(
+    db_sessions: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _ended_guest(db_sessions, brief_time="07:30")
+    telegram = _telegram()
+    weather = AsyncMock()
+    desk = reminder_desk.ReminderDesk(telegram, db_sessions, AsyncMock(), AsyncMock(), weather)
+    morning = datetime(2026, 11, 11, 7, 31)
+    for day in range(2):
+        monkeypatch.setattr(reminder_desk, "local_now", lambda day=day: morning + timedelta(days=day))
+        assert await desk.send_briefs() == 0
+    assert _texts(telegram) == [reminder_desk.PAUSED] and weather.await_count == 0
+    async with db_sessions() as db:  # extended, and ended again: that end is told once too
+        member = await db.get(AssistantMember, 3)
+        assert member is not None
+        member.access_until = datetime.now(UTC) - timedelta(minutes=1)
+        await db.commit()
+    monkeypatch.setattr(reminder_desk, "local_now", lambda: morning + timedelta(days=2))
+    assert await desk.send_briefs() == 0
+    assert _texts(telegram) == [reminder_desk.PAUSED, reminder_desk.PAUSED]

@@ -183,7 +183,8 @@ class AssistantReminder(Base):
     text: Mapped[str] = mapped_column(Text, nullable=False)
     due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     repeat: Mapped[str] = mapped_column(String(10), nullable=False, server_default="none")
-    # "remind" rings the text; "do" has Luna carry the text out at that time ("присылай пять новых слов")
+    # "remind" rings the text; "do" has Luna carry the text out at that time ("присылай пять новых слов");
+    # "notice" is a closed record that a guest was told their access ended (see reminder_desk.NOTICE)
     kind: Mapped[str] = mapped_column(String(10), nullable=False, server_default="remind")
     done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     task_id: Mapped[int | None] = mapped_column(

@@ -52,6 +52,7 @@ NOT_PARSED = "Не получилось разобрать напоминани�
 TOO_MANY = f"У тебя уже {MAX_ACTIVE} напоминаний. Удали лишние в «🗓 Мой день»."
 SNOOZE_GONE = "Это напоминание уже удалено, отложить его нельзя."
 HOMEWORK_DONE = "📝 Задание отметила как сделанное."
+PAUSED = f"🔕 {access.ACCESS_ENDED}\nПока его не продлят, напоминания и утренняя сводка не приходят."
 
 ExtractFn = Callable[[str, datetime, dict[str, object]], Awaitable[reminders.ReminderParts | None]]
 GeocodeFn = Callable[[str], Awaitable[brief.Place | None]]
@@ -60,6 +61,9 @@ ExtraBriefFn = Callable[[int, date], Awaitable[list[str]]]
 TaskFn = Callable[[AssistantMember, str], Awaitable[None]]  # Luna carries out a task she was given for this time
 FinishTaskFn = Callable[[int, int], Awaitable[bool]]  # marks a person's homework done; False when nothing was open
 DO = "do"
+# A closed row recording that a guest was told their access ended: its due time is the end it was about, so the
+# notice comes once per end and again only after access was extended and ended anew. Nothing lists or rings it.
+NOTICE = "notice"
 
 
 def local_now() -> datetime:
@@ -437,7 +441,10 @@ class ReminderDesk:
         sent = 0
         for reminder_id, member_id, text, planned, kind in rings:
             member = members.get(member_id)
-            if member is None or access.access_ended(member):
+            if member is None:
+                continue
+            if access.access_ended(member):
+                await self._tell_access_ended(member)
                 continue
             body = f"🔔 {text or 'Напоминание'}"
             if now - planned > LATE_NOTE_AFTER:
@@ -485,19 +492,50 @@ class ReminderDesk:
                 return
         logger.warning("a reminder could not be delivered after %s tries", len(RING_RETRY_SECONDS) + 1)
 
+    async def _tell_access_ended(self, member: AssistantMember) -> None:
+        """A ring or brief that cannot go out because access ended: the guest hears why, once per end."""
+        until = member.access_until
+        if until is None:
+            return
+        async with self._sessions() as db:
+            told = await db.scalar(
+                select(AssistantReminder.id)
+                .where(
+                    AssistantReminder.member_id == member.telegram_id,
+                    AssistantReminder.kind == NOTICE,
+                    AssistantReminder.due_at >= until,
+                )
+                .limit(1)
+            )
+            if told is not None:
+                return
+            db.add(
+                AssistantReminder(
+                    member_id=member.telegram_id, text=PAUSED, due_at=until, kind=NOTICE, done_at=datetime.now(UTC)
+                )
+            )
+            await db.commit()  # marked first: a failure loses the notice, never repeats it
+        try:
+            await send_long(self._bot, member.telegram_id, PAUSED)
+        except TelegramAPIError as exc:
+            logger.warning("could not tell a guest that access ended: %s", type(exc).__name__)
+
     async def send_briefs(self) -> int:
         now = local_now()
         async with self._sessions() as db:
             members = [
                 m
                 for m in await db.scalars(select(AssistantMember).where(AssistantMember.brief_time.is_not(None)))
-                if brief.is_due(m.brief_time, m.brief_sent_on, now) and not access.access_ended(m)
+                if brief.is_due(m.brief_time, m.brief_sent_on, now)
             ]
             for member in members:
                 member.brief_sent_on = now.date()  # marked first: a failure skips one morning, never spams
             await db.commit()
         sent = 0
         for member in members:
+            if access.access_ended(member):
+                await self._tell_access_ended(member)
+                continue
             try:
                 await send_long(self._bot, member.telegram_id, await self._brief_text(member, now))
                 sent += 1

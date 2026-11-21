@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant.calendar_desk import CALENDAR_PREFIXES
 from lunagpt.assistant.list_desk import LIST_PREFIXES
-from lunagpt.assistant.people import PEOPLE_PREFIXES
+from lunagpt.assistant.people import FAMILY_HOME, PEOPLE_PREFIXES
 from lunagpt.assistant.phrases import PHRASE_PREFIXES
 from lunagpt.assistant.reminder_desk import REMINDER_PREFIXES
 from lunagpt.assistant.school_desk import SCHOOL_PREFIXES
@@ -68,6 +68,7 @@ _PREFIX_GROUPS: list[tuple[frozenset[str] | set[str], str]] = [
     (frozenset({"mem", "memd", "memc", "memy", "fam", "fama", "famd", "famy"}), "memory"),
     (frozenset({"quiz", "ntq"}), "quiz"),
     (frozenset({"nta"}), "internet"),
+    (frozenset({FAMILY_HOME}), "family"),
 ]
 
 

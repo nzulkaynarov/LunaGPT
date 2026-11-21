@@ -41,6 +41,12 @@ def _last(telegram: MagicMock, chat_id: int) -> str:
     return [str(c.args[1]) for c in telegram.send_message.call_args_list if c.args[0] == chat_id][-1]
 
 
+def _screen(callback: MagicMock) -> tuple[str, list[str]]:
+    """What a pressed button redrew its message into: the text and every button's data."""
+    shown = callback.message.edit_text.call_args
+    return str(shown.args[0]), [b.callback_data for row in shown.kwargs["reply_markup"].inline_keyboard for b in row]
+
+
 @pytest.mark.asyncio
 async def test_kid_story_is_approved_and_then_remembered(db_sessions: async_sessionmaker[AsyncSession]) -> None:
     people = await _family(db_sessions)
@@ -99,13 +105,15 @@ async def test_list_brief_and_removal(db_sessions: async_sessionmaker[AsyncSessi
     people = await _family(db_sessions)
     telegram = _telegram()
     desk = stories.StoryDesk(telegram, db_sessions)
-    await desk.handle(_callback("csl:0"), people["kid"], "csl", ["0"])
-    assert _last(telegram, KID) == stories.NONE_YET
+    empty = _callback("csl:0")
+    await desk.handle(empty, people["kid"], "csl", ["0"])
+    assert _screen(empty) == (stories.NONE_YET, ["csa", "csi"])  # the first story to tell, or back
 
     await desk.tell(people["mom"], STORY)
-    await desk.handle(_callback("csl:0"), people["mom"], "csl", ["0"])
-    listing = telegram.send_message.call_args
-    assert STORY in listing.args[1] and listing.kwargs["reply_markup"].inline_keyboard[0][0].callback_data == "csx:1"
+    listing = _callback("csl:0")
+    await desk.handle(listing, people["mom"], "csl", ["0"])
+    text, buttons = _screen(listing)
+    assert STORY in text and buttons == ["csx:1:0", "csi"]
 
     brief_day = next(date.fromordinal(d) for d in range(739000, 739010) if d % stories.BRIEF_EVERY_DAYS == 0)
     assert "🐈 А помнишь?" in (await desk.brief_lines(people["kid"], brief_day))[0]
@@ -162,3 +170,27 @@ async def test_cancelling_the_story_prompt_brings_the_stories_back(
     assert shown.args[1].startswith("🐈 Истории про Луну")
     buttons = [b.callback_data for row in shown.kwargs["reply_markup"].inline_keyboard for b in row]
     assert "csa" in buttons and stories.PHRASE_ASK in buttons
+
+
+@pytest.mark.asyncio
+async def test_story_pages_lead_on_back_and_survive_a_removal(db_sessions: async_sessionmaker[AsyncSession]) -> None:
+    people = await _family(db_sessions)
+    desk = stories.StoryDesk(_telegram(), db_sessions)
+    for n in range(stories.PAGE_SIZE + 1):
+        await desk.tell(people["mom"], f"История номер {n} про Луну")
+    few = _callback("csl:0")
+    await desk.handle(few, people["kid"], "csl", ["0"])
+    assert _screen(few)[1] == ["csl:1", "csi"]  # a child removes nothing, but can always read on or go back
+    last = _callback("csl:1")
+    await desk.handle(last, people["kid"], "csl", ["1"])
+    text, buttons = _screen(last)
+    assert text.endswith("11. История номер 0 про Луну — Камила") and buttons == ["csl:0", "csi"]
+
+    removal = _callback("csx:1:1")  # an adult removes the only story of the last page
+    await desk.handle(removal, people["mom"], "csx", ["1", "1"])
+    text, buttons = _screen(removal)
+    assert text.startswith("🗑 Убрано: «История номер 0 про Луну»") and "1. История номер 10 про Луну" in text
+    assert "csl:1" not in buttons and buttons[-1] == "csi" and len(await desk.approved()) == stories.PAGE_SIZE
+    again = _callback("csx:1:1")  # the same button pressed twice finds the list, not a dead end
+    await desk.handle(again, people["mom"], "csx", ["1", "1"])
+    assert _screen(again)[0].startswith("📖 Истории про Луну")

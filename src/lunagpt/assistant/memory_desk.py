@@ -19,6 +19,7 @@ FAMILY_MEMORY_PREFIXES = {"fam", "fama", "famd", "famy", "famq"}
 FAMILY_NOTE_CANCEL = "famq"  # "✖ Отмена" under the family note prompt: the family memory, removed then, comes back
 MEMORY_PAGE_SIZE = 8
 BTN_STORY = "🐈 Истории про Луну"
+FORGOT_ALL = "Готово, всё забыла."
 FAMILY_PROMPT = (
     "Напиши ответом на это сообщение, что запомнить для всей семьи. "
     "Это увидят все в семье, включая детей, поэтому не пиши пароли и номера карт."
@@ -56,7 +57,7 @@ class MemoryDesk:
         elif prefix == "memc":
             await self._edit(callback, *self._confirm_forget_all())
         elif prefix == "memy":
-            await self._forget_everything(callback, user_id)
+            await self._forget_everything(callback, member)
         elif prefix == "fam":
             await self._edit(callback, *await self.family_view(member, int(args[0])))
         elif prefix == "fama":
@@ -192,8 +193,10 @@ class MemoryDesk:
         )
         return "Забыть всё, что я о тебе знаю, и наш последний разговор? Отменить будет нельзя.", markup
 
-    async def _forget_everything(self, callback: CallbackQuery, user_id: int) -> None:
+    async def _forget_everything(self, callback: CallbackQuery, member: AssistantMember) -> None:
+        """The memory screen comes back, now empty, with the family memory and the stories still a press away."""
         if self.memory is not None:
-            await self.memory.forget_all(user_id)
-        self._forget_conversation(user_id)
-        await self._edit(callback, "Готово, всё забыла.", None)
+            await self.memory.forget_all(member.telegram_id)
+        self._forget_conversation(member.telegram_id)
+        text, markup = await self.view(member, 0)
+        await self._edit(callback, f"{FORGOT_ALL}\n\n{text}", markup)

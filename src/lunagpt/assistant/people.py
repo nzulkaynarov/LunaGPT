@@ -64,6 +64,7 @@ PEOPLE_PREFIXES = frozenset(
     }
 )
 PEOPLE_CANCEL = "pq"  # "✖ Отмена" under the name, number and search prompts; the card or the list stays above
+FAMILY_HOME = "fh"  # "← Назад" under «👥 Люди» redraws «🏠 Семья», which LunaBot owns
 REPLY_INTERVAL_SECONDS = 3600
 NOTIFICATIONS_PER_HOUR = 10
 MAX_LISTED = 30
@@ -85,6 +86,11 @@ CLOSED = "Доступ к Luna закрыт."
 TURNED_DOWN = "К сожалению, доступ к Luna не открыт."
 ALREADY_DECIDED = "По этой заявке уже приняли решение."
 NETWORK_DOWN = "Домашняя сеть не отвечает, семью выбрать пока нельзя."
+NOBODY_FREE = (
+    "В HomeSec нет свободных взрослых и детей: у каждого уже есть свой Telegram. "
+    "Добавь человека в боте HomeSec («📋 Правила» → «👥 Люди») и нажми «🔄 Обновить»."
+)
+BACK_TO_APPLICATIONS = "← К заявкам"
 ROLE_LABELS = {"owner": "глава семьи", "adult": "взрослый", "kid": "ребёнок", "guest": "гость"}
 SECTION_TITLES = {"f": "Семья", "g": "Гости", "p": "В ожидании", "r": "Отказано"}
 APPLICATION_LABELS = {"pending": "в ожидании", "rejected": "отказано", "expired": "не рассмотрена"}
@@ -269,10 +275,16 @@ class PeopleDesk:
             text += f"\n\n{NETWORK_DOWN}"
         else:
             family = [_button(f"👨‍👩‍👧 {p['name']}", f"apf:{user_id}:{p['id']}") for p in people]
-            rows = _pairs(family)
-            text += "\n\nКто это?"
+            rows = _pairs(family) if family else [[_button("🔄 Обновить", f"app:{user_id}")]]
+            text += "\n\nКто это?" if family else f"\n\nКто это? {NOBODY_FREE}"
         rows.append([_button("🏡 Гость", f"apg:{user_id}"), _button("⛔ Отклонить", f"apr:{user_id}", DANGER)])
+        rows.append([_button(BACK_TO_APPLICATIONS, "pls:p")])
         return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+    @staticmethod
+    def _to_applications() -> InlineKeyboardMarkup:
+        """Under a decided application: the applications still waiting are the next thing to look at."""
+        return InlineKeyboardMarkup(inline_keyboard=[[_button(BACK_TO_APPLICATIONS, "pls:p")]])
 
     # ---- decisions ----
 
@@ -281,14 +293,16 @@ class PeopleDesk:
             if chat_id == adult_id:
                 continue
             try:
-                await self._bot.edit_message_text(outcome, chat_id=chat_id, message_id=message_id)
+                await self._bot.edit_message_text(
+                    outcome, chat_id=chat_id, message_id=message_id, reply_markup=self._to_applications()
+                )
             except TelegramAPIError as exc:
                 logger.warning("could not update an application card: %s", type(exc).__name__)
 
     async def _finish(self, callback: CallbackQuery, actor: AssistantMember, applicant_id: int, outcome: str) -> None:
         text = f"{outcome}. Решил(а): {actor.name}"
         await self._close_other_cards(applicant_id, actor.telegram_id, text)
-        await self._edit(callback, text, None)
+        await self._edit(callback, text, self._to_applications())
 
     async def _link_person(self, telegram_id: int, person_id: int) -> tuple[dict[str, Any] | None, str]:
         """Check the choice against the Pi and write the link there; the reason explains a refusal."""
@@ -310,7 +324,7 @@ class PeopleDesk:
         async with self._sessions() as db:
             application = await access.lock_pending(db, applicant_id)
             if application is None:
-                await self._edit(callback, ALREADY_DECIDED, None)
+                await self._edit(callback, ALREADY_DECIDED, self._to_applications())
                 return
             person, problem = await self._link_person(applicant_id, person_id)
             if person is None:
@@ -328,7 +342,7 @@ class PeopleDesk:
         async with self._sessions() as db:
             application = await access.lock_pending(db, applicant_id)
             if application is None:
-                await self._edit(callback, ALREADY_DECIDED, None)
+                await self._edit(callback, ALREADY_DECIDED, self._to_applications())
                 return
             name = application.name
             await access.admit(db, application, name, "guest", None)
@@ -339,7 +353,7 @@ class PeopleDesk:
         async with self._sessions() as db:
             application = await access.lock_pending(db, applicant_id)
             if application is None:
-                await self._edit(callback, ALREADY_DECIDED, None)
+                await self._edit(callback, ALREADY_DECIDED, self._to_applications())
                 return
             name = application.name
             await access.reject(db, application, actor.telegram_id)
@@ -423,6 +437,7 @@ class PeopleDesk:
         }
         rows = [[_button(f"{title}: {counts[key]}", f"pls:{key}")] for key, title in SECTION_TITLES.items()]
         rows.append([_button("🔎 Найти по номеру", "pf")])
+        rows.append([_button("← Назад", FAMILY_HOME)])
         return "👥 Люди", InlineKeyboardMarkup(inline_keyboard=rows)
 
     async def _section(self, key: str) -> View:
@@ -547,9 +562,12 @@ class PeopleDesk:
             people = await self._free_people(telegram_id)
         except (PiNotFoundError, PiUnavailableError):
             return NETWORK_DOWN, self._back(f"pc:{telegram_id}")
+        back = [_button("← Назад", f"pc:{telegram_id}")]
+        if not people:
+            refresh = [_button("🔄 Обновить", f"pgf:{telegram_id}")]
+            return NOBODY_FREE, InlineKeyboardMarkup(inline_keyboard=[refresh, back])
         buttons = [_button(str(p["name"]), f"pgp:{telegram_id}:{p['id']}") for p in people]
-        rows = [*_pairs(buttons), [_button("← Назад", f"pc:{telegram_id}")]]
-        return "Кто это из семьи?", InlineKeyboardMarkup(inline_keyboard=rows)
+        return "Кто это из семьи?", InlineKeyboardMarkup(inline_keyboard=[*_pairs(buttons), back])
 
     def _confirm_exclude(self, telegram_id: int) -> View:
         markup = InlineKeyboardMarkup(

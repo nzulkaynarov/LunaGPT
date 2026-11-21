@@ -74,7 +74,7 @@ from lunagpt.assistant.menu import (
     main_keyboard,
     menu_layout,
 )
-from lunagpt.assistant.people import PEOPLE_CANCEL, PEOPLE_PREFIXES, PeopleDesk
+from lunagpt.assistant.people import FAMILY_HOME, PEOPLE_CANCEL, PEOPLE_PREFIXES, PeopleDesk
 from lunagpt.assistant.phrases import PHRASE_CANCEL, PHRASE_PREFIXES, PhraseDesk
 from lunagpt.assistant.pi_client import PiClient
 from lunagpt.assistant.reminder_desk import CITY_CANCEL, REMINDER_PREFIXES, ReminderDesk
@@ -109,7 +109,7 @@ QuizFn = Callable[[int, int | None], Awaitable[QuizQuestion | None]]
 TranscribeFn = Callable[[str, int, bytes, Callable[[float], None] | None, bool], Awaitable[str | None]]
 SpeakFn = Callable[[str], Awaitable[SpokenReply | None]]
 
-ACCESS_ENDED = "Срок доступа закончился. Попроси взрослого из семьи его продлить."
+ACCESS_ENDED = access.ACCESS_ENDED
 TOO_FAST = "🐾 Помедленнее, я не успеваю за мышкой! Подожди минутку."
 TEXT_ONLY = "Пока я понимаю текст, голосовые, кружки и фото."
 PHOTO_DEFAULT = "Что на фото? Если там задание, помоги с ним."
@@ -439,6 +439,10 @@ class LunaBot:
     async def _menu_action(self, member: AssistantMember, text: str) -> bool:
         """Run the pressed menu button if this role is allowed to use it."""
         text = OLD_BUTTONS.get(text, text)
+        if text in MENU_FEATURES and text != BTN_HELP and access.access_ended(member):
+            # Every button on that screen would refuse, so the screen does not open at all.
+            await self._send(member.telegram_id, ACCESS_ENDED)
+            return True
         adult = member.role in access.ADULT_ROLES
         family = member.role in access.FAMILY_ROLES
         kid = member.role == "kid"
@@ -494,6 +498,8 @@ class LunaBot:
         args = data.split(":")[1:]
         if prefix == updates.UPDATE_PREFIX:
             await self._restart(callback, member)
+        elif prefix == FAMILY_HOME:
+            await self._edit(callback, FAMILY_MENU, family_keyboard())
         elif prefix == "fhp":
             await self._edit(callback, *await self._people.summary())
         elif prefix == "fhi":
@@ -532,7 +538,7 @@ class LunaBot:
             return role in access.ROLES
         if prefix in INTERNET_PREFIXES or prefix in (PHRASE_ASK, PHRASE_CANCEL):
             return role == "kid"
-        if prefix in ("fhp", "fhi"):
+        if prefix in ("fhp", "fhi", FAMILY_HOME):
             return role in access.ADULT_ROLES
         if prefix in MEMORY_PREFIXES or prefix in REMINDER_PREFIXES | SCHOOL_PREFIXES | CALENDAR_PREFIXES:
             return role in access.ROLES

@@ -12,7 +12,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import access
-from lunagpt.assistant.telegram import DANGER, SUCCESS, is_reply_to_prompt, remove_menu, send_prompt
+from lunagpt.assistant.telegram import DANGER, SUCCESS, edit_screen, is_reply_to_prompt, remove_menu, send_prompt
 from lunagpt.models import AssistantCatStory, AssistantMember
 
 logger = logging.getLogger("lunagpt.assistant.stories")
@@ -188,11 +188,15 @@ class StoryDesk:
             await self.view(member)
             return
         if prefix == "csl":
-            await self._list(callback, member, int(args[0]))
+            await self._edit(callback, *await self._list(member, int(args[0])))
             return
         story_id = int(args[0])
         async with self._sessions() as db:
             story = await db.get(AssistantCatStory, story_id)
+        page = int(args[1]) if prefix == "csx" and len(args) > 1 else None  # 🗑 pressed under the list
+        if story is None and page is not None:
+            await self._edit(callback, *await self._list(member, page))
+            return
         if story is None or (prefix != "csx" and story.status != "pending"):
             await self._edit(callback, ALREADY_DECIDED, None)
             return
@@ -213,42 +217,58 @@ class StoryDesk:
             await db.execute(delete(AssistantCatStory).where(AssistantCatStory.id == story_id))
             await db.commit()
         self._approved = None
+        removed = f"🗑 Убрано: «{short(story.text)}»"
         if prefix == "csn":
             await self._edit(callback, f"❌ Не добавлено: «{short(story.text)}»", None)
             await self._tell_author(story.author_id, REJECTED_AUTHOR.format(text=short(story.text)))
+        elif page is not None:
+            text, markup = await self._list(member, page)
+            await self._edit(callback, f"{removed}\n\n{text}", markup)
         else:
-            await self._edit(callback, f"🗑 Убрано: «{short(story.text)}»", None)
+            await self._edit(callback, removed, None)
 
-    async def _list(self, callback: CallbackQuery, member: AssistantMember, page: int) -> None:
+    async def _page(self, page: int) -> list[tuple[int, str, str]]:
+        """One page of approved stories, newest first, with one more row to tell whether a next page exists."""
         async with self._sessions() as db:
-            rows = list(
-                await db.execute(
-                    select(AssistantCatStory.id, AssistantCatStory.text, AssistantMember.name)
-                    .join(AssistantMember, AssistantMember.telegram_id == AssistantCatStory.author_id)
-                    .where(AssistantCatStory.status == "approved")
-                    .order_by(AssistantCatStory.id.desc())
-                    .offset(page * PAGE_SIZE)
-                    .limit(PAGE_SIZE + 1)
-                )
+            rows = await db.execute(
+                select(AssistantCatStory.id, AssistantCatStory.text, AssistantMember.name)
+                .join(AssistantMember, AssistantMember.telegram_id == AssistantCatStory.author_id)
+                .where(AssistantCatStory.status == "approved")
+                .order_by(AssistantCatStory.id.desc())
+                .offset(page * PAGE_SIZE)
+                .limit(PAGE_SIZE + 1)
             )
-        if not rows and page == 0:
-            await self._bot.send_message(member.telegram_id, NONE_YET)
-            return
+            return [(story_id, text, name) for story_id, text, name in rows]
+
+    async def _list(self, member: AssistantMember, page: int) -> tuple[str, InlineKeyboardMarkup]:
+        """The stories screen, drawn in place of the menu; it always leads back to the stories."""
+        page = max(page, 0)
+        rows = await self._page(page)
+        while not rows and page > 0:  # the last story of this page was removed
+            page -= 1
+            rows = await self._page(page)
+        back = [InlineKeyboardButton(text="← Назад", callback_data="csi")]
+        if not rows:
+            tell = [InlineKeyboardButton(text="✍️ Рассказать", callback_data="csa")]
+            return NONE_YET, InlineKeyboardMarkup(inline_keyboard=[tell, back])
         shown = rows[:PAGE_SIZE]
-        lines = [f"{n}. {short(text)} — {name}" for n, (_, text, name) in enumerate(shown, page * PAGE_SIZE + 1)]
+        first = page * PAGE_SIZE + 1
+        lines = [f"{n}. {short(text)} — {name}" for n, (_, text, name) in enumerate(shown, first)]
         buttons: list[list[InlineKeyboardButton]] = []
         if member.role in access.ADULT_ROLES:
             buttons += [
-                [InlineKeyboardButton(text=f"🗑 {n}", callback_data=f"csx:{story_id}", style=DANGER)]
-                for n, (story_id, _, _) in enumerate(shown, page * PAGE_SIZE + 1)
+                [InlineKeyboardButton(text=f"🗑 {n}", callback_data=f"csx:{story_id}:{page}", style=DANGER)]
+                for n, (story_id, _, _) in enumerate(shown, first)
             ]
+        navigation = []
+        if page > 0:
+            navigation.append(InlineKeyboardButton(text="← Раньше", callback_data=f"csl:{page - 1}"))
         if len(rows) > PAGE_SIZE:
-            buttons.append([InlineKeyboardButton(text="Дальше →", callback_data=f"csl:{page + 1}")])
-        await self._bot.send_message(
-            member.telegram_id,
-            "📖 Истории про Луну:\n\n" + "\n".join(lines),
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None,
-        )
+            navigation.append(InlineKeyboardButton(text="Дальше →", callback_data=f"csl:{page + 1}"))
+        if navigation:
+            buttons.append(navigation)
+        buttons.append(back)
+        return "📖 Истории про Луну:\n\n" + "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
 
     async def _tell_author(self, chat_id: int, text: str) -> None:
         try:
@@ -264,4 +284,4 @@ class StoryDesk:
         if message.photo:
             await message.edit_caption(caption=text, reply_markup=markup)
         else:
-            await message.edit_text(text, reply_markup=markup)
+            await edit_screen(message, text, markup)
