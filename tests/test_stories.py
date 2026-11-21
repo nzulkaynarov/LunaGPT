@@ -54,7 +54,10 @@ async def test_kid_story_is_approved_and_then_remembered(db_sessions: async_sess
     desk = stories.StoryDesk(telegram, db_sessions)
 
     await desk.tell(people["kid"], STORY)
-    assert _last(telegram, KID) == stories.SENT
+    assert _last(telegram, KID).startswith(f"{stories.SENT}\n\n🐈 Истории про Луну")  # the screen comes back
+    told = telegram.send_message.call_args
+    buttons = [b.callback_data for row in told.kwargs["reply_markup"].inline_keyboard for b in row]
+    assert "csa" in buttons and "mem:0" in buttons
     review = [c for c in telegram.send_message.call_args_list if c.args[0] == MOM][0]
     assert "Заурбек рассказывает про Луну" in review.args[1]
     assert await desk.memories() == "" and await desk.phrases() == []
@@ -95,9 +98,23 @@ async def test_limits_and_parents_stories(db_sessions: async_sessionmaker[AsyncS
         await desk.tell(people["kid"], f"История номер {n} про Луну")
     await desk.tell(people["kid"], "Ещё одна история про Луну")
     assert _last(telegram, KID) == stories.TOO_MANY
+    back = telegram.send_message.call_args.kwargs["reply_markup"]
+    assert [b.callback_data for row in back.inline_keyboard for b in row] == ["csi"]
+
+    tell = _callback("csa")  # the button says so before anything is typed
+    tell.message.delete = AsyncMock()
+    sent_before = telegram.send_message.await_count
+    await desk.handle(tell, people["kid"], "csa", [])
+    assert _screen(tell) == (stories.TOO_MANY, ["csi"])
+    assert telegram.send_message.await_count == sent_before and tell.message.delete.await_count == 0
 
     await desk.tell(people["mom"], "Луна каждое утро будит всех в шесть")
-    assert _last(telegram, MOM) == stories.ADDED and len(await desk.approved()) == 1
+    assert _last(telegram, MOM).startswith(f"{stories.ADDED}\n\n🐈 Истории про Луну: 1.")
+    assert len(await desk.approved()) == 1
+    adult_tell = _callback("csa")
+    adult_tell.message.delete = AsyncMock()
+    await desk.handle(adult_tell, people["mom"], "csa", [])  # adults' stories never wait
+    assert _last(telegram, MOM) == stories.PROMPT
 
 
 @pytest.mark.asyncio
@@ -142,11 +159,15 @@ async def test_a_too_short_story_brings_a_fresh_prompt_that_still_works(
     people = await _family(db_sessions)
     telegram = _telegram()
     desk = stories.StoryDesk(telegram, db_sessions)
-    await desk.tell(people["kid"], "", photo_file_id="file-1")  # a photo with no caption tells nothing yet
+    await desk.tell(people["kid"], "мяу")
     fresh = _last(telegram, KID)
     assert fresh.startswith(stories.TOO_SHORT) and desk.is_reply(_answer_to(fresh))
+    await desk.tell(people["kid"], "", photo_file_id="file-1")  # a photo with no caption: the caption is missing
+    fresh = _last(telegram, KID)
+    assert fresh == f"{stories.NO_CAPTION}\n{stories.PROMPT}" and desk.is_reply(_answer_to(fresh))
+    telegram.send_photo.assert_not_awaited()
     await desk.tell(people["kid"], STORY)
-    assert _last(telegram, KID) == stories.SENT
+    assert _last(telegram, KID).startswith(stories.SENT)
 
 
 @pytest.mark.asyncio

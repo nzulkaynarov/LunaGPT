@@ -38,6 +38,7 @@ INTRO = (
     "Родители сначала посмотрят рассказ."
 )
 TOO_SHORT = f"Расскажи чуть подробнее: хотя бы {MIN_LENGTH} знаков."
+NO_CAPTION = "Пришли фото ещё раз с подписью: что на нём происходит."
 TOO_LONG = f"Слишком длинно: уложись в {MAX_LENGTH} знаков."
 TOO_MANY = "У тебя уже есть истории, которые ждут родителей. Дождись их ответа 🙂"
 SENT = "✨ Отправила историю родителям. Когда одобрят, я буду её помнить."
@@ -61,6 +62,10 @@ def review_keyboard(story_id: int) -> InlineKeyboardMarkup:
             ]
         ]
     )
+
+
+def back_to_stories() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="← Назад", callback_data="csi")]])
 
 
 def intro_keyboard(role: str) -> InlineKeyboardMarkup:
@@ -91,9 +96,21 @@ class StoryDesk:
     async def intro(self, member: AssistantMember) -> tuple[str, InlineKeyboardMarkup]:
         return INTRO.format(count=len(await self.approved())), intro_keyboard(member.role)
 
-    async def view(self, member: AssistantMember) -> None:
+    async def view(self, member: AssistantMember, note: str = "") -> None:
+        """The stories screen as a new message; a note on top says what just happened."""
         text, markup = await self.intro(member)
-        await self._bot.send_message(member.telegram_id, text, reply_markup=markup)
+        await self._bot.send_message(member.telegram_id, f"{note}\n\n{text}" if note else text, reply_markup=markup)
+
+    async def _waiting_too_many(self, db: AsyncSession, member: AssistantMember) -> bool:
+        """A child may have only a few stories waiting for the parents; adults' stories never wait."""
+        if member.role in access.ADULT_ROLES:
+            return False
+        waiting = await db.scalar(
+            select(func.count())
+            .select_from(AssistantCatStory)
+            .where(AssistantCatStory.author_id == member.telegram_id, AssistantCatStory.status == "pending")
+        )
+        return (waiting or 0) >= MAX_PENDING
 
     async def approved(self) -> list[tuple[str, str]]:
         if self._approved is None:
@@ -133,19 +150,18 @@ class StoryDesk:
         await send_prompt(self._bot, chat_id, PROMPT, STORY_CANCEL, problem)
 
     async def tell(self, member: AssistantMember, text: str, photo_file_id: str | None = None) -> None:
+        """The answer to the story prompt; the stories screen the prompt replaced comes back with the outcome."""
         text = " ".join(text.split())
+        if photo_file_id and not text:
+            await self.ask(member.telegram_id, NO_CAPTION)
+            return
         if not MIN_LENGTH <= len(text) <= MAX_LENGTH:
             await self.ask(member.telegram_id, TOO_SHORT if len(text) < MIN_LENGTH else TOO_LONG)
             return
         adult = member.role in access.ADULT_ROLES
         async with self._sessions() as db:
-            waiting = await db.scalar(
-                select(func.count())
-                .select_from(AssistantCatStory)
-                .where(AssistantCatStory.author_id == member.telegram_id, AssistantCatStory.status == "pending")
-            )
-            if not adult and (waiting or 0) >= MAX_PENDING:
-                await self._bot.send_message(member.telegram_id, TOO_MANY)
+            if await self._waiting_too_many(db, member):  # the button checks first; this is an older prompt
+                await self._bot.send_message(member.telegram_id, TOO_MANY, reply_markup=back_to_stories())
                 return
             story = AssistantCatStory(
                 author_id=member.telegram_id,
@@ -158,7 +174,7 @@ class StoryDesk:
             parents = await access.adult_chat_ids(db)
         if adult:
             self._approved = None
-            await self._bot.send_message(member.telegram_id, ADDED)
+            await self.view(member, ADDED)
             return
         caption = f"🐈 {member.name} рассказывает про Луну:\n«{text}»"
         for parent in parents:
@@ -171,7 +187,7 @@ class StoryDesk:
                     await self._bot.send_message(parent, caption, reply_markup=review_keyboard(story.id))
             except TelegramAPIError as exc:
                 logger.warning("could not ask a parent about a story: %s", type(exc).__name__)
-        await self._bot.send_message(member.telegram_id, SENT)
+        await self.view(member, SENT)
 
     # ---------- buttons ----------
 
@@ -180,6 +196,11 @@ class StoryDesk:
             await self._edit(callback, *await self.intro(member))
             return
         if prefix == "csa":
+            async with self._sessions() as db:
+                too_many = await self._waiting_too_many(db, member)
+            if too_many:  # said before anything is typed, so no story is lost
+                await self._edit(callback, TOO_MANY, back_to_stories())
+                return
             await self.ask(member.telegram_id)
             await remove_menu(callback)
             return

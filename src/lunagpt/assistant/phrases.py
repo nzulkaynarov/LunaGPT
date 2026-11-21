@@ -1,6 +1,7 @@
 """Children make up waiting phrases for Luna; a parent approves each one before the family sees it."""
 
 import logging
+from collections.abc import Awaitable, Callable
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
@@ -9,8 +10,11 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import access
-from lunagpt.assistant.telegram import DANGER, SUCCESS, edit_screen, is_reply_to_prompt, send_prompt
+from lunagpt.assistant.stories import back_to_stories
+from lunagpt.assistant.telegram import DANGER, SUCCESS, edit_screen, is_reply_to_prompt, remove_menu, send_prompt
 from lunagpt.models import AssistantCatPhrase, AssistantMember
+
+ScreenFn = Callable[[AssistantMember, str], Awaitable[None]]  # sends the screen the prompt replaced, a note on top
 
 logger = logging.getLogger("lunagpt.assistant.phrases")
 
@@ -28,6 +32,7 @@ PROMPT = (
 TOO_SHORT = f"Фраза должна быть от {MIN_LENGTH} до {MAX_LENGTH} знаков, в одну строку."
 TOO_MANY = "У тебя уже есть фразы, которые ждут родителей. Дождись их ответа 🙂"
 SENT = "✨ Отправила фразу родителям. Если одобрят, она будет появляться, пока я думаю."
+ADDED = "✅ Добавила фразу."
 APPROVED_KID = "🎉 Родители одобрили твою фразу! Теперь она появляется, пока я думаю:\n«{text}»"
 REJECTED_KID = "Эту фразу родители не добавили:\n«{text}»\nПридумай другую 🙂"
 ALREADY_DECIDED = "Об этой фразе уже решили."
@@ -49,9 +54,10 @@ def shown(text: str, author: str) -> str:
 
 
 class PhraseDesk:
-    def __init__(self, bot: Bot, sessions: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(self, bot: Bot, sessions: async_sessionmaker[AsyncSession], screen: ScreenFn | None = None) -> None:
         self._bot = bot
         self._sessions = sessions
+        self._screen = screen  # the stories screen, where the phrase button sits
         self._approved: list[str] | None = None  # cached until a parent approves or removes one
 
     @staticmethod
@@ -62,27 +68,49 @@ class PhraseDesk:
     async def ask(self, member: AssistantMember, problem: str = "") -> None:
         await send_prompt(self._bot, member.telegram_id, PROMPT, PHRASE_CANCEL, problem)
 
-    async def suggest(self, member: AssistantMember, text: str) -> None:
-        text = text.strip()
-        if not MIN_LENGTH <= len(text) <= MAX_LENGTH or "\n" in text:
-            await self.ask(member, TOO_SHORT)
-            return
+    async def waiting_too_many(self, member: AssistantMember) -> bool:
         async with self._sessions() as db:
             waiting = await db.scalar(
                 select(func.count())
                 .select_from(AssistantCatPhrase)
                 .where(AssistantCatPhrase.author_id == member.telegram_id, AssistantCatPhrase.status == "pending")
             )
-            if (waiting or 0) >= MAX_PENDING:
-                await self._bot.send_message(member.telegram_id, TOO_MANY)
-                return
+        return (waiting or 0) >= MAX_PENDING
+
+    async def start(self, member: AssistantMember, callback: CallbackQuery | None = None) -> None:
+        """😺 pressed: the prompt, or, while a child has enough phrases waiting, why not, before anything is typed."""
+        if await self.waiting_too_many(member):
+            if callback is not None:
+                await self._edit(callback, TOO_MANY, back_to_stories())
+            else:
+                await self._bot.send_message(member.telegram_id, TOO_MANY, reply_markup=back_to_stories())
+            return
+        await self.ask(member)
+        if callback is not None:
+            await remove_menu(callback)
+
+    async def _done(self, member: AssistantMember, note: str) -> None:
+        if self._screen is not None:
+            await self._screen(member, note)
+        else:
+            await self._bot.send_message(member.telegram_id, note)
+
+    async def suggest(self, member: AssistantMember, text: str) -> None:
+        text = text.strip()
+        if not MIN_LENGTH <= len(text) <= MAX_LENGTH or "\n" in text:
+            await self.ask(member, TOO_SHORT)
+            return
+        if await self.waiting_too_many(member):  # the button checks first; this is an older prompt
+            await self._bot.send_message(member.telegram_id, TOO_MANY, reply_markup=back_to_stories())
+            return
+        async with self._sessions() as db:
             phrase = AssistantCatPhrase(author_id=member.telegram_id, text=text)
             db.add(phrase)
             await db.commit()
             parents = await access.adult_chat_ids(db)
         if member.role in access.ADULT_ROLES:
             await self._approve(phrase.id)
-            await self._bot.send_message(member.telegram_id, "✅ Добавила фразу.")
+            await self._done(member, ADDED)
             return
         for parent in parents:
             try:
@@ -93,7 +121,7 @@ class PhraseDesk:
                 )
             except TelegramAPIError as exc:
                 logger.warning("could not ask a parent about a phrase: %s", type(exc).__name__)
-        await self._bot.send_message(member.telegram_id, SENT)
+        await self._done(member, SENT)
 
     async def family_phrases(self) -> list[str]:
         if self._approved is None:

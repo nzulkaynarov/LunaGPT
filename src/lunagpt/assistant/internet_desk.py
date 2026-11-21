@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from lunagpt.assistant import access
 from lunagpt.assistant.llm import QuizQuestion
 from lunagpt.assistant.pi_client import PiClient, PiConflictError, PiNotFoundError, PiUnavailableError
-from lunagpt.assistant.telegram import edit_screen, send_long
+from lunagpt.assistant.telegram import CANCELLED, edit_screen, send_long
 from lunagpt.models import AssistantMember
 
 logger = logging.getLogger("lunagpt.assistant.internet")
@@ -40,7 +40,6 @@ CHORE_PROMPT = (
     "Родители увидят и решат, сколько минут дать."
 )
 CHORE_WAIT = timedelta(minutes=10)
-CHORE_CANCELLED = "Хорошо, ничего не отправила."
 CHORE_NO_WORDS = "сделал дело (на фото)"
 ALREADY_ASKED = "Запрос уже отправлен, дождись ответа родителей."
 NO_ANSWER = "Родители пока не ответили на твою просьбу. Можно попросить ещё раз или подойти к ним 💬"
@@ -142,10 +141,11 @@ class InternetDesk:
             self._chores[member.telegram_id] = datetime.now(UTC) + CHORE_WAIT
             if message is not None:
                 await edit_screen(message, CHORE_PROMPT, chore_keyboard())
-        elif prefix == "ntx":
+        elif prefix == "ntx":  # like every other cancel: «Отменила», and the screen that asked comes back
             self.forget_chore(member.telegram_id)
             if message is not None:
-                await edit_screen(message, CHORE_CANCELLED, None)
+                text, markup = await self._view(member)
+                await edit_screen(message, f"{CANCELLED}\n\n{text}", markup)
         elif prefix == "ntv":
             if message is not None:
                 text, markup = await self._view(member)

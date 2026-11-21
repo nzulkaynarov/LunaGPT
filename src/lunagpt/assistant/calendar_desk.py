@@ -67,6 +67,7 @@ NOT_LINKED = "Сначала подключи календарь: «🗓 Мой 
 NOT_UNDERSTOOD = "Не поняла, на когда. Напиши, например: «добавь в календарь стоматолог в четверг в 15:00»."
 NOT_PARSED = "Не получилось разобрать событие, попробуй ещё раз чуть позже."
 EXPIRED = "Это уже неактуально, напиши ещё раз."
+CANCELLED = "Отменила, в календарь ничего не добавила."
 CONFIRM_UNLINK = (
     "🔌 Отключить календарь?\n\nСобытия в самом Google Calendar останутся, но я перестану показывать их "
     "и добавлять новые. Чтобы подключить его снова, нужно будет ещё раз прислать адрес."
@@ -279,11 +280,11 @@ class CalendarDesk:
         if prefix == UNLINK_YES:
             await self._set_calendar_id(user_id, None)
         elif prefix == "caly":
-            await self._edit(callback, await self._add_pending(user_id, token), None)
+            await self._edit(callback, *await self._add_pending(user_id, token))
             return
         elif prefix == "caln":
-            cancelled = self._pending.take(user_id, token) is not None
-            await self._edit(callback, "Отменила, в календарь ничего не добавила." if cancelled else EXPIRED, None)
+            self._pending.take(user_id, token)  # a cancel is a cancel even on a preview that is long gone
+            await self._edit(callback, CANCELLED, None)
             return
         await self._edit(callback, *await self.view(user_id))
 
@@ -361,23 +362,31 @@ class CalendarDesk:
             await send_long(self._bot, user_id, NOT_UNDERSTOOD)
             return
         token = self._pending.keep(user_id, planned)
+        await send_long(self._bot, user_id, *self._preview(planned, token, now.date()))
+
+    @staticmethod
+    def _preview(planned: PlannedEvent, token: str, today: date, problem: str = "") -> tuple[str, InlineKeyboardMarkup]:
+        """The event waiting for "✅ Добавить"; after a failed try it comes again with what went wrong on top."""
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[[_button("✅ Добавить", f"caly:{token}", SUCCESS), _button("✖ Отмена", f"caln:{token}")]]
         )
-        preview = f"📅 Добавить в календарь?\n\n{planned.title}\n{event_when(planned, now.date())}"
-        await send_long(self._bot, user_id, preview, keyboard)
+        preview = f"📅 Добавить в календарь?\n\n{planned.title}\n{event_when(planned, today)}"
+        return (f"{problem}\n\n{preview}" if problem else preview), keyboard
 
-    async def _add_pending(self, user_id: int, token: str | None) -> str:
+    async def _add_pending(self, user_id: int, token: str | None) -> tuple[str, InlineKeyboardMarkup | None]:
         planned = self._pending.take(user_id, token)
         calendar_id = await self._calendar_id(user_id)
-        if planned is None or self._calendar is None or not calendar_id:
-            return EXPIRED
+        if planned is None or token is None or self._calendar is None or not calendar_id:
+            return EXPIRED, None
         try:
             await self._calendar.add(calendar_id, planned.title, planned.start, planned.end, planned.all_day)
         except CalendarError as exc:
-            return NOT_SHARED.format(email=self._calendar.email) if exc.kind == "not_shared" else UNAVAILABLE
+            # The preview stays with its buttons, so "later" is one more press, not typing the event again.
+            self._pending.keep(user_id, planned, token)
+            problem = NOT_SHARED.format(email=self._calendar.email) if exc.kind == "not_shared" else UNAVAILABLE
+            return self._preview(planned, token, local_now().date(), problem)
         self._cache.pop(user_id, None)
-        return f"✅ Добавила в календарь: {planned.title}, {event_when(planned, local_now().date())}"
+        return f"✅ Добавила в календарь: {planned.title}, {event_when(planned, local_now().date())}", None
 
     # ---------- tasks copied to the calendar ----------
 

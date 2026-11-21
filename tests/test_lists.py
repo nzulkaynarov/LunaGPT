@@ -299,10 +299,13 @@ async def test_a_personal_list_is_seen_only_by_its_owner(
     async with db_sessions() as db:
         mine = await db.scalar(select(AssistantFamilyList.id).where(AssistantFamilyList.owner_id == MOM))
         item = await db.scalar(select(AssistantFamilyListItem.id).where(AssistantFamilyListItem.list_id == mine))
-    for prefix, arg in (("flo", mine), ("fla", mine), ("flc", mine), ("flt", item)):
-        peek = _callback(f"{prefix}:{arg}")
-        await desk.handle(peek, people["kid"], prefix, [str(arg)])
-        assert edited(peek.message) == list_desk.LIST_GONE  # the child gets nothing
+    for prefix, args in (("flo", [mine]), ("fla", [mine]), ("flc", [mine]), ("flt", [item]), ("flt", [item, mine])):
+        peek = _callback(":".join(map(str, [prefix, *args])))
+        await desk.handle(peek, people["kid"], prefix, [str(arg) for arg in args])
+        shown = edited(peek.message)  # the child gets only their own overview
+        assert shown == f"{list_desk.LIST_GONE}\n\n{list_desk.OVERVIEW}"
+        markup = peek.message.edit_text.call_args.kwargs["reply_markup"]
+        assert f"flo:{mine}" not in [b[1] for b in _buttons(markup)]
     async with db_sessions() as db:
         still = await db.get(AssistantFamilyListItem, item)
         assert still is not None and still.done_at is None
@@ -402,3 +405,105 @@ async def test_an_empty_answer_brings_a_fresh_prompt_that_still_works(
     assert desk.is_add_reply(again)
     await desk.add_from_reply(people["mom"], again, "молоко")
     assert "✅ Добавила в «Покупки»: молоко" in _sent(telegram)[0]
+
+
+async def _shopping(desk: list_desk.ListDesk, member: AssistantMember) -> AssistantFamilyList:
+    async with desk._sessions() as db:
+        found = await desk._named(db, member, "Покупки", personal=False, create=False)
+    assert found is not None
+    return found
+
+
+@pytest.mark.asyncio
+async def test_adding_what_is_already_there_says_so_not_that_the_list_is_full(
+    db_sessions: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    people = await _family(db_sessions)
+    telegram = _telegram()
+    desk = list_desk.ListDesk(telegram, db_sessions)
+    reply = MagicMock(spec=Message)
+    reply.reply_to_message = MagicMock(text=list_desk.ADD_PROMPT.format(name="Покупки"))
+    await desk.add_from_reply(people["mom"], reply, "молоко, хлеб")
+    await desk.add_from_reply(people["kid"], reply, "молоко, хлеб")
+    note = _sent(telegram)[0]
+    assert note.startswith("Уже есть в «Покупки»: молоко, хлеб") and list_desk.LIST_FULL not in note
+    await desk.add_from_reply(people["kid"], reply, "Хлеб, сыр")
+    assert _sent(telegram)[0].startswith("✅ Добавила в «Покупки»: сыр. Уже есть: Хлеб")
+    _hears(monkeypatch, '{"action": "add", "list": "Покупки", "items": ["молоко", "хлеб"]}')
+    assert await desk.request(people["kid"], "добавь молоко и хлеб в покупки") == "Уже есть в «Покупки»: молоко, хлеб"
+
+
+@pytest.mark.asyncio
+async def test_a_full_list_says_what_did_not_fit(db_sessions: async_sessionmaker[AsyncSession]) -> None:
+    people = await _family(db_sessions)
+    telegram = _telegram()
+    desk = list_desk.ListDesk(telegram, db_sessions)
+    shopping = await _shopping(desk, people["mom"])
+    async with db_sessions() as db:
+        added = await desk._add(db, shopping, [f"пункт {n}" for n in range(list_desk.MAX_OPEN_ITEMS - 1)], MOM)
+    assert len(added.added) == list_desk.MAX_OPEN_ITEMS - 1
+    reply = MagicMock(spec=Message)
+    reply.reply_to_message = MagicMock(text=list_desk.ADD_PROMPT.format(name="Покупки"))
+    await desk.add_from_reply(people["kid"], reply, "сыр, пункт 1, чай")
+    note = _sent(telegram)[0]
+    assert note.startswith("✅ Добавила в «Покупки»: сыр. Уже есть: пункт 1. Не поместилось: чай. ")
+    assert list_desk.LIST_FULL in note
+    await desk.add_from_reply(people["kid"], reply, "кофе")
+    assert _sent(telegram)[0].startswith(f"Не поместилось: кофе. {list_desk.LIST_FULL}")
+    assert await desk.add_from_chat(people["mom"], "Покупки", ["кофе", "сыр"]) == (
+        f"Ничего нового в «Покупки». Уже были в списке: сыр. "
+        f"Не добавлено, список полон ({list_desk.MAX_OPEN_ITEMS} пунктов): кофе."
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_line_cleared_on_another_screen_redraws_its_list(
+    db_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    people = await _family(db_sessions)
+    telegram = _telegram()
+    desk = list_desk.ListDesk(telegram, db_sessions)
+    shopping = await _shopping(desk, people["mom"])
+    async with db_sessions() as db:
+        await desk._add(db, shopping, ["молоко", "хлеб"], MOM)
+    await desk._send_list(people["kid"], shopping.id)  # Dad's screen, still open
+    milk = _buttons(_sent(telegram)[1])[0][1]
+    assert milk.endswith(f":{shopping.id}")  # a line's button knows its list
+
+    mom_tick = _callback(milk)
+    await desk.handle(mom_tick, people["mom"], "flt", milk.split(":")[1:])
+    await desk.handle(_callback(f"flc:{shopping.id}"), people["mom"], "flc", [str(shopping.id)])
+
+    late = _callback(milk)
+    await desk.handle(late, people["kid"], "flt", milk.split(":")[1:])
+    shown = edited(late.message)
+    assert shown.startswith(f"{list_desk.ITEM_GONE}\n🛒 Покупки") and "осталось 1" in shown
+    markup = late.message.edit_text.call_args.kwargs["reply_markup"]
+    assert ("⬅️ Все списки", "flb") in _buttons(markup)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefix", ["fla", "flc", "flo", "flt"])
+async def test_a_button_on_a_list_that_went_away_leads_to_all_lists(
+    db_sessions: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch, prefix: str
+) -> None:
+    people = await _family(db_sessions)
+    telegram = _telegram()
+    desk = list_desk.ListDesk(telegram, db_sessions)
+    _hears(monkeypatch, '{"action": "add", "list": "Дача", "items": ["шланг"]}')
+    await desk.request(people["mom"], "добавь шланг в список дача")
+    async with db_sessions() as db:
+        dacha = await db.scalar(select(AssistantFamilyList.id).where(AssistantFamilyList.name == "Дача"))
+        item = await db.scalar(select(AssistantFamilyListItem.id).where(AssistantFamilyListItem.list_id == dacha))
+    await desk.handle(_callback(f"flt:{item}:{dacha}"), people["mom"], "flt", [str(item), str(dacha)])
+    await desk.handle(_callback(f"flc:{dacha}"), people["mom"], "flc", [str(dacha)])
+    assert await desk.names(people["mom"]) == (["Покупки", "Дела по дому"], [])
+
+    data = f"flt:{item}:{dacha}" if prefix == "flt" else f"{prefix}:{dacha}"  # on the child's older screen
+    late = _callback(data)
+    late.message.delete = AsyncMock()
+    await desk.handle(late, people["kid"], prefix, data.split(":")[1:])
+    assert edited(late.message) == f"{list_desk.LIST_GONE}\n\n{list_desk.OVERVIEW}"
+    markup = late.message.edit_text.call_args.kwargs["reply_markup"]
+    assert [b[0] for b in _buttons(markup)][:2] == ["🛒 Покупки · 0", "🧹 Дела по дому · 0"]
+    late.message.delete.assert_not_awaited()

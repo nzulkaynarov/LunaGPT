@@ -443,6 +443,33 @@ async def test_guest_whose_access_ended_hears_it_once_instead_of_rings(
 
 
 @pytest.mark.asyncio
+async def test_a_one_off_reminder_missed_while_access_ended_rings_after_the_extension(
+    db_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    await _ended_guest(db_sessions)
+    friday = datetime.now(UTC) - timedelta(minutes=30)
+    async with db_sessions() as db:
+        db.add(AssistantReminder(member_id=3, text="забрать посылку", due_at=friday))
+        await db.commit()
+    telegram = _telegram()
+    desk = reminder_desk.ReminderDesk(telegram, db_sessions)
+    assert await desk.ring_due() == 0 and await desk.ring_due() == 0
+    assert _texts(telegram) == [reminder_desk.PAUSED]  # told once, and the reminder is not lost
+    async with db_sessions() as db:
+        parcel = await db.scalar(select(AssistantReminder).where(AssistantReminder.text == "забрать посылку"))
+        assert parcel is not None and parcel.done_at is None and parcel.due_at == friday
+
+        member = await db.get(AssistantMember, 3)  # an adult extends the access
+        assert member is not None
+        member.access_until = datetime.now(UTC) + timedelta(days=7)
+        await db.commit()
+    assert await desk.ring_due() == 1
+    rang = _texts(telegram)[-1]
+    assert rang.startswith("🔔 забрать посылку") and "должна была напомнить" in rang and "выключена" not in rang
+    assert await desk.ring_due() == 0  # it rings once
+
+
+@pytest.mark.asyncio
 async def test_brief_of_a_guest_whose_access_ended_gives_way_to_the_same_single_notice(
     db_sessions: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -150,33 +150,42 @@ def prompt_markup(cancel: str) -> InlineKeyboardMarkup:
     )
 
 
-async def send_prompt(bot: Bot, chat_id: int, prompt: str, cancel: str, problem: str = "") -> None:
+async def send_prompt(bot: Bot, chat_id: int, prompt: str, cancel: str, problem: str = "") -> Message:
     """Ask for an answer by reply. After a wrong answer the same prompt comes again with one line above it saying
     what was wrong, so the person always has a prompt to answer; answers are matched by the prompt text."""
     text = f"{problem}\n{prompt}" if problem else prompt
-    await bot.send_message(chat_id, text, reply_markup=prompt_markup(cancel))
+    sent: Message = await bot.send_message(chat_id, text, reply_markup=prompt_markup(cancel))
+    return sent
+
+
+MAX_PREVIEWS = 5  # previews one person may have waiting at once; the oldest goes first
 
 
 class Previews[T]:
-    """The one preview per person that waits for "✅": a newer preview replaces it. Each preview's buttons carry
-    its own token, so a press on an older one finds nothing instead of saving what the newest one shows."""
+    """Previews that wait for "✅", each under its own token: the token goes into that preview's buttons, so every
+    preview saves exactly what it shows, however many came after it. A person keeps a few at most."""
 
     def __init__(self) -> None:
-        self._waiting: dict[int, tuple[str, T]] = {}
+        self._waiting: dict[int, dict[str, T]] = {}
 
-    def keep(self, user_id: int, item: T) -> str:
-        """Hold the item until its preview is answered; the token goes into the preview's buttons."""
-        token = secrets.token_hex(4)
-        self._waiting[user_id] = (token, item)
+    def keep(self, user_id: int, item: T, token: str | None = None) -> str:
+        """Hold the item until its preview is answered; the token goes into the preview's buttons. A token given
+        back puts an item that could not be saved under its old buttons again."""
+        token = token or secrets.token_hex(4)
+        waiting = self._waiting.setdefault(user_id, {})
+        waiting.pop(token, None)
+        waiting[token] = item
+        while len(waiting) > MAX_PREVIEWS:
+            del waiting[next(iter(waiting))]
         return token
 
     def take(self, user_id: int, token: str | None) -> T | None:
-        """The item this preview showed, once; None when a newer preview replaced it or it was answered."""
-        waiting = self._waiting.get(user_id)
-        if waiting is None or token is None or waiting[0] != token:
-            return None
-        del self._waiting[user_id]
-        return waiting[1]
+        """The item this preview showed, once; None when it was answered already or is long gone."""
+        waiting = self._waiting.get(user_id, {})
+        item = waiting.pop(token, None) if token is not None else None
+        if not waiting:
+            self._waiting.pop(user_id, None)
+        return item
 
 
 async def remove_menu(callback: CallbackQuery) -> None:

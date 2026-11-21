@@ -137,6 +137,11 @@ FAMILY_REQUEST = re.compile(
     r"[\s:,—-]*(?:что\s+)?(?P<fact>\S.*)$",
     re.IGNORECASE | re.DOTALL,
 )
+# «запиши для всех в покупки молоко» names a list: the list route takes it, not the family memory.
+NAMES_A_LIST = re.compile(
+    r"^в\s+(?:наш\w*\s+|семейн\w*\s+|общ\w*\s+|мо[йи]\s+|личн\w*\s+|домашн\w*\s+)?(?:список|покупки|дела)\b",
+    re.IGNORECASE,
+)
 SAFETY_PATTERN = re.compile(
     r"суицид|покончить с собой|убить себя|не хочу жить|порезать себя|"
     r"меня бьют|меня бьёт|меня бьет|меня трогает|домогает|меня травят|буллят|шантажиру",
@@ -152,6 +157,10 @@ def family_request(text: str) -> str | None:
     """The note someone explicitly asked to keep for the family, if this message is such a request."""
     match = FAMILY_REQUEST.match(text)
     return match.group("fact").strip() if match else None
+
+
+def names_a_list(fact: str) -> bool:
+    return bool(NAMES_A_LIST.match(fact))
 
 
 def google_calendar() -> GoogleCalendar | None:
@@ -215,8 +224,8 @@ class LunaBot:
             calendar=calendar is not None,
             finish_task=self.school.mark_done,
         )
-        self.phrases = PhraseDesk(bot, session_factory)
         self.stories = StoryDesk(bot, session_factory)
+        self.phrases = PhraseDesk(bot, session_factory, screen=self.stories.view)
         self.lists = ListDesk(bot, session_factory)
         self.dialogue = Dialogue(lambda: self._memory)
         self.memories = MemoryDesk(bot, memory, self.dialogue.forget)
@@ -390,8 +399,10 @@ class LunaBot:
         if text.startswith("/"):
             await self._send(user_id, HELP_TEXT[member.role], main_keyboard(member.role))
             return
-        # «запомни для семьи, что надо купить корм» is a note for the family, though it has a list's words in it.
-        if member.role in access.FAMILY_ROLES and family_request(text) is not None:
+        # «запомни для семьи, что надо купить корм» is a note for the family, though it has a list's words in it;
+        # «запиши для всех в покупки молоко» names the list it is for, so it goes on to the list route.
+        fact = family_request(text) if member.role in access.FAMILY_ROLES else None
+        if fact is not None and not names_a_list(fact):
             await self._chat(member, text)
             return
         if is_reminder_request(text):
@@ -471,7 +482,7 @@ class LunaBot:
         elif text == BTN_STORY and family:
             await self.stories.view(member)
         elif text == BTN_PHRASE and kid:
-            await self.phrases.ask(member)
+            await self.phrases.start(member)
         else:
             return False
         feature = MENU_FEATURES.get(text)
@@ -506,8 +517,7 @@ class LunaBot:
             await remove_menu(callback)
             await self._people.send_invite(user_id)
         elif prefix == PHRASE_ASK:
-            await self.phrases.ask(member)
-            await remove_menu(callback)
+            await self.phrases.start(member, callback)
         elif prefix == PHRASE_CANCEL:
             await remove_menu(callback)
             await self.stories.view(member)
@@ -647,10 +657,11 @@ class LunaBot:
         if not scheduled and not self.dialogue.allow_request(user_id):
             await self._send(user_id, TOO_FAST)
             return
+        from_prompt = family_note is not None  # an answer to the family memory's own prompt
         if member.role in access.FAMILY_ROLES and image is None and not scheduled:
             family_note = family_note or family_request(text)
         if family_note is not None:
-            await self.memories.save_family_note(member, family_note)
+            await self.memories.save_family_note(member, family_note, from_prompt)
             return
         async with self._sessions() as db:
             current = await access.get_member(db, user_id)

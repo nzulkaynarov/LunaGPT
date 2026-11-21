@@ -31,6 +31,7 @@ NOT_READ = "Не получилось прочитать, попробуй ещ�
 NO_SCHEDULE = "Не нашла здесь расписание уроков. Пришли фото расписания или напиши его текстом."
 NO_TASKS = "Не нашла здесь заданий. Напиши, например: «задали по математике № 125 к пятнице»."
 EXPIRED = "Это уже неактуально, пришли ещё раз."
+CANCELLED = "Отменила, ничего не сохранила."
 CONFIRM_DELETE = "🗑 Удалить расписание целиком?\n\nЧтобы вернуть его, нужно будет прислать расписание заново."
 
 
@@ -151,7 +152,7 @@ class SchoolDesk:
             remind_at = school.reminder_time(due, now) if due else None
             planned.append(Planned(item.subject.strip(), item.task.strip(), due, remind_at))
         token = self._pending_tasks.keep(user_id, planned)
-        lines = ["📝 Записала:\n"]
+        lines = ["📝 Вот что нашла:\n"]
         for p in planned:
             line = f"• {school.task_line(p.subject, p.task)} — {school.due_text(p.due, now.date())}"
             if p.remind_at:
@@ -167,14 +168,17 @@ class SchoolDesk:
     async def handle(self, callback: CallbackQuery, member: AssistantMember, prefix: str, args: list[str]) -> None:
         user_id = member.telegram_id
         token = args[0] if args else None
-        if prefix == "sky":
-            await self._edit(callback, await self._save_schedule(user_id, token), None)
-        elif prefix == "tky":
-            await self._edit(callback, await self._save_tasks(user_id, token), None)
+        if prefix in ("sky", "tky"):
+            saved = await (self._save_schedule if prefix == "sky" else self._save_tasks)(user_id, token)
+            if saved is None:
+                await self._edit(callback, EXPIRED, None)
+            else:
+                label, screen = ("📚 Расписание", "sk") if prefix == "sky" else ("📝 Домашка", "tk")
+                await self._edit(callback, saved, self._saved_keyboard(label, screen))
         elif prefix in ("skn", "tkn"):
-            pending = self._pending_schedule if prefix == "skn" else self._pending_tasks
-            cancelled = pending.take(user_id, token) is not None
-            await self._edit(callback, "Отменила, ничего не сохранила." if cancelled else EXPIRED, None)
+            # A cancel is a cancel even on a preview that is long gone: nothing was saved either way.
+            (self._pending_schedule if prefix == "skn" else self._pending_tasks).take(user_id, token)
+            await self._edit(callback, CANCELLED, None)
         elif prefix == "skx":
             await self._edit(callback, *self._confirm_delete())
         elif prefix == "skxy":
@@ -196,16 +200,22 @@ class SchoolDesk:
             await edit_screen(callback.message, text, markup)
 
     @staticmethod
+    def _saved_keyboard(label: str, data: str) -> InlineKeyboardMarkup:
+        """What was saved is a press away, and so is the day it belongs to."""
+        return InlineKeyboardMarkup(inline_keyboard=[[_button(label, data)], [_button("← Мой день", "rm")]])
+
+    @staticmethod
     def _confirm_delete() -> tuple[str, InlineKeyboardMarkup]:
         markup = InlineKeyboardMarkup(
             inline_keyboard=[[_button("Да, удалить", "skxy", DANGER)], [_button("← Назад", "sk")]]
         )
         return CONFIRM_DELETE, markup
 
-    async def _save_schedule(self, user_id: int, token: str | None) -> str:
+    async def _save_schedule(self, user_id: int, token: str | None) -> str | None:
+        """What was saved, said for the person; None when this preview was saved already or is long gone."""
         days = self._pending_schedule.take(user_id, token)
         if days is None:
-            return EXPIRED
+            return None
         async with self._sessions() as db:
             row = await db.get(AssistantSchedule, user_id)
             if row is None:
@@ -219,10 +229,10 @@ class SchoolDesk:
             "Теперь спрашивай «что завтра?», а уроки на день будут в утренней сводке."
         )
 
-    async def _save_tasks(self, user_id: int, token: str | None) -> str:
+    async def _save_tasks(self, user_id: int, token: str | None) -> str | None:
         planned = self._pending_tasks.take(user_id, token)
         if planned is None:
-            return EXPIRED
+            return None
         async with self._sessions() as db:
             for p in planned:
                 task = AssistantTask(member_id=user_id, subject=p.subject[:80], text=p.task, due_on=p.due)
@@ -234,7 +244,7 @@ class SchoolDesk:
                     text = f"📝 {when} — {school.task_line(p.subject, p.task)}"
                     db.add(AssistantReminder(member_id=user_id, text=text, due_at=to_utc(p.remind_at), task_id=task.id))
             await db.commit()
-        text = f"📝 Сохранила заданий: {len(planned)}. Список — в «🗓 Мой день» → «📝 Домашка»."
+        text = f"📝 Сохранила заданий: {len(planned)}."
         if self.mirror is not None:
             try:
                 copied = await self.mirror.sync_tasks(user_id)

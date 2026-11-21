@@ -7,6 +7,7 @@ its owner. Guests never see the family's lists. Every screen checks who may see 
 import logging
 import re
 import uuid
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
 from aiogram import Bot
@@ -51,6 +52,7 @@ NOTHING_TO_ADD = "Не поняла, что добавить."
 TOO_MANY_LISTS = f"Списков уже {MAX_LISTS}. Сначала очисти какой-нибудь из них."
 LIST_FULL = f"В списке уже {MAX_OPEN_ITEMS} пунктов. Сначала отметь или убери лишнее."
 LIST_GONE = "Этого списка уже нет."
+ITEM_GONE = "Этого пункта в списке уже нет."
 
 
 def icon(target: AssistantFamilyList) -> str:
@@ -64,6 +66,15 @@ def label(target: AssistantFamilyList) -> str:
 
 def short(text: str, limit: int = MAX_BUTTON_CHARS) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+@dataclass
+class Added:
+    """What became of the lines someone asked to add."""
+
+    added: list[str] = field(default_factory=list)
+    already: list[str] = field(default_factory=list)  # open in the list already
+    no_room: list[str] = field(default_factory=list)  # the list was full
 
 
 class ListDesk:
@@ -152,14 +163,22 @@ class ListDesk:
         )
         return {list_id: count for list_id, count in rows}
 
-    async def _add(self, db: AsyncSession, target: AssistantFamilyList, items: list[str], author: int) -> list[str]:
-        """Add the lines that are not already open in the list; return the ones added."""
-        open_now = [item.text for item, _ in await self._items(db, target.id) if item.done_at is None]
-        room = MAX_OPEN_ITEMS - len(open_now)
-        fresh = [item for item in items if item.lower() not in {text.lower() for text in open_now}][: max(room, 0)]
-        db.add_all(AssistantFamilyListItem(list_id=target.id, text=item, added_by=author) for item in fresh)
+    async def _add(self, db: AsyncSession, target: AssistantFamilyList, items: list[str], author: int) -> Added:
+        """Add the lines that are not already open in the list, while there is room."""
+        seen = {item.text.lower() for item, _ in await self._items(db, target.id) if item.done_at is None}
+        room = MAX_OPEN_ITEMS - len(seen)
+        result = Added()
+        for item in items:
+            if item.lower() in seen:
+                result.already.append(item)
+            elif len(result.added) >= room:
+                result.no_room.append(item)
+            else:
+                result.added.append(item)
+                seen.add(item.lower())
+        db.add_all(AssistantFamilyListItem(list_id=target.id, text=item, added_by=author) for item in result.added)
         await db.commit()
-        return fresh
+        return result
 
     # ---------- what Luna knows ----------
 
@@ -249,7 +268,7 @@ class ListDesk:
             parts.append("<p>Пока пусто. Нажми «➕ Добавить» или скажи: «добавь … в список».</p>")
         buttons = [
             InlineKeyboardButton(
-                text=("✅ " if item.done_at else "▫️ ") + short(item.text), callback_data=f"flt:{item.id}"
+                text=("✅ " if item.done_at else "▫️ ") + short(item.text), callback_data=f"flt:{item.id}:{list_id}"
             )
             for item, _ in shown
         ]
@@ -264,13 +283,21 @@ class ListDesk:
         text, markup = await self._overview(member)
         await self._bot.send_message(member.telegram_id, text, reply_markup=markup)
 
-    async def _send_list(self, member: AssistantMember, list_id: int, note: str = "") -> None:
+    async def _list_screen(
+        self, member: AssistantMember, list_id: int, note: str = ""
+    ) -> tuple[str, InlineKeyboardMarkup] | None:
+        """The list with a note on top; None when the list is gone or not this person's to see."""
         view = await self._list_view(member, list_id)
         if view is None:
+            return None
+        return Rich((f"<p>{esc(note)}</p>" if note else "") + view[0]), view[1]
+
+    async def _send_list(self, member: AssistantMember, list_id: int, note: str = "") -> None:
+        screen = await self._list_screen(member, list_id, note)
+        if screen is None:
             await self._send_gone(member)
             return
-        screen = Rich((f"<p>{esc(note)}</p>" if note else "") + view[0])
-        await send_long(self._bot, member.telegram_id, screen, view[1])
+        await send_long(self._bot, member.telegram_id, *screen)
 
     async def _send_gone(self, member: AssistantMember) -> None:
         """A list that went away leads to all the lists, never to a dead end."""
@@ -308,8 +335,7 @@ class ListDesk:
                 await self._send_overview(member, note)
                 return note
             if asked.action == "add":
-                added = await self._add(db, target, asked.items, member.telegram_id)
-                note = self._added_note(label(target), asked.items, added)
+                note = self._added_note(label(target), await self._add(db, target, asked.items, member.telegram_id))
             elif asked.action == "done":
                 note = await self._tick_named(db, target, asked.items)
             else:
@@ -318,10 +344,19 @@ class ListDesk:
         return note or f"Показала список «{label(target)}»."
 
     @staticmethod
-    def _added_note(name: str, asked: list[str], added: list[str]) -> str:
-        if not added:
-            return LIST_FULL if len(asked) > 1 else f"«{asked[0]}» уже есть в списке «{name}»."
-        return f"✅ Добавила в «{name}»: {', '.join(added)}"
+    def _added_note(name: str, result: Added) -> str:
+        """What was added, what was there already and what did not fit, each said as it is."""
+        parts = []
+        if result.added:
+            parts.append(f"✅ Добавила в «{name}»: {', '.join(result.added)}")
+        if len(result.already) == 1 and not result.added:
+            parts.append(f"«{result.already[0]}» уже есть в списке «{name}»")
+        elif result.already:
+            parts.append(f"Уже есть{'' if result.added else f' в «{name}»'}: {', '.join(result.already)}")
+        if result.no_room:
+            parts.append(f"Не поместилось: {', '.join(result.no_room)}")
+        note = ". ".join(parts)
+        return f"{note}. {LIST_FULL}" if result.no_room else note
 
     @staticmethod
     async def _tick_named(db: AsyncSession, target: AssistantFamilyList, wanted: list[str]) -> str:
@@ -351,11 +386,14 @@ class ListDesk:
             target = await self._named(db, member, name, personal, create=True)
             if target is None:
                 return f"Не добавлено: списков уже {MAX_LISTS}, новый список не создать."
-            added = await self._add(db, target, wanted, member.telegram_id)
-        already = [item for item in wanted if item not in added]
+            done = await self._add(db, target, wanted, member.telegram_id)
         where = label(target)
-        result = f"Добавлено в «{where}»: {', '.join(added)}." if added else f"Ничего нового в «{where}»."
-        return result + (f" Уже были в списке: {', '.join(already)}." if already else "")
+        result = f"Добавлено в «{where}»: {', '.join(done.added)}." if done.added else f"Ничего нового в «{where}»."
+        if done.already:
+            result += f" Уже были в списке: {', '.join(done.already)}."
+        if done.no_room:
+            result += f" Не добавлено, список полон ({MAX_OPEN_ITEMS} пунктов): {', '.join(done.no_room)}."
+        return result
 
     async def add_from_reply(self, member: AssistantMember, message: Message, text: str) -> None:
         """The answer to "what to add?": the list is the one named in the prompt."""
@@ -367,13 +405,13 @@ class ListDesk:
         name = shown.removeprefix(LOCK + " ").removeprefix(OLD_LOCK + " ")
         async with self._sessions() as db:
             target = await self._named(db, member, name, personal, create=False) if name else None
-            added = await self._add(db, target, items, member.telegram_id) if target and items else []
+            added = await self._add(db, target, items, member.telegram_id) if target and items else Added()
         if target is None:
             await self._send_gone(member)
         elif not items:
             await self._ask_add(member, target, NOTHING_TO_ADD)
         else:
-            await self._send_list(member, target.id, self._added_note(label(target), items, added))
+            await self._send_list(member, target.id, self._added_note(label(target), added))
 
     # ---------- buttons ----------
 
@@ -385,17 +423,22 @@ class ListDesk:
             await remove_menu(callback)
             await self._send_list(member, int(args[0]))
             return
+        note = ""
         if prefix == "flm":
             async with self._sessions() as db:
                 mine = await self._named(db, member, lists.MY_LIST, personal=True, create=True)
             list_id: int | None = mine.id if mine is not None else None
         elif prefix == "flt":
             list_id = await self._toggle(member, int(args[0]))
+            if list_id is None and len(args) > 1:  # the line was cleared on another screen: its list redraws
+                list_id, note = int(args[1]), ITEM_GONE
         else:
             list_id = int(args[0])
-        view = await self._list_view(member, list_id) if list_id is not None else None
+        view = await self._list_screen(member, list_id, note) if list_id is not None else None
         if list_id is None or view is None:
-            await self._edit(callback, LIST_GONE, None)
+            # A list that went away leads to all the lists, never to a dead end.
+            text, markup = await self._overview(member)
+            await self._edit(callback, f"{LIST_GONE}\n\n{text}", markup)
             return
         if prefix == "fla":
             async with self._sessions() as db:

@@ -71,12 +71,19 @@ class MemoryDesk:
         elif prefix == "famy":
             await self.forget_family_fact(callback, member, args[0])
 
-    async def save_family_note(self, member: AssistantMember, note: str) -> None:
+    async def save_family_note(self, member: AssistantMember, note: str, from_prompt: bool = False) -> None:
+        """An answer to "➕ Добавить" brings back the family memory that made way for the prompt, the outcome on
+        top, as its "✖ Отмена" does; a full memory shows it too, since its 🗑 buttons are the way on."""
         if self.memory is None:
             await self._say(member.telegram_id, FAMILY_REPLIES[FAMILY_FAILED])
             return
         outcome = await self.memory.family.add(member.telegram_id, member.name, note)
-        await self._say(member.telegram_id, FAMILY_REPLIES[outcome])
+        said = FAMILY_REPLIES[outcome]
+        if not from_prompt and outcome != FAMILY_FULL:
+            await self._say(member.telegram_id, said)
+            return
+        text, markup = await self.family_view(member, 0)
+        await self._say(member.telegram_id, f"{said}\n\n{text}", markup)
 
     @staticmethod
     def _may_delete(member: AssistantMember, author_id: int) -> bool:

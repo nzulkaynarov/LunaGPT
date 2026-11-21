@@ -1090,7 +1090,9 @@ def _with_memory(harness: Any, monkeypatch: pytest.MonkeyPatch, role: str, count
         forget=AsyncMock(return_value=True),
         forget_all=AsyncMock(),
         family=MagicMock(
-            recall=AsyncMock(return_value=("Бабушка приезжает в мае",)), add=AsyncMock(return_value="saved")
+            recall=AsyncMock(return_value=("Бабушка приезжает в мае",)),
+            add=AsyncMock(return_value="saved"),
+            list_facts=AsyncMock(return_value=[]),
         ),
     )
     instance._memory = memory
@@ -1454,8 +1456,44 @@ def _reply_to(text: str, prompt: str) -> Any:
 @pytest.mark.asyncio
 async def test_answer_to_the_family_prompt_is_kept_word_for_word(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     instance, memory = _with_memory(harness, monkeypatch, "adult")
+    _, send, _ = harness
     await instance.on_message(_reply_to("дача в августе", bot.FAMILY_PROMPT))
     memory.family.add.assert_awaited_once_with(1, "Тест", "дача в августе")
+    # the family memory that made way for the prompt comes back, the outcome on top
+    assert _sent(send) == f"{memory_desk.FAMILY_REPLIES['saved']}\n\n🏠 Общая память пока пуста."
+    assert "➕ Добавить" in _labels(send.call_args.kwargs["reply_markup"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prompt", [True, False])
+async def test_a_full_family_memory_shows_what_can_be_deleted(
+    harness: Any, monkeypatch: pytest.MonkeyPatch, prompt: bool
+) -> None:
+    instance, memory = _with_memory(harness, monkeypatch, "adult")
+    _, send, _ = harness
+    fact = MagicMock(id=uuid.uuid4(), content="код домофона 12", author_name="Тест", author_id=1)
+    memory.family.add = AsyncMock(return_value=memory_desk.FAMILY_FULL)
+    memory.family.list_facts = AsyncMock(return_value=[fact])
+    said = "дача в августе"
+    await instance.on_message(_reply_to(said, bot.FAMILY_PROMPT) if prompt else _message(f"запомни для семьи {said}"))
+    assert _sent(send).startswith(memory_desk.FAMILY_REPLIES[memory_desk.FAMILY_FULL])
+    assert "код домофона 12" in _sent(send)
+    assert {"🗑 1", "➕ Добавить"} <= set(_labels(send.call_args.kwargs["reply_markup"]))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    ["запиши для всех в покупки молоко", "запиши для семьи в список покупок хлеб", "запиши для всех в дела окна"],
+)
+async def test_a_family_request_that_names_a_list_goes_to_the_list(
+    harness: Any, monkeypatch: pytest.MonkeyPatch, text: str
+) -> None:
+    instance, memory = _with_memory(harness, monkeypatch, "adult")
+    instance.lists.request = AsyncMock(return_value="✅ Добавила в «Покупки»: молоко")
+    await instance.on_message(_message(text))
+    instance.lists.request.assert_awaited_once()
+    memory.family.add.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1734,6 +1772,7 @@ async def test_phrase_button_is_for_kids_and_a_reply_becomes_a_suggestion(
     instance, send, answer = harness
     instance.phrases.ask = AsyncMock()
     instance.phrases.suggest = AsyncMock()
+    instance.phrases.waiting_too_many = AsyncMock(return_value=False)
     _as_member(monkeypatch, _member("kid", 5))
     kid_intro = [b.callback_data for row in stories.intro_keyboard("kid").inline_keyboard for b in row]
     adult_intro = [b.callback_data for row in stories.intro_keyboard("adult").inline_keyboard for b in row]
@@ -2072,10 +2111,17 @@ async def test_a_chore_wait_can_be_cancelled_and_a_menu_tap_ends_it(
 ) -> None:
     instance, send, pi = _kid_with_pi(harness, monkeypatch)
     pi.request_time = AsyncMock(return_value=7)
+    pi.quota = AsyncMock(return_value=[])
     cancel = _callback("ntx", 5)
     await instance.on_callback(_callback("ntd", 5))
     await instance.on_callback(cancel)
-    assert cancel.message.edit_text.call_args.args[0] == internet_desk.CHORE_CANCELLED
+    shown = cancel.message.edit_text.call_args  # «Отменила», and ⏳ Интернет is back with its buttons
+    assert shown.args[0].startswith(f"{CANCELLED}\n\n⏳ Интернет")
+    assert [b.callback_data for row in shown.kwargs["reply_markup"].inline_keyboard for b in row] == [
+        "nta",
+        "ntd",
+        "ntq",
+    ]
     await instance.on_message(_message("убрал комнату", 5))
     pi.request_time.assert_not_awaited()
 
@@ -2288,6 +2334,7 @@ async def test_a_family_note_over_the_rate_limit_keeps_its_prompt(
 async def test_cancelling_the_phrase_brings_the_stories_back(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     instance, send, _ = harness
     instance.stories.view = AsyncMock()
+    instance.phrases.waiting_too_many = AsyncMock(return_value=False)
     _as_member(monkeypatch, _member("kid", 5))
     ask = _pressed(stories.PHRASE_ASK, 5)
     await instance.on_callback(ask)

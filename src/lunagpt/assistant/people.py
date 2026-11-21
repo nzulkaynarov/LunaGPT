@@ -2,7 +2,6 @@
 
 import html
 import logging
-import re
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -98,9 +97,16 @@ SEARCH_PROMPT = "Пришли номер телефона или контакт 
 AGES = range(5, 18)
 ACCESS_DAYS = (1, 7, 30)
 MONEY_LIMITS = (1, 3, 10)
-NAME_PROMPT = "Напиши новое имя ответом на это сообщение. Карточка №{id}"
-PHONE_PROMPT = "Пришли новый номер или контакт ответом на это сообщение. Карточка №{id}"
-EDIT_PROMPT = re.compile(r"(новое имя|новый номер).*Карточка №(\d+)", re.DOTALL)
+NAME_HEAD = "✏️ Новое имя для «"
+PHONE_HEAD = "📞 Новый номер для «"
+NAME_PROMPT = NAME_HEAD + "{name}»: напиши его ответом на это сообщение."
+PHONE_PROMPT = PHONE_HEAD + "{name}»: пришли номер или контакт ответом на это сообщение."
+OLD_EDIT_HEAD = "Карточка №"  # prompts sent before the change showed the card's number
+EDIT_PROMPTS = {"name": NAME_PROMPT, "phone": PHONE_PROMPT}
+EDIT_LOST = "Не помню, чью карточку менять: открой её ещё раз."
+MAX_EDIT_PROMPTS = 50
+GONE = "Этого человека уже нет в Luna."
+TO_PEOPLE = "← К людям"
 NOT_ALLOWED = "Это действие недоступно."
 NOT_A_NAME = "Имя не должно быть пустым."
 MAX_NAME_CHARS = 100
@@ -134,15 +140,6 @@ def _pairs(buttons: list[InlineKeyboardButton]) -> list[list[InlineKeyboardButto
     return [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
 
 
-def _edit_target(message: Message) -> tuple[str, int] | None:
-    """Which field of which card this message answers, read from the bot's own prompt."""
-    reply = message.reply_to_message
-    match = EDIT_PROMPT.search(reply.text or "") if reply is not None else None
-    if match is None:
-        return None
-    return ("name" if match.group(1) == "новое имя" else "phone"), int(match.group(2))
-
-
 class PeopleDesk:
     """Adults decide who is family and who is a guest; everyone else waits or stays out."""
 
@@ -162,6 +159,9 @@ class PeopleDesk:
         self._replied: dict[int, float] = {}
         self._notified: deque[float] = deque(maxlen=NOTIFICATIONS_PER_HOUR)
         self._cards: dict[int, list[tuple[int, int]]] = {}
+        # Which field of whose card each open name or number prompt changes, by (adult, prompt message); the
+        # prompt itself shows only the name, so no number is ever read back from what the family sees.
+        self._edit_prompts: dict[tuple[int, int], tuple[str, int]] = {}
 
     # ---- the way in ----
 
@@ -410,7 +410,7 @@ class PeopleDesk:
         async with self._sessions() as db:
             application = await access.reopen(db, telegram_id)
         if application is None:
-            await self._edit(callback, ALREADY_DECIDED, self._back("pl"))
+            await self._edit(callback, ALREADY_DECIDED, self._to_applications())
             return
         await self._edit(callback, *await self._application_view(application))
 
@@ -471,11 +471,15 @@ class PeopleDesk:
     def _back(data: str) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(inline_keyboard=[[_button("← Назад", data)]])
 
+    @staticmethod
+    def _to_people() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(inline_keyboard=[[_button(TO_PEOPLE, "pl")]])
+
     async def _member_card(self, actor: AssistantMember, telegram_id: int) -> View:
         async with self._sessions() as db:
             member = await access.get_member(db, telegram_id)
         if member is None:
-            return "Этого человека уже нет в Luna.", self._back("pl")
+            return GONE, self._back("pl")
         rows = []
         if member.role == "guest":
             rows.append(
@@ -582,15 +586,26 @@ class PeopleDesk:
 
     @staticmethod
     def is_edit_reply(message: Message) -> bool:
-        return is_reply_to_prompt(message, "Карточка №") and bool(_edit_target(message))
+        return any(is_reply_to_prompt(message, head) for head in (NAME_HEAD, PHONE_HEAD, OLD_EDIT_HEAD))
 
-    async def _ask_edit(self, chat_id: int, prompt: str, telegram_id: int, problem: str = "") -> None:
-        await send_prompt(self._bot, chat_id, prompt.format(id=telegram_id), PEOPLE_CANCEL, problem)
+    async def _ask_edit(self, chat_id: int, field: str, telegram_id: int, problem: str = "") -> None:
+        async with self._sessions() as db:
+            member = await access.get_member(db, telegram_id)
+        if member is None:
+            await self._bot.send_message(chat_id, GONE, reply_markup=self._back("pl"))
+            return
+        prompt = EDIT_PROMPTS[field].format(name=member.name)
+        sent = await send_prompt(self._bot, chat_id, prompt, PEOPLE_CANCEL, problem)
+        self._edit_prompts[(chat_id, sent.message_id)] = (field, telegram_id)
+        while len(self._edit_prompts) > MAX_EDIT_PROMPTS:
+            del self._edit_prompts[next(iter(self._edit_prompts))]
 
     async def apply_edit(self, actor: AssistantMember, message: Message) -> None:
-        """The prompt only says which card; the right to change it is decided again here."""
-        target = _edit_target(message)
-        if target is None:
+        """The prompt was remembered when it was sent; the right to change the card is decided again here."""
+        reply = message.reply_to_message
+        target = self._edit_prompts.pop((actor.telegram_id, reply.message_id), None) if reply else None
+        if target is None:  # sent before a restart, or before the prompts stopped showing numbers
+            await self._bot.send_message(actor.telegram_id, EDIT_LOST, reply_markup=self._to_people())
             return
         field, telegram_id = target
         if field == "phone":
@@ -598,8 +613,7 @@ class PeopleDesk:
         else:
             problem, values = self._new_name(message)
         if problem:
-            prompt = PHONE_PROMPT if field == "phone" else NAME_PROMPT
-            await self._ask_edit(actor.telegram_id, prompt, telegram_id, problem)
+            await self._ask_edit(actor.telegram_id, field, telegram_id, problem)
             return
         async with self._sessions() as db:
             member = await db.get(AssistantMember, telegram_id, with_for_update=True)
@@ -653,7 +667,7 @@ class PeopleDesk:
             label = f"{application.name}{username} · {APPLICATION_LABELS[application.status]}"
             action = "app" if application.status == access.PENDING else "prb"
             rows.append([_button(label, f"{action}:{application.telegram_id}")])
-        rows.append([_button("🔎 Искать ещё", "pf"), _button("← К людям", "pl")])
+        rows.append([_button("🔎 Искать ещё", "pf"), _button(TO_PEOPLE, "pl")])
         if len(rows) == 1:
             return f"С номером {phone} никого нет.", InlineKeyboardMarkup(inline_keyboard=rows)
         hint = "Нажми на человека: откроется карточка, а заявка с отказом вернётся на решение."
@@ -698,12 +712,14 @@ class PeopleDesk:
                 callback, actor, int(args[0]), "guest", money_limit_usd=Decimal(usd) if usd else None
             )
         elif prefix == "pen":
-            await self._ask_edit(actor.telegram_id, NAME_PROMPT, int(args[0]))
+            await self._ask_edit(actor.telegram_id, "name", int(args[0]))
         elif prefix == "pep":
-            await self._ask_edit(actor.telegram_id, PHONE_PROMPT, int(args[0]))
+            await self._ask_edit(actor.telegram_id, "phone", int(args[0]))
         elif prefix == "pf":
             await self._ask_number(actor.telegram_id)
         elif prefix == PEOPLE_CANCEL:
+            if isinstance(callback.message, Message):
+                self._edit_prompts.pop((actor.telegram_id, callback.message.message_id), None)
             await remove_menu(callback)
         elif prefix == "pls":
             await self._edit(callback, *await self._section(args[0]))
@@ -732,6 +748,6 @@ class PeopleDesk:
         async with self._sessions() as db:
             application = await access.get_application(db, applicant_id)
         if application is None or application.status != access.PENDING:
-            await self._edit(callback, ALREADY_DECIDED, self._back("pl"))
+            await self._edit(callback, ALREADY_DECIDED, self._to_applications())
             return
         await self._edit(callback, *await self._application_view(application))

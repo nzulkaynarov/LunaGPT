@@ -323,6 +323,9 @@ async def test_application_and_its_outcome_lead_back_to_the_waiting_ones(desk: A
     assert other.kwargs["chat_id"] == OWNER
     assert other.kwargs["reply_markup"].inline_keyboard[0][0].callback_data == "pls:p"
     assert _shown(await _press_as(desk, f"apr:{NEW}")) == (people.ALREADY_DECIDED, ["pls:p"])
+    # 🔄 on a card and a rejected entry decided elsewhere: the same words and the same way back
+    assert _shown(await _press_as(desk, f"app:{NEW}")) == (people.ALREADY_DECIDED, ["pls:p"])
+    assert _shown(await _press_as(desk, f"prb:{NEW}")) == (people.ALREADY_DECIDED, ["pls:p"])
     assert _shown(await _press_as(desk, "pls:p"))[0] == "В ожидании: пока никого"
 
 
@@ -535,15 +538,18 @@ async def test_search_button_opens_a_forced_reply(desk: Any) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("opened_by", ["pf", f"pen:{NEW}", f"pep:{NEW}"])
 async def test_cancel_removes_the_prompt_and_keeps_the_screen_above(desk: Any, opened_by: str) -> None:
+    await _guest(desk)
     await _press_as(desk, opened_by)
     assert prompt_cancel(desk._bot.send_message.await_args.kwargs["reply_markup"]) == people.PEOPLE_CANCEL
     desk._bot.send_message.reset_mock()
     cancel = _press(people.PEOPLE_CANCEL)
     cancel.message.delete = AsyncMock()
+    cancel.message.message_id = OWNER * 10  # the prompt itself
     await desk.handle(cancel, _actor(), people.PEOPLE_CANCEL, [])
     cancel.message.delete.assert_awaited_once()  # the screen that opened the prompt is still above it
     cancel.message.edit_text.assert_not_awaited()
     desk._bot.send_message.assert_not_awaited()
+    assert desk._edit_prompts == {}  # a cancelled prompt is forgotten
 
 
 async def _guest(desk: Any) -> None:
@@ -675,27 +681,30 @@ async def test_other_messages_get_a_short_hint_not_the_greeting(desk: Any, monke
     assert desk._bot.send_message.await_args.args[1] == people.ASK_CONTACT
 
 
-def _edit_reply(prompt: str, text: str = "", phone: str | None = None) -> MagicMock:
+async def _edit_prompt(desk: Any, data: str, actor: AssistantMember | None = None) -> MagicMock:
+    """Press «✏️ Изменить имя» or «📞 Изменить номер»: the prompt it sent, as the message an answer replies to."""
+    who = actor or _actor()
+    await _press_as(desk, data, who)
+    sent = desk._bot.send_message.await_args
+    assert sent.args[0] == who.telegram_id
+    return MagicMock(text=sent.args[1], from_user=MagicMock(is_bot=True), message_id=who.telegram_id * 10)
+
+
+def _edit_reply(prompt: MagicMock, text: str = "", phone: str | None = None) -> MagicMock:
     message = MagicMock(spec=Message, text=text)
-    message.reply_to_message = MagicMock(text=prompt, from_user=MagicMock(is_bot=True))
+    message.reply_to_message = prompt
     message.contact = None if phone is None else MagicMock(phone_number=phone)
     return message
-
-
-def _name_prompt(telegram_id: int = NEW) -> str:
-    return str(people.NAME_PROMPT.format(id=telegram_id))
-
-
-def _phone_prompt(telegram_id: int = NEW) -> str:
-    return str(people.PHONE_PROMPT.format(id=telegram_id))
 
 
 @pytest.mark.asyncio
 async def test_guest_can_be_renamed_and_card_comes_back(desk: Any, sessions: Any) -> None:
     await _guest(desk)
     assert f"pen:{NEW}" in _shown(await _press_as(desk, f"pc:{NEW}"))[1]
+    prompt = await _edit_prompt(desk, f"pen:{NEW}")
+    assert prompt.text == people.NAME_PROMPT.format(name="Новый") and str(NEW) not in prompt.text  # no ids shown
     desk._bot.send_message.reset_mock()
-    await desk.apply_edit(_actor(), _edit_reply(_name_prompt(), "  Дядя   Марат "))
+    await desk.apply_edit(_actor(), _edit_reply(prompt, "  Дядя   Марат "))
     member = await _member(sessions)
     assert member is not None and member.name == "Дядя Марат"
     assert "Дядя Марат" in desk._bot.send_message.await_args.args[1]
@@ -704,10 +713,10 @@ async def test_guest_can_be_renamed_and_card_comes_back(desk: Any, sessions: Any
 @pytest.mark.asyncio
 async def test_phone_can_be_set_by_text_or_contact(desk: Any, sessions: Any) -> None:
     await _guest(desk)
-    await desk.apply_edit(_actor(), _edit_reply(_phone_prompt(), "90 111 22 33"))
+    await desk.apply_edit(_actor(), _edit_reply(await _edit_prompt(desk, f"pep:{NEW}"), "90 111 22 33"))
     member = await _member(sessions)
     assert member is not None and member.phone == "+998901112233"
-    await desk.apply_edit(_actor(), _edit_reply(_phone_prompt(), phone="998901234567"))
+    await desk.apply_edit(_actor(), _edit_reply(await _edit_prompt(desk, f"pep:{NEW}"), phone="998901234567"))
     member = await _member(sessions)
     assert member is not None and member.phone == PHONE
 
@@ -715,17 +724,19 @@ async def test_phone_can_be_set_by_text_or_contact(desk: Any, sessions: Any) -> 
 @pytest.mark.asyncio
 async def test_bad_input_asks_again_and_changes_nothing(desk: Any, sessions: Any) -> None:
     await _guest(desk)
-    await desk.apply_edit(_actor(), _edit_reply(_phone_prompt(), "Миша"))
+    await desk.apply_edit(_actor(), _edit_reply(await _edit_prompt(desk, f"pep:{NEW}"), "Миша"))
     call = desk._bot.send_message.await_args
-    assert call.args[1] == f"{people.NOT_A_NUMBER}\n{_phone_prompt()}"
+    assert call.args[1] == f"{people.NOT_A_NUMBER}\n{people.PHONE_PROMPT.format(name='Новый')}"
     assert prompt_cancel(call.kwargs["reply_markup"]) == people.PEOPLE_CANCEL
-    await desk.apply_edit(_actor(), _edit_reply(_name_prompt(), "   "))
+    await desk.apply_edit(_actor(), _edit_reply(await _edit_prompt(desk, f"pen:{NEW}"), "   "))
     call = desk._bot.send_message.await_args
-    assert call.args[1] == f"{people.NOT_A_NAME}\n{_name_prompt()}"
+    assert call.args[1] == f"{people.NOT_A_NAME}\n{people.NAME_PROMPT.format(name='Новый')}"
     member = await _member(sessions)
     assert member is not None and member.name == "Новый" and member.phone == PHONE
 
-    await desk.apply_edit(_actor(), _edit_reply(call.args[1], "Марат"))  # the fresh prompt takes the answer
+    fresh = MagicMock(text=call.args[1], from_user=MagicMock(is_bot=True), message_id=OWNER * 10)
+    assert PeopleDesk.is_edit_reply(_edit_reply(fresh))
+    await desk.apply_edit(_actor(), _edit_reply(fresh, "Марат"))  # the fresh prompt takes the answer
     member = await _member(sessions)
     assert member is not None and member.name == "Марат"
 
@@ -736,7 +747,7 @@ async def test_name_from_homesec_cannot_be_edited_here(desk: Any, sessions: Any)
     await _press_as(desk, f"apf:{NEW}:4")
     text, actions = _shown(await _press_as(desk, f"pc:{NEW}"))
     assert f"pen:{NEW}" not in actions and f"pep:{NEW}" in actions and "HomeSec" in text
-    await desk.apply_edit(_actor(), _edit_reply(_name_prompt(), "Другое"))
+    await desk.apply_edit(_actor(), _edit_reply(await _edit_prompt(desk, f"pen:{NEW}"), "Другое"))  # an old button
     member = await _member(sessions)
     assert member is not None and member.name == "Миша"
 
@@ -747,15 +758,50 @@ async def test_adult_cannot_edit_another_family_member(desk: Any, sessions: Any)
     await _press_as(desk, f"apf:{NEW}:3")
     adult = _actor("adult", ADULT)
     assert f"pep:{NEW}" not in _shown(await _press_as(desk, f"pc:{NEW}", adult))[1]
-    await desk.apply_edit(adult, _edit_reply(_phone_prompt(), "90 111 22 33"))
+    await desk.apply_edit(adult, _edit_reply(await _edit_prompt(desk, f"pep:{NEW}", adult), "90 111 22 33"))
     member = await _member(sessions)
     assert member is not None and member.phone == PHONE
     assert desk._bot.send_message.await_args.args[1] == people.NOT_ALLOWED
 
 
+def _bot_message(text: str, message_id: int = 7) -> MagicMock:
+    return MagicMock(text=text, from_user=MagicMock(is_bot=True), message_id=message_id)
+
+
 def test_only_the_bots_edit_prompt_counts() -> None:
-    assert PeopleDesk.is_edit_reply(_edit_reply(_name_prompt()))
-    assert not PeopleDesk.is_edit_reply(_edit_reply(people.SEARCH_PROMPT))
-    forged = _edit_reply(_name_prompt())
+    assert PeopleDesk.is_edit_reply(_edit_reply(_bot_message(people.NAME_PROMPT.format(name="Марат"))))
+    assert PeopleDesk.is_edit_reply(_edit_reply(_bot_message(people.PHONE_PROMPT.format(name="Марат"))))
+    assert not PeopleDesk.is_edit_reply(_edit_reply(_bot_message(people.SEARCH_PROMPT)))
+    forged = _edit_reply(_bot_message(people.NAME_PROMPT.format(name="Марат")))
     forged.reply_to_message.from_user.is_bot = False
     assert not PeopleDesk.is_edit_reply(forged)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        people.NAME_PROMPT.format(name="Новый"),  # sent before a restart: its card is not remembered
+        f"Напиши новое имя ответом на это сообщение. Карточка №{NEW}",  # sent before the prompts lost the number
+    ],
+)
+async def test_an_answer_to_a_forgotten_prompt_changes_nothing_and_leads_on(
+    desk: Any, sessions: Any, prompt: str
+) -> None:
+    await _guest(desk)
+    answer = _edit_reply(_bot_message(prompt), "Марат")
+    assert PeopleDesk.is_edit_reply(answer)
+    await desk.apply_edit(_actor(), answer)
+    said = desk._bot.send_message.await_args
+    assert said.args == (OWNER, people.EDIT_LOST)
+    assert [b.callback_data for row in said.kwargs["reply_markup"].inline_keyboard for b in row] == ["pl"]
+    member = await _member(sessions)
+    assert member is not None and member.name == "Новый"
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_for_a_card_that_is_gone_says_so(desk: Any) -> None:
+    await _press_as(desk, f"pen:{NEW}")
+    said = desk._bot.send_message.await_args
+    assert said.args == (OWNER, people.GONE)
+    assert [b.callback_data for row in said.kwargs["reply_markup"].inline_keyboard for b in row] == ["pl"]

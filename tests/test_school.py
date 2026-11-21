@@ -12,7 +12,7 @@ from telegram_fakes import edited, pressed
 from lunagpt.assistant import reminder_desk, school, school_desk
 from lunagpt.assistant.reminder_desk import to_local
 from lunagpt.assistant.school import TaskItem, TaskList, Timetable
-from lunagpt.assistant.telegram import DANGER
+from lunagpt.assistant.telegram import DANGER, MAX_PREVIEWS, Previews
 from lunagpt.models import AssistantMember, AssistantReminder, AssistantSchedule, AssistantTask
 
 NOW = datetime(2026, 11, 11, 10, 30)  # a Wednesday
@@ -129,6 +129,8 @@ async def test_schedule_is_previewed_saved_used_and_deleted(db_sessions: async_s
     save = _callback(data)
     await desk.handle(save, member, prefix, args)
     assert "Расписание сохранено" in _edited(save)
+    saved = save.message.edit_text.call_args.kwargs["reply_markup"]  # a way on, not a dead end
+    assert pressed(saved, "📚 Расписание")[1] == "sk" and pressed(saved, "← Мой день")[1] == "rm"
     assert await desk.timetable(1) == DAYS
     assert await desk.brief_lines(1, date(2026, 11, 13)) == ["📚 Уроки: математика, информатика"]
 
@@ -167,12 +169,17 @@ async def test_tasks_get_deadlines_reminders_and_can_be_done(
     desk = school_desk.SchoolDesk(telegram, db_sessions, read_tasks=AsyncMock(return_value=found))
     await desk.read_tasks(member, "домашка", b"jpeg")
     preview = telegram.send_message.call_args.args[1]
+    assert preview.startswith("📝 Вот что нашла:")  # nothing is stored before "Сохранить"
     assert "• Математика: № 125, 127 — к пт 13.11, напомню завтра в 18:00" in preview
     assert "• Русский язык: упр. 48 — на завтра, напомню сегодня в 18:00" in preview
     assert "• Биология: доклад — без срока" in preview
 
     data, prefix, args = pressed(telegram.send_message.call_args.kwargs["reply_markup"], "✅ Сохранить")
-    await desk.handle(_callback(data), member, prefix, args)
+    save = _callback(data)
+    await desk.handle(save, member, prefix, args)
+    assert _edited(save) == "📝 Сохранила заданий: 3."
+    saved = save.message.edit_text.call_args.kwargs["reply_markup"]
+    assert pressed(saved, "📝 Домашка")[1] == "tk" and pressed(saved, "← Мой день")[1] == "rm"
     async with db_sessions() as db:
         tasks = list(await db.scalars(select(AssistantTask).order_by(AssistantTask.id)))
         reminders = list(await db.scalars(select(AssistantReminder).order_by(AssistantReminder.due_at)))
@@ -229,14 +236,14 @@ def test_homework_to_write_down_versus_help_with_it(text: str, is_homework: bool
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["schedule", "tasks"])
-async def test_an_older_preview_never_saves_the_newer_one(
+async def test_every_preview_saves_exactly_what_it_shows(
     db_sessions: async_sessionmaker[AsyncSession], kind: str
 ) -> None:
     member = await _member(db_sessions)
     telegram = MagicMock(send_message=AsyncMock())
     first = Timetable(days={"mon": ["математика"]})
     second = Timetable(days={"tue": ["история"]})
-    tasks = [TaskList(items=[TaskItem(task="старое")]), TaskList(items=[TaskItem(task="новое")])]
+    tasks = [TaskList(items=[TaskItem(task="математика № 125")]), TaskList(items=[TaskItem(task="русский упр. 7")])]
     desk = school_desk.SchoolDesk(
         telegram, db_sessions, AsyncMock(side_effect=[first, second]), AsyncMock(side_effect=tasks)
     )
@@ -246,23 +253,53 @@ async def test_an_older_preview_never_saves_the_newer_one(
     await read(member, "запиши")
     new = telegram.send_message.call_args.kwargs["reply_markup"]
 
-    for text in ("✅ Сохранить", "✖ Отмена"):
-        data, prefix, args = pressed(old, text)
-        stale = _callback(data)
-        await desk.handle(stale, member, prefix, args)
-        shown = stale.message.edit_text.call_args
-        assert shown.args == (school_desk.EXPIRED,) and shown.kwargs["reply_markup"] is None  # buttons gone
-    data, prefix, args = pressed(new, "✅ Сохранить")
-    await desk.handle(_callback(data), member, prefix, args)
+    # Two homework messages in a row: each preview's "Сохранить" saves its own, in any order.
+    for markup in (old, new):
+        data, prefix, args = pressed(markup, "✅ Сохранить")
+        await desk.handle(_callback(data), member, prefix, args)
     async with db_sessions() as db:
-        saved = [t.text for t in await db.scalars(select(AssistantTask))]
+        saved = [t.text for t in await db.scalars(select(AssistantTask).order_by(AssistantTask.id))]
     if kind == "schedule":
-        assert await desk.timetable(1) == second.days
+        assert await desk.timetable(1) == second.days  # the later timetable replaces the earlier one
     else:
-        assert saved == ["новое"]
+        assert saved == ["математика № 125", "русский упр. 7"]
     again = _callback(data)
     await desk.handle(again, member, prefix, args)
     assert _edited(again) == school_desk.EXPIRED  # a preview is saved once
+
+    data, prefix, args = pressed(old, "✖ Отмена")  # a cancel on a preview that is gone is still a cancel
+    late = _callback(data)
+    await desk.handle(late, member, prefix, args)
+    shown = late.message.edit_text.call_args
+    assert shown.args == (school_desk.CANCELLED,) and shown.kwargs["reply_markup"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_preview_saves_nothing(db_sessions: async_sessionmaker[AsyncSession]) -> None:
+    member = await _member(db_sessions)
+    telegram = MagicMock(send_message=AsyncMock())
+    found = TaskList(items=[TaskItem(task="старое")])
+    desk = school_desk.SchoolDesk(telegram, db_sessions, read_tasks=AsyncMock(return_value=found))
+    await desk.read_tasks(member, "задали")
+    markup = telegram.send_message.call_args.kwargs["reply_markup"]
+    data, prefix, args = pressed(markup, "✖ Отмена")
+    cancel = _callback(data)
+    await desk.handle(cancel, member, prefix, args)
+    assert _edited(cancel) == school_desk.CANCELLED
+    data, prefix, args = pressed(markup, "✅ Сохранить")
+    late = _callback(data)
+    await desk.handle(late, member, prefix, args)
+    assert _edited(late) == school_desk.EXPIRED
+    async with db_sessions() as db:
+        assert await db.scalar(select(AssistantTask)) is None
+
+
+def test_a_person_keeps_only_a_few_previews() -> None:
+    previews: Previews[int] = Previews()
+    tokens = [previews.keep(1, n) for n in range(MAX_PREVIEWS + 1)]
+    assert previews.take(1, tokens[0]) is None  # the oldest made way
+    assert [previews.take(1, token) for token in tokens[1:]] == list(range(1, MAX_PREVIEWS + 1))
+    assert previews.take(1, tokens[1]) is None and previews.take(2, None) is None
 
 
 @pytest.mark.asyncio

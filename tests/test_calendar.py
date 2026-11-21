@@ -337,7 +337,7 @@ async def test_the_address_prompt_can_be_cancelled(db_sessions: async_sessionmak
 
 
 @pytest.mark.asyncio
-async def test_an_older_preview_never_adds_the_newer_event(
+async def test_every_preview_adds_exactly_the_event_it_shows(
     db_sessions: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(calendar_desk, "local_now", lambda: NOW)
@@ -348,27 +348,65 @@ async def test_an_older_preview_never_adds_the_newer_event(
     google = FakeGoogle()
     telegram = MagicMock(send_message=AsyncMock())
     extract = AsyncMock(
-        side_effect=[EventParts(title="Стоматолог", day="thu", time="15:00"), EventParts(title="Собрание", day="fri")]
+        side_effect=[
+            EventParts(title="Стоматолог", day="thu", time="15:00"),
+            EventParts(title="Собрание", day="fri"),
+            EventParts(title="Кружок", day="sat"),
+        ]
     )
     desk = calendar_desk.CalendarDesk(telegram, db_sessions, _calendar(google), extract)
     await desk.request_event(member, "добавь в календарь стоматолог в четверг в 15:00")
     old = telegram.send_message.call_args.kwargs["reply_markup"]
     await desk.request_event(member, "добавь в календарь собрание в пятницу")
     new = telegram.send_message.call_args.kwargs["reply_markup"]
+    await desk.request_event(member, "добавь в календарь кружок в субботу")
+    third = telegram.send_message.call_args.kwargs["reply_markup"]
 
-    for text in ("✅ Добавить", "✖ Отмена"):
-        data, prefix, args = pressed(old, text)
-        stale = _callback(data)
-        await desk.handle(stale, member, prefix, args)
-        shown = stale.message.edit_text.call_args
-        assert shown.args == (calendar_desk.EXPIRED,) and shown.kwargs["reply_markup"] is None
-    assert google.created == []
-    data, prefix, args = pressed(new, "✅ Добавить")
+    data, prefix, args = pressed(old, "✅ Добавить")  # the older preview, after a newer one came
     await desk.handle(_callback(data), member, prefix, args)
+    assert [event["summary"] for event in google.created] == ["Стоматолог"]
     again = _callback(data)
     await desk.handle(again, member, prefix, args)
-    assert [event["summary"] for event in google.created] == ["Собрание"]
-    assert edited(again.message) == calendar_desk.EXPIRED
+    assert edited(again.message) == calendar_desk.EXPIRED  # an event is added once
+    data, prefix, args = pressed(new, "✅ Добавить")
+    await desk.handle(_callback(data), member, prefix, args)
+    assert [event["summary"] for event in google.created] == ["Стоматолог", "Собрание"]
+
+    for markup in (third, old):  # a cancel says so, whether or not its preview is still waiting
+        data, prefix, args = pressed(markup, "✖ Отмена")
+        cancel = _callback(data)
+        await desk.handle(cancel, member, prefix, args)
+        shown = cancel.message.edit_text.call_args
+        assert shown.args == (calendar_desk.CANCELLED,) and shown.kwargs["reply_markup"] is None
+    assert len(google.created) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_failed_add_keeps_the_preview_to_press_again(
+    db_sessions: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(calendar_desk, "local_now", lambda: NOW)
+    member = await _member(db_sessions)
+    async with db_sessions() as db:
+        (await db.get(AssistantMember, 1)).google_calendar_id = "mama@gmail.com"  # type: ignore[union-attr]
+        await db.commit()
+    telegram = MagicMock(send_message=AsyncMock())
+    extract = AsyncMock(return_value=EventParts(title="Стоматолог", day="thu", time="15:00"))
+    down = GoogleCalendar(_credentials(), 5, httpx.MockTransport(lambda request: httpx.Response(503)))
+    desk = calendar_desk.CalendarDesk(telegram, db_sessions, down, extract)
+    await desk.request_event(member, "добавь в календарь стоматолог в четверг в 15:00")
+    preview, markup = telegram.send_message.call_args.args[1], telegram.send_message.call_args.kwargs["reply_markup"]
+    data, prefix, args = pressed(markup, "✅ Добавить")
+    failed = _callback(data)
+    await desk.handle(failed, member, prefix, args)
+    shown = failed.message.edit_text.call_args
+    assert shown.args[0] == f"{calendar_desk.UNAVAILABLE}\n\n{preview}"  # the event is still on screen
+    assert pressed(shown.kwargs["reply_markup"], "✅ Добавить")[0] == data
+
+    google = FakeGoogle()
+    desk._calendar = _calendar(google)  # Google is back: the same button adds it, nothing to type again
+    await desk.handle(_callback(data), member, prefix, args)
+    assert [event["summary"] for event in google.created] == ["Стоматолог"]
 
 
 @pytest.mark.asyncio

@@ -52,7 +52,10 @@ NOT_PARSED = "Не получилось разобрать напоминани�
 TOO_MANY = f"У тебя уже {MAX_ACTIVE} напоминаний. Удали лишние в «🗓 Мой день»."
 SNOOZE_GONE = "Это напоминание уже удалено, отложить его нельзя."
 HOMEWORK_DONE = "📝 Задание отметила как сделанное."
-PAUSED = f"🔕 {access.ACCESS_ENDED}\nПока его не продлят, напоминания и утренняя сводка не приходят."
+PAUSED = (
+    f"🔕 {access.ACCESS_ENDED}\nПока его не продлят, утренняя сводка не приходит, "
+    "а напоминания ждут: они придут, когда доступ продлят."
+)
 
 ExtractFn = Callable[[str, datetime, dict[str, object]], Awaitable[reminders.ReminderParts | None]]
 GeocodeFn = Callable[[str], Awaitable[brief.Place | None]]
@@ -429,8 +432,16 @@ class ReminderDesk:
                 )
             )
             members = {m.telegram_id: m for m in await db.scalars(select(AssistantMember))}
-            rings = [(row.id, row.member_id, row.text, row.due_at, row.kind) for row in due]
+            rings: list[tuple[int, int, str, datetime, str]] = []
+            ended: dict[int, AssistantMember] = {}
             for row in due:
+                member = members.get(row.member_id)
+                if member is not None and access.access_ended(member):
+                    ended[member.telegram_id] = member
+                    if row.repeat == "none":
+                        continue  # kept open: it rings, marked late, once the access is extended
+                else:
+                    rings.append((row.id, row.member_id, row.text, row.due_at, row.kind))
                 after = reminders.next_time(to_local(row.due_at), row.repeat, to_local(now))
                 # Moved or closed before sending: a Telegram failure loses one ring, never repeats it forever.
                 if after is None:
@@ -438,17 +449,18 @@ class ReminderDesk:
                 else:
                     row.due_at = to_utc(after)
             await db.commit()
+        for member in ended.values():
+            await self._tell_access_ended(member)
         sent = 0
         for reminder_id, member_id, text, planned, kind in rings:
             member = members.get(member_id)
             if member is None:
                 continue
-            if access.access_ended(member):
-                await self._tell_access_ended(member)
-                continue
             body = f"🔔 {text or 'Напоминание'}"
             if now - planned > LATE_NOTE_AFTER:
-                body += f"\n(должна была напомнить {to_local(planned):%d.%m в %H:%M}, я была выключена)"
+                # A guest's ring may have waited for the access to be extended, so it names no reason.
+                why = "" if member.access_until is not None else ", я была выключена"
+                body += f"\n(должна была напомнить {to_local(planned):%d.%m в %H:%M}{why})"
             if kind == DO and self.run_task is not None and now - planned <= LATE_NOTE_AFTER:
                 # A task can take a minute of model time; others due now must not wait for it.
                 self._spawn(self._carry_out(member, reminder_id, text, body))
