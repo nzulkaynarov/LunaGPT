@@ -44,6 +44,8 @@ CHORE_NO_WORDS = "сделал дело (на фото)"
 ALREADY_ASKED = "Запрос уже отправлен, дождись ответа родителей."
 NO_ANSWER = "Родители пока не ответили на твою просьбу. Можно попросить ещё раз или подойти к ним 💬"
 WHOLE_DAY_MINUTES = 720  # what HomeSec records for "until the end of the day"
+# HomeSec records 0 minutes when a parent allowed but nothing held the child back to add to.
+ALLOWED_NOTHING_ADDED = "👍 Родители разрешили. Сейчас ограничений нет — если что-то не открывается, подойди к ним 💬"
 BTN_QUIZ = "🎯 Викторина +15 мин"
 TIME_POLL_SECONDS = 30
 TIME_REQUEST_TTL = timedelta(hours=24)
@@ -310,6 +312,8 @@ async def report_time_decisions(bot: Bot, pi: PiClient, session_factory: async_s
             text = NO_ANSWER  # a child is never left waiting for an answer that will not come
         elif state != "approved":
             text = "Родители пока не добавили время. Поговори с ними 💬"
+        elif minutes <= 0:
+            text = ALLOWED_NOTHING_ADDED
         elif minutes >= WHOLE_DAY_MINUTES:
             text = "🎉 Родители открыли интернет до конца дня!"
         elif status.get("category") == "pause":

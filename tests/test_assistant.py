@@ -993,6 +993,25 @@ async def test_opened_pause_is_reported(monkeypatch: pytest.MonkeyPatch) -> None
     assert "открыли интернет на 30 минут" in telegram.send_message.call_args.args[1]
 
 
+@pytest.mark.asyncio
+async def test_an_allow_with_nothing_to_add_does_not_claim_the_internet_was_opened(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    telegram = MagicMock(send_message=AsyncMock())
+    session = MagicMock()
+    session.__aenter__ = AsyncMock(return_value=MagicMock())
+    session.__aexit__ = AsyncMock(return_value=None)
+    request = MagicMock(request_id=3, telegram_id=5)
+    monkeypatch.setattr(access, "pending_time_requests", AsyncMock(return_value=[request]))
+    monkeypatch.setattr(access, "finish_time_request", AsyncMock())
+    status = {"status": "approved", "minutes": 0, "category": "internet"}
+    pi = MagicMock(time_request_status=AsyncMock(return_value=status))
+    await internet_desk.report_time_decisions(telegram, pi, MagicMock(return_value=session))
+    said = telegram.send_message.call_args.args[1]
+    assert said == internet_desk.ALLOWED_NOTHING_ADDED
+    assert "открыли" not in said and "добавили" not in said
+
+
 def _pi_client(handler: Any) -> PiClient:
     return PiClient(transport=httpx.MockTransport(handler))
 
