@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from lunagpt.assistant import llm, reminders, school
 from lunagpt.assistant.gcal import CalendarError, Event, GoogleCalendar
 from lunagpt.assistant.reminder_desk import local_now
-from lunagpt.assistant.telegram import is_reply_to_prompt, send_long
+from lunagpt.assistant.telegram import edit_screen, is_reply_to_prompt, send_long
 from lunagpt.models import AssistantMember, AssistantTask
 
 logger = logging.getLogger("lunagpt.assistant.calendar_desk")
@@ -249,7 +249,7 @@ class CalendarDesk:
     @staticmethod
     async def _edit(callback: CallbackQuery, text: str, markup: InlineKeyboardMarkup | None) -> None:
         if isinstance(callback.message, Message):
-            await callback.message.edit_text(text, reply_markup=markup)
+            await edit_screen(callback.message, text, markup)
 
     # ---------- linking ----------
 

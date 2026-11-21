@@ -8,6 +8,7 @@ import pytest
 from aiogram.types import Message
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from telegram_fakes import edited, fake_bot, last_sent
 
 from lunagpt.assistant import list_desk, lists
 from lunagpt.models import AssistantFamilyList, AssistantFamilyListItem, AssistantMember
@@ -27,7 +28,7 @@ async def _family(db_sessions: async_sessionmaker[AsyncSession]) -> dict[str, As
 
 
 def _telegram() -> MagicMock:
-    return MagicMock(send_message=AsyncMock())
+    return fake_bot()
 
 
 def _callback(data: str) -> MagicMock:
@@ -37,8 +38,7 @@ def _callback(data: str) -> MagicMock:
 
 
 def _sent(telegram: MagicMock) -> tuple[str, Any]:
-    call = telegram.send_message.call_args
-    return str(call.args[1]), call.kwargs.get("reply_markup")
+    return last_sent(telegram)
 
 
 def _buttons(markup: Any) -> list[tuple[str, str]]:
@@ -133,17 +133,14 @@ async def test_a_tap_ticks_a_line_and_clearing_removes_it(db_sessions: async_ses
     tap = _callback(item)
     await desk.handle(tap, people["kid"], "flt", [item.split(":")[1]])
     shown = tap.message.edit_text.call_args
-    assert "осталось 2, отмечено 1" in shown.args[0] and "✅ молоко" in shown.args[0]
+    assert "осталось 2, отмечено 1" in edited(tap.message) and "✅ молоко" in edited(tap.message)
     assert ("🧹 Убрать отмеченное", f"flc:{shopping}") in _buttons(shown.kwargs["reply_markup"])
     assert (await desk.brief_lines(people["mom"], date(2026, 11, 13))) == ["\n🛒 В покупках 2: хлеб, яйца"]
     assert await desk.brief_lines(people["kid"], date(2026, 11, 13)) == []
 
     clear = _callback(f"flc:{shopping}")
     await desk.handle(clear, people["mom"], "flc", [shopping])
-    assert (
-        "осталось 2" in clear.message.edit_text.call_args.args[0]
-        and "молоко" not in clear.message.edit_text.call_args.args[0]
-    )
+    assert "осталось 2" in edited(clear.message) and "молоко" not in edited(clear.message)
 
 
 @pytest.mark.asyncio
@@ -155,7 +152,7 @@ async def test_a_named_list_is_created_ticked_by_voice_and_gone_when_empty(
     desk = list_desk.ListDesk(telegram, db_sessions)
     _hears(monkeypatch, '{"action": "add", "list": "дача", "items": ["шланг"]}')
     await desk.request(people["mom"], "добавь шланг в список дача")
-    assert "📝 Дача: осталось 1" in _sent(telegram)[0] and await desk.names(people["mom"]) == (
+    assert "📝 Дача\nосталось 1" in _sent(telegram)[0] and await desk.names(people["mom"]) == (
         ["Покупки", "Дела по дому", "Дача"],
         [],
     )
@@ -171,7 +168,7 @@ async def test_a_named_list_is_created_ticked_by_voice_and_gone_when_empty(
         dacha = await db.scalar(select(AssistantFamilyList.id).where(AssistantFamilyList.name == "Дача"))
     clear = _callback(f"flc:{dacha}")
     await desk.handle(clear, people["mom"], "flc", [str(dacha)])
-    assert clear.message.edit_text.call_args.args[0] == list_desk.OVERVIEW and await desk.names(people["mom"]) == (
+    assert edited(clear.message) == list_desk.OVERVIEW and await desk.names(people["mom"]) == (
         ["Покупки", "Дела по дому"],
         [],
     )
@@ -237,7 +234,7 @@ async def test_a_personal_list_is_seen_only_by_its_owner(
     for prefix, arg in (("flo", mine), ("fla", mine), ("flc", mine), ("flt", item)):
         peek = _callback(f"{prefix}:{arg}")
         await desk.handle(peek, people["kid"], prefix, [str(arg)])
-        assert peek.message.edit_text.call_args.args[0] == list_desk.LIST_GONE  # the child gets nothing
+        assert edited(peek.message) == list_desk.LIST_GONE  # the child gets nothing
     async with db_sessions() as db:
         still = await db.get(AssistantFamilyListItem, item)
         assert still is not None and still.done_at is None
@@ -258,7 +255,7 @@ async def test_the_my_list_button_opens_a_personal_list_and_the_chat_adds_to_it(
     desk = list_desk.ListDesk(_telegram(), db_sessions)
     tap = _callback("flm")
     await desk.handle(tap, people["mom"], "flm", [])
-    assert tap.message.edit_text.call_args.args[0].startswith("👤 Мои дела: осталось 0")
+    assert edited(tap.message).startswith("👤 Мои дела\nосталось 0")
     assert await desk.add_from_chat(people["mom"], "", ["позвонить бухгалтеру"], personal=True) == (
         "Добавлено в «👤 Мои дела»: позвонить бухгалтеру."
     )

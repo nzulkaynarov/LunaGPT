@@ -9,6 +9,8 @@ from datetime import date, datetime
 
 import httpx
 
+from lunagpt.assistant.telegram import Rich, esc, rich_table
+
 logger = logging.getLogger("lunagpt.assistant.brief")
 
 GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
@@ -139,17 +141,19 @@ def date_line(day: date) -> str:
 def compose(
     name: str, day: date, weather: str | None, today: list[tuple[datetime, str]], extra: list[str] | None = None
 ) -> str:
-    """The brief text; `today` holds this day's reminders as (local time, text), `extra` the lessons and tasks."""
-    lines = [f"☀️ Доброе утро, {name}! {date_line(day)}"]
+    """The brief as a rich screen; `today` holds this day's reminders as (local time, text), `extra` the lessons
+    and tasks."""
+    parts = [f"<h3>☀️ Доброе утро, {esc(name)}!</h3>", f"<p>{esc(date_line(day))}</p>"]
     if weather:
-        lines.append(weather)
-    lines += extra or []
+        parts.append(f"<p>{esc(weather)}</p>")
+    parts += [f"<p>{esc(line)}</p>" for line in extra or []]
     if today:
-        lines.append("\n🔔 Сегодня:")
-        lines += [f"• {moment:%H:%M} — {text or 'напоминание'}" for moment, text in today]
+        rows = [(f"{moment:%H:%M}", text or "напоминание") for moment, text in today]
+        parts.append(rich_table(rows, caption="🔔 Сегодня"))
     else:
-        lines.append("\nНапоминаний на сегодня нет. Скажи «напомни…», и я напомню.")
-    return "\n".join(lines)
+        parts.append("<p>Напоминаний на сегодня нет. Скажи «напомни…», и я напомню.</p>")
+    screen: str = Rich("".join(parts))
+    return screen
 
 
 def is_due(brief_time: str | None, sent_on: date | None, now: datetime) -> bool:

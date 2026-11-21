@@ -7,6 +7,7 @@ import pytest
 from aiogram.types import Message
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from telegram_fakes import edited
 
 from lunagpt.assistant import school, school_desk
 from lunagpt.assistant.reminder_desk import to_local
@@ -109,7 +110,7 @@ def _callback(data: str) -> MagicMock:
 
 
 def _edited(callback: MagicMock) -> str:
-    return str(callback.message.edit_text.call_args.args[0])
+    return edited(callback.message)
 
 
 @pytest.mark.asyncio
@@ -172,7 +173,7 @@ async def test_tasks_get_deadlines_reminders_and_can_be_done(
 
     done = _callback(f"tkd:{tasks[1].id}")
     await desk.handle(done, member, "tkd", [str(tasks[1].id)])
-    assert "упр. 48" not in _edited(done)
+    assert "упр. 48" not in _edited(done) and "Математика · № 125, 127" in _edited(done)
     async with db_sessions() as db:
         left = list(await db.scalars(select(AssistantReminder)))
     assert [r.task_id for r in left] == [tasks[0].id]  # the done task's reminder is gone

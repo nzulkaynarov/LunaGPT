@@ -15,7 +15,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import access, brief, reminders
-from lunagpt.assistant.telegram import is_reply_to_prompt, send_long
+from lunagpt.assistant.telegram import Rich, edit_screen, esc, is_reply_to_prompt, rich_table, send_long
 from lunagpt.config import settings
 from lunagpt.models import AssistantMember, AssistantReminder
 
@@ -239,18 +239,23 @@ class ReminderDesk:
     async def view(self, member: AssistantMember) -> tuple[str, InlineKeyboardMarkup]:
         rows = await self._active(member.telegram_id)
         now = local_now()
+        parts = [f"<h3>{esc(DAY_TITLE)}</h3>"]
         if rows:
-            lines = [f"{DAY_TITLE}\n\n🔔 Напоминания:"]
-            for number, row in enumerate(rows[:LIST_LIMIT], start=1):
-                when = reminders.when_text(to_local(row.due_at), now, row.repeat)
-                mark = "🗓 " if row.kind == DO else ""
-                lines.append(f"{number}. {mark}{when} — {row.text or 'напоминание'}")
+            table = [
+                (
+                    number,
+                    reminders.when_text(to_local(row.due_at), now, row.repeat),
+                    ("🗓 " if row.kind == DO else "") + (row.text or "напоминание"),
+                )
+                for number, row in enumerate(rows[:LIST_LIMIT], start=1)
+            ]
+            parts.append(rich_table(table, header=("№", "Когда", "Что"), caption="🔔 Напоминания"))
             if len(rows) > LIST_LIMIT:
-                lines.append(f"…и ещё {len(rows) - LIST_LIMIT}")
-            lines.append(f"\nНажми номер, чтобы удалить. {HOW_TO}")
+                parts.append(f"<p>…и ещё {len(rows) - LIST_LIMIT}</p>")
+            parts.append(f"<p>Нажми номер, чтобы удалить. {esc(HOW_TO)}</p>")
         else:
-            lines = [f"{DAY_TITLE}\n\n🔔 Напоминаний пока нет.\n\n{HOW_TO}"]
-        lines.append("\n" + self._brief_status(member))
+            parts.append(f"<p>🔔 Напоминаний пока нет.</p><p>{esc(HOW_TO)}</p>")
+        parts.append(f"<footer>{esc(self._brief_status(member))}</footer>")
         numbers = [_button(f"✖ {n}", f"rmd:{row.id}") for n, row in enumerate(rows[:LIST_LIMIT], start=1)]
         keyboard = [numbers[i : i + 5] for i in range(0, len(numbers), 5)]
         if member.role == "kid":  # the school timetable and homework are children's
@@ -258,7 +263,7 @@ class ReminderDesk:
         if self.calendar:
             keyboard.append([_button("📅 Календарь", "cal")])
         keyboard.append([_button("☀️ Утренняя сводка", "rb")])
-        return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard)
+        return Rich("".join(parts)), InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod
     def _brief_status(member: AssistantMember) -> str:
@@ -309,7 +314,7 @@ class ReminderDesk:
     @staticmethod
     async def _edit(callback: CallbackQuery, text: str, markup: InlineKeyboardMarkup | None) -> None:
         if isinstance(callback.message, Message):
-            await callback.message.edit_text(text, reply_markup=markup)
+            await edit_screen(callback.message, text, markup)
 
     async def _delete(self, user_id: int, reminder_id: int) -> None:
         async with self._sessions() as db:

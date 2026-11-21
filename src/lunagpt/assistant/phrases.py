@@ -9,7 +9,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import access
-from lunagpt.assistant.telegram import is_reply_to_prompt
+from lunagpt.assistant.telegram import edit_screen, is_reply_to_prompt
 from lunagpt.models import AssistantCatPhrase, AssistantMember
 
 logger = logging.getLogger("lunagpt.assistant.phrases")
@@ -145,4 +145,4 @@ class PhraseDesk:
     @staticmethod
     async def _edit(callback: CallbackQuery, text: str, markup: InlineKeyboardMarkup | None) -> None:
         if isinstance(callback.message, Message):
-            await callback.message.edit_text(text, reply_markup=markup)
+            await edit_screen(callback.message, text, markup)

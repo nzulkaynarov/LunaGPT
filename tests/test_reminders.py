@@ -9,9 +9,11 @@ import pytest
 from aiogram.types import Message
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from telegram_fakes import fake_bot, last_sent
 
 from lunagpt.assistant import brief, reminder_desk, reminders
 from lunagpt.assistant.reminders import ReminderParts
+from lunagpt.assistant.telegram import Rich, to_plain
 from lunagpt.models import AssistantMember, AssistantReminder
 
 NOW = datetime(2026, 11, 11, 10, 30)  # a Wednesday
@@ -112,10 +114,13 @@ def test_brief_is_due_once_a_morning(
 def test_brief_text() -> None:
     weather = brief.weather_line("Ташкент", brief.Forecast(low=2.0, high=9.4, rain_chance=80, code=61))
     assert weather == "🌡 Ташкент: от 2° до 9°, небольшой дождь 🌦. Осадки 80%, возьми зонт ☂️."
-    text = brief.compose("Нурбек", date(2026, 11, 11), weather, [(datetime(2026, 11, 11, 9, 0), "позвонить")])
-    assert text.startswith("☀️ Доброе утро, Нурбек! Сегодня среда, 11 ноября.")
-    assert "• 09:00 — позвонить" in text
+    screen = brief.compose("Нурбек", date(2026, 11, 11), weather, [(datetime(2026, 11, 11, 9, 0), "позвонить")])
+    text = to_plain(screen)
+    assert isinstance(screen, Rich) and "<table" in screen
+    assert text.startswith("☀️ Доброе утро, Нурбек!\nСегодня среда, 11 ноября.")
+    assert "🔔 Сегодня\n09:00 · позвонить" in text
     assert "Напоминаний на сегодня нет" in brief.compose("Нурбек", date(2026, 11, 11), None, [])
+    assert "&lt;b&gt;" in brief.compose("<b>", date(2026, 11, 11), None, [])  # names are escaped
 
 
 @pytest.mark.asyncio
@@ -144,11 +149,11 @@ async def test_weather_and_city_come_from_open_meteo() -> None:
 
 
 def _telegram() -> MagicMock:
-    return MagicMock(send_message=AsyncMock())
+    return fake_bot()
 
 
 def _last(telegram: MagicMock) -> str:
-    return str(telegram.send_message.call_args.args[1])
+    return last_sent(telegram)[0]
 
 
 async def _member(db_sessions: async_sessionmaker[AsyncSession], telegram_id: int = 1) -> AssistantMember:
@@ -182,7 +187,7 @@ async def test_reminder_is_saved_confirmed_and_cancelled(
     assert row is not None and reminder_desk.to_local(row.due_at) == datetime(2026, 11, 12, 9, 0)
 
     text, _ = await desk.view(member)
-    assert "1. завтра в 09:00 — позвонить бабушке" in text
+    assert "1 · завтра в 09:00 · позвонить бабушке" in to_plain(text)
     stranger = _callback(f"rmd:{row.id}", user_id=2)
     await desk.handle(stranger, await _member(db_sessions, 2), "rmd", [str(row.id)])
     async with db_sessions() as db:
@@ -280,7 +285,7 @@ async def test_brief_settings_and_morning_send(
         await db.commit()
     assert await desk.send_briefs() == 1
     sent = _last(telegram)
-    assert "Ташкент: от 1° до 8°, ясно" in sent and "• 18:00 — собрание" in sent and "завтра" not in sent
+    assert "Ташкент: от 1° до 8°, ясно" in sent and "18:00 · собрание" in sent and "завтра" not in sent
     assert await desk.send_briefs() == 0  # once a morning
 
 
@@ -292,7 +297,7 @@ async def test_my_day_shows_the_calendar_only_once_google_is_connected(
     hidden = reminder_desk.ReminderDesk(_telegram(), db_sessions)
     shown = reminder_desk.ReminderDesk(_telegram(), db_sessions, calendar=True)
     text, markup = await hidden.view(member)
-    assert text.startswith(reminder_desk.DAY_TITLE)
+    assert to_plain(text).startswith(reminder_desk.DAY_TITLE)
     assert "cal" not in [b.callback_data for row in markup.inline_keyboard for b in row]
     _, markup = await shown.view(member)
     assert "cal" in [b.callback_data for row in markup.inline_keyboard for b in row]

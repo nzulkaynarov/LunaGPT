@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import access, phones
 from lunagpt.assistant.pi_client import PiClient, PiConflictError, PiNotFoundError, PiUnavailableError
-from lunagpt.assistant.telegram import is_reply_to_prompt
+from lunagpt.assistant.telegram import edit_screen, is_reply_to_prompt
 from lunagpt.config import settings
 from lunagpt.models import AssistantApplication, AssistantMember
 
@@ -655,7 +655,7 @@ class PeopleDesk:
     @staticmethod
     async def _edit(callback: CallbackQuery, text: str, markup: InlineKeyboardMarkup | None) -> None:
         if isinstance(callback.message, Message):
-            await callback.message.edit_text(text, reply_markup=markup)
+            await edit_screen(callback.message, text, markup)
 
     async def handle(self, callback: CallbackQuery, actor: AssistantMember, prefix: str, args: list[str]) -> None:
         """Every action here is open to adults only; LunaBot checks that before calling."""

@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from lunagpt.assistant import school
 from lunagpt.assistant.reminder_desk import local_now, to_utc
 from lunagpt.assistant.reminders import when_text
-from lunagpt.assistant.telegram import send_long
+from lunagpt.assistant.telegram import Rich, edit_screen, rich_table, send_long
 from lunagpt.models import AssistantMember, AssistantReminder, AssistantSchedule, AssistantTask
 
 logger = logging.getLogger("lunagpt.assistant.school_desk")
@@ -185,7 +185,7 @@ class SchoolDesk:
     @staticmethod
     async def _edit(callback: CallbackQuery, text: str, markup: InlineKeyboardMarkup | None) -> None:
         if isinstance(callback.message, Message):
-            await callback.message.edit_text(text, reply_markup=markup)
+            await edit_screen(callback.message, text, markup)
 
     async def _save_schedule(self, user_id: int) -> str:
         days = self._pending_schedule.pop(user_id, None)
@@ -269,7 +269,9 @@ class SchoolDesk:
             text = "📚 Расписания пока нет.\n\nПришли фото расписания с подписью «расписание» или напиши его текстом."
             return text, InlineKeyboardMarkup(inline_keyboard=[back])
         keyboard = [[_button("🗑 Удалить расписание", "skx")], back]
-        return f"📚 Расписание:\n\n{school.timetable_text(days)}", InlineKeyboardMarkup(inline_keyboard=keyboard)
+        rows = [(school.SHORT_DAYS[school.WEEKDAYS.index(d)], ", ".join(days[d])) for d in school.WEEKDAYS if d in days]
+        screen = Rich("<h3>📚 Расписание</h3>" + rich_table(rows))
+        return screen, InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     async def tasks_view(self, user_id: int) -> tuple[str, InlineKeyboardMarkup]:
         tasks = await self.open_tasks(user_id)
@@ -281,15 +283,18 @@ class SchoolDesk:
                 "или пришли фото дневника с подписью «запиши домашку»."
             )
             return text, InlineKeyboardMarkup(inline_keyboard=[back])
-        lines = ["📝 Домашка:\n"]
-        for number, task in enumerate(tasks[:LIST_LIMIT], start=1):
-            lines.append(
-                f"{number}. {school.task_line(task.subject, task.text)} — {school.due_text(task.due_on, today)}"
-            )
-        lines.append("\nНажми номер, когда сделано.")
+        rows = [
+            (number, task.subject or "—", task.text, school.due_text(task.due_on, today))
+            for number, task in enumerate(tasks[:LIST_LIMIT], start=1)
+        ]
+        screen = Rich(
+            "<h3>📝 Домашка</h3>"
+            + rich_table(rows, header=("№", "Предмет", "Задание", "Когда"))
+            + "<p>Нажми номер, когда сделано.</p>"
+        )
         buttons = [_button(f"✅ {n}", f"tkd:{t.id}") for n, t in enumerate(tasks[:LIST_LIMIT], start=1)]
         keyboard = [buttons[i : i + 5] for i in range(0, len(buttons), 5)] + [back]
-        return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard)
+        return screen, InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     async def planner_block(self, user_id: int) -> str:
         """The person's timetable and open tasks for the chat model; empty when there is nothing."""

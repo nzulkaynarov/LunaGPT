@@ -15,7 +15,7 @@ from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import access, lists
-from lunagpt.assistant.telegram import is_reply_to_prompt, remove_menu
+from lunagpt.assistant.telegram import Rich, edit_screen, esc, is_reply_to_prompt, remove_menu, send_long
 from lunagpt.models import AssistantFamilyList, AssistantFamilyListItem, AssistantMember
 
 logger = logging.getLogger("lunagpt.assistant.lists")
@@ -223,18 +223,21 @@ class ListDesk:
         shown = items[:MAX_SHOWN]
         left = sum(1 for item, _ in items if item.done_at is None)
         ticked = len(items) - left
-        head = f"{icon(target)} {target.name}: осталось {left}" + (f", отмечено {ticked}" if ticked else "")
+        count = f"осталось {left}" + (f", отмечено {ticked}" if ticked else "")
         personal = target.owner_id is not None
-        lines = [
-            ("✅ " if item.done_at else "▫️ ")
-            + item.text
-            + (f" — {author}" if author and not item.done_at and not personal else "")
-            for item, author in shown
-        ]
-        if not items:
-            lines = ["Пока пусто. Нажми «➕ Добавить» или скажи: «добавь … в список»."]
-        elif len(items) > MAX_SHOWN:
-            lines.append(f"… и ещё {len(items) - MAX_SHOWN}")
+        parts = [f"<h3>{esc(icon(target))} {esc(target.name)}</h3>", f"<p>{count}</p>"]
+        if items:
+            entries = [
+                f'<li><input type="checkbox"{" checked" if item.done_at else ""}>{esc(item.text)}'
+                + (f" — <i>{esc(author)}</i>" if author and not item.done_at and not personal else "")
+                + "</li>"
+                for item, author in shown
+            ]
+            parts.append("<ul>" + "".join(entries) + "</ul>")
+            if len(items) > MAX_SHOWN:
+                parts.append(f"<p>… и ещё {len(items) - MAX_SHOWN}</p>")
+        else:
+            parts.append("<p>Пока пусто. Нажми «➕ Добавить» или скажи: «добавь … в список».</p>")
         buttons = [
             InlineKeyboardButton(
                 text=("✅ " if item.done_at else "▫️ ") + short(item.text), callback_data=f"flt:{item.id}"
@@ -246,7 +249,7 @@ class ListDesk:
         if ticked:
             actions.append(InlineKeyboardButton(text="🧹 Убрать отмеченное", callback_data=f"flc:{list_id}"))
         rows += [actions, [InlineKeyboardButton(text="⬅️ Все списки", callback_data="flb")]]
-        return head + "\n\n" + "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+        return Rich("".join(parts)), InlineKeyboardMarkup(inline_keyboard=rows)
 
     async def view(self, member: AssistantMember) -> None:
         text, markup = await self._overview(member)
@@ -257,9 +260,8 @@ class ListDesk:
         if view is None:
             await self._bot.send_message(member.telegram_id, LIST_GONE)
             return
-        await self._bot.send_message(
-            member.telegram_id, (note + "\n\n" if note else "") + view[0], reply_markup=view[1]
-        )
+        screen = Rich((f"<p>{esc(note)}</p>" if note else "") + view[0])
+        await send_long(self._bot, member.telegram_id, screen, view[1])
 
     # ---------- by voice or text ----------
 
@@ -420,4 +422,4 @@ class ListDesk:
     @staticmethod
     async def _edit(callback: CallbackQuery, text: str, markup: InlineKeyboardMarkup | None) -> None:
         if isinstance(callback.message, Message):
-            await callback.message.edit_text(text, reply_markup=markup)
+            await edit_screen(callback.message, text, markup)

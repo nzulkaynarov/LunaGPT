@@ -87,7 +87,7 @@ from lunagpt.assistant.speech import (
     without_voice_words,
 )
 from lunagpt.assistant.stories import ADULT_STORY_PREFIXES, PHRASE_ASK, STORY_PREFIXES, StoryDesk
-from lunagpt.assistant.telegram import is_reply_to_prompt, remove_menu, send_long, send_model_reply
+from lunagpt.assistant.telegram import edit_screen, is_reply_to_prompt, remove_menu, send_long, send_model_reply
 from lunagpt.assistant.waiting import cat_is_thinking
 from lunagpt.config import settings
 from lunagpt.langfuse_api import Langfuse
@@ -514,7 +514,7 @@ class LunaBot:
     @staticmethod
     async def _edit(callback: CallbackQuery, text: str, markup: InlineKeyboardMarkup | None) -> None:
         if isinstance(callback.message, Message):
-            await callback.message.edit_text(text, reply_markup=markup)
+            await edit_screen(callback.message, text, markup)
 
     async def _photo(
         self, member: AssistantMember, caption: str, picture: PhotoSize | Document, message_id: int | None = None

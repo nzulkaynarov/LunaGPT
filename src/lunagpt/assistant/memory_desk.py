@@ -11,7 +11,7 @@ from aiogram.types import CallbackQuery, ForceReply, InlineKeyboardButton, Inlin
 
 from lunagpt.assistant import access
 from lunagpt.assistant.memories import FAMILY_DUPLICATE, FAMILY_FAILED, FAMILY_FULL, FAMILY_SAVED, Memory
-from lunagpt.assistant.telegram import remove_menu, send_long
+from lunagpt.assistant.telegram import edit_screen, remove_menu, send_long
 from lunagpt.models import AssistantMember
 
 MEMORY_PREFIXES = {"mem", "memd", "memc", "memy"}
@@ -44,7 +44,7 @@ class MemoryDesk:
     @staticmethod
     async def _edit(callback: CallbackQuery, text: str, markup: InlineKeyboardMarkup | None) -> None:
         if isinstance(callback.message, Message):
-            await callback.message.edit_text(text, reply_markup=markup)
+            await edit_screen(callback.message, text, markup)
 
     async def handle(self, callback: CallbackQuery, member: AssistantMember, prefix: str, args: list[str]) -> None:
         user_id = member.telegram_id
