@@ -22,6 +22,8 @@ from lunagpt.assistant.telegram import (
     edit_screen,
     esc,
     is_reply_to_prompt,
+    keep_quoted,
+    kept_quote,
     remove_menu,
     rich_table,
     send_long,
@@ -81,11 +83,22 @@ TaskFn = Callable[[AssistantMember, str], Awaitable[None]]  # Luna carries out a
 FinishTaskFn = Callable[[int, int], Awaitable[bool]]  # marks a person's homework done; False when nothing was open
 DO = "do"
 REMIND = "remind"
-# Asked from Мой день: the question for each kind, and the line above it again when the answer named no time.
+# Asked from Мой день: the question for each kind. An answer with no time, or with nothing to remind or do, gets
+# the question again with a line above it that keeps what the answer did say, so the next answer adds the rest.
 NEW_PROMPTS = {REMIND: REMINDER_PROMPT, DO: TASK_PROMPT}
 WHEN_MISSING = {
-    REMIND: "Не поняла, когда напомнить: назови день или время.",
-    DO: "Не поняла, когда это делать: назови день или время.",
+    REMIND: "Не поняла, когда напомнить «{}»: назови день или время.",
+    DO: "Не поняла, когда делать «{}»: назови день или время.",
+}
+WHAT_MISSING = {
+    REMIND: "Поняла время «{}», а что напомнить? Напиши, о чём.",
+    DO: "Поняла время «{}», а что мне делать? Напиши, что именно.",
+}
+KEPT_LINES = (*WHEN_MISSING.values(), *WHAT_MISSING.values())
+# A phrase with a time and nothing to do would ring a blank reminder, or have Luna carry out an empty task.
+NO_TASK = {
+    REMIND: "Не поняла, что напомнить. Напиши, например: «напомни завтра в 9 позвонить бабушке».",
+    DO: "Не поняла, что мне делать. Напиши, например: «каждый день в 11 присылай 5 английских слов».",
 }
 # A closed row recording that a guest was told their access ended: its due time is the end it was about, so the
 # notice comes once per end and again only after access was extended and ended anew. Nothing lists or rings it.
@@ -179,21 +192,24 @@ class ReminderDesk:
         """Set a reminder from a phrase and show it with a cancel button; return what the person was told.
 
         With kind "do" Luna herself carries the task out at that time instead of ringing it."""
-        said, markup = await self._create(member, text, kind)
+        said, markup, _ = await self._create(member, text, kind)
         await send_long(self._bot, member.telegram_id, said, markup)
         return said
 
     async def _create(
         self, member: AssistantMember, text: str, kind: str = "remind"
-    ) -> tuple[str, InlineKeyboardMarkup | None]:
+    ) -> tuple[str, InlineKeyboardMarkup | None, str]:
+        """The card with its cancel button, or what went wrong and no buttons; then what to remind or do, as heard."""
         user_id = member.telegram_id
         now = local_now()
         parts = await self._extract(text, now, self._metadata(member))
         if parts is None:
-            return NOT_PARSED, None
+            return NOT_PARSED, None, ""
         due = reminders.resolve(parts, now)
         if due is None:
-            return NOT_UNDERSTOOD, None
+            return NOT_UNDERSTOOD, None, parts.task
+        if not parts.task:
+            return NO_TASK[DO if kind == DO else REMIND], None, ""
         async with self._sessions() as db:
             active = await db.scalar(
                 select(func.count())
@@ -201,7 +217,7 @@ class ReminderDesk:
                 .where(AssistantReminder.member_id == user_id, AssistantReminder.done_at.is_(None))
             )
             if (active or 0) >= MAX_ACTIVE:
-                return TOO_MANY, None
+                return TOO_MANY, None, parts.task
             row = AssistantReminder(
                 member_id=user_id, text=parts.task, due_at=to_utc(due), repeat=parts.repeat, kind=kind
             )
@@ -222,11 +238,10 @@ class ReminderDesk:
                 replaced = int(getattr(result, "rowcount", 0) or 0)
             await db.commit()
             reminder_id = row.id
-        what = f": {parts.task}" if parts.task else ""
         cancel = InlineKeyboardMarkup(inline_keyboard=[[_button("✖ Отменить", f"rmd:{reminder_id}", DANGER)]])
         verb = "🗓 Сделаю сама" if kind == DO else "🔔 Напомню"
         note = "\nОбычное напоминание на это же время убрала." if replaced else ""
-        return f"{verb} {reminders.when_text(due, now, parts.repeat)}{what}{note}", cancel
+        return f"{verb} {reminders.when_text(due, now, parts.repeat)}: {parts.task}{note}", cancel, parts.task
 
     # ---------- from Мой день ----------
 
@@ -238,20 +253,30 @@ class ReminderDesk:
     async def ask_new(self, user_id: int, kind: str, problem: str = "") -> None:
         await send_prompt(self._bot, user_id, NEW_PROMPTS[kind], NEW_CANCEL, problem)
 
-    async def create_from_prompt(self, member: AssistantMember, text: str, kind: str) -> str | None:
-        """The answer to "what and when": the card as a phrase makes it, with the way back to Мой день, which made
-        way for the question; an answer with no time gets the question again. What the person was told, or None
-        when nothing was set."""
+    async def create_from_prompt(self, member: AssistantMember, text: str, kind: str, asked: str = "") -> str | None:
+        """The answer to "what and when" (asked is the question it answers): the card as a phrase makes it, with
+        the way back to Мой день, which made way for the question. An answer with no time, or with nothing to remind
+        or do, gets the question again keeping what it did say, and the next answer is read together with that.
+        What the person was told, or None when nothing was set."""
         user_id = member.telegram_id
-        said, markup = await self._create(member, as_request(text), kind)
+        kept = kept_quote(asked, *KEPT_LINES)
+        # «покормить кота» kept and «в 7 вечера» answered read like «напомни покормить кота в 7 вечера».
+        heard = f"{kept} {reminders.REMINDER_REQUEST.sub('', text, count=1).strip()}".strip()
+        said, markup, task = await self._create(member, f"напомни {heard}" if kept else as_request(text), kind)
         if markup is not None:
             back = InlineKeyboardMarkup(inline_keyboard=[*markup.inline_keyboard, [_button(BACK_TO_DAY, "rm")]])
             await send_long(self._bot, user_id, said, back)
             return said
         if said == TOO_MANY:  # Мой день itself, where the extra ones are deleted
             await send_long(self._bot, user_id, *await self.view(member, said))
-        else:
-            await self.ask_new(user_id, kind, WHEN_MISSING[kind] if said == NOT_UNDERSTOOD else TRY_AGAIN)
+            return None
+        if said == NOT_UNDERSTOOD and task:
+            problem = keep_quoted(WHEN_MISSING[kind], task)
+        elif said in NO_TASK.values() and heard:
+            problem = keep_quoted(WHAT_MISSING[kind], heard)
+        else:  # nothing could be read: the same question again, still keeping what an earlier answer said
+            problem = asked.partition("\n")[0] if kept else TRY_AGAIN
+        await self.ask_new(user_id, kind, problem)
         return None
 
     # ---------- from the chat ----------

@@ -76,17 +76,21 @@ DAY_SCHOOL = (
     "• 📚 Расписание и 📝 Домашка — пришли фото с подписью «расписание» "
     "или напиши «задали по математике № 125 к пятнице»"
 )
-DAY_CALENDAR = f"• 📅 Календарь — «добавь в календарь стоматолог в четверг в 15:00» или кнопка «{BTN_ADD_EVENT}»"
+# The button to add an event is there only once the person has connected their own calendar, so that comes first.
+DAY_CALENDAR = (
+    "• 📅 Календарь — подключи свой Google Календарь, и тогда кнопка "
+    f"«{BTN_ADD_EVENT}» или «добавь в календарь стоматолог в четверг в 15:00»"
+)
 DAY_BRIEF = "• ☀️ Утренняя сводка — выбери время и «🏙 Город для погоды»"
 LISTS_LINES = (
     "• «добавь молоко и хлеб в покупки», «вычеркни молоко», а в личный — «добавь в мой список позвонить врачу»",
     f"• {BTN_NEW_LIST} — назови его и выбери, для всей семьи он или только для тебя",
 )
 MEMORY_MINE = "• 👤 что я помню о тебе — другие этого не видят, лишнее можно удалить"
-MEMORY_FAMILY = (
-    "• 🏠 Общая память — «запомни для семьи, что бабушка приедет в субботу»",
-    f"• {BTN_STORY} — повадки и смешные случаи нашей кошки",
-)
+MEMORY_FAMILY = "• 🏠 Общая память — «запомни для семьи, что бабушка приедет в субботу»"
+MEMORY_STORIES = f"• {BTN_STORY} — повадки и смешные случаи нашей кошки"
+# A child's «😺 Фраза для Луны» sits inside the stories, so the help names it there.
+KID_STORIES = f"{MEMORY_STORIES}; там же {BTN_PHRASE} — придумай, что я пишу, пока думаю"
 INTERNET_LINES = (
     f"• {BTN_ASK_TIME} — выбери причину, родители решат",
     f"• {BTN_CHORE} — напиши или пришли фото, что сделал",
@@ -109,8 +113,7 @@ def _day_block(role: str, calendar: bool) -> list[str]:
 def _memory_block(role: str) -> list[str]:
     if role not in FAMILY_ROLES:
         return [GUEST_MEMORY]
-    lines = [BTN_MEMORY, MEMORY_MINE, *MEMORY_FAMILY]
-    return [*lines, f"• {BTN_PHRASE} — придумай, что я пишу, пока думаю"] if role == "kid" else lines
+    return [BTN_MEMORY, MEMORY_MINE, MEMORY_FAMILY, KID_STORIES if role == "kid" else MEMORY_STORIES]
 
 
 def help_text(role: str, calendar: bool = False) -> str:

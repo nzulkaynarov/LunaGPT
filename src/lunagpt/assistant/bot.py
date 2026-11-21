@@ -205,6 +205,12 @@ def needs_adult_attention(text: str) -> bool:
     return bool(SAFETY_PATTERN.search(text))
 
 
+def _asked(answer: Message | None) -> str:
+    """The text of the question a message answers: a question asked again keeps the earlier answer in it."""
+    question = answer.reply_to_message if answer is not None else None
+    return (question.text if question is not None else "") or ""
+
+
 class LunaBot:
     """Routes each private message by the sender's membership and role."""
 
@@ -420,7 +426,7 @@ class LunaBot:
         if self.calendar.is_event_reply(message):
             if await self._may_ask(member):  # too fast, the question stays to be answered in a minute
                 async with ChatActionSender.typing(chat_id=user_id, bot=self._bot):
-                    await self.calendar.request_event(member, text, from_screen=True)
+                    await self.calendar.request_event(member, text, from_screen=True, asked=_asked(message))
                 await self._drop_prompt(message)
             return
         if await self._menu_action(member, text):
@@ -804,7 +810,7 @@ class LunaBot:
             if kind is None:
                 said: str | None = await self.reminders.create(member, text)
             else:
-                said = await self.reminders.create_from_prompt(member, text, kind)
+                said = await self.reminders.create_from_prompt(member, text, kind, asked=_asked(answer))
         if answer is not None:
             await self._drop_prompt(answer)
         if said is not None:

@@ -547,7 +547,9 @@ async def test_a_reminder_from_my_day_asks_asks_again_and_leads_back(
 
     assert await desk.create_from_prompt(member, "позвонить бабушке", reminder_desk.REMIND) is None
     again, markup = last_sent(telegram)
-    assert again == f"{reminder_desk.WHEN_MISSING[reminder_desk.REMIND]}\n{reminder_desk.REMINDER_PROMPT}"
+    assert again == (
+        "Не поняла, когда напомнить «позвонить бабушке»: назови день или время.\n" + reminder_desk.REMINDER_PROMPT
+    )
     assert prompt_cancel(markup) == reminder_desk.NEW_CANCEL
     assert desk.prompt_kind(_answer_to(again)) == reminder_desk.REMIND  # the fresh question still works
     assert await desk.create_from_prompt(member, "завтра позвонить", reminder_desk.REMIND) is None
@@ -589,7 +591,9 @@ async def test_a_task_from_my_day_is_one_luna_carries_out(
     assert desk.prompt_kind(_answer_to(asked)) == reminder_desk.DO
 
     await desk.create_from_prompt(member, "присылай английские слова", reminder_desk.DO)
-    assert last_sent(telegram)[0] == f"{reminder_desk.WHEN_MISSING[reminder_desk.DO]}\n{reminder_desk.TASK_PROMPT}"
+    assert last_sent(telegram)[0] == (
+        "Не поняла, когда делать «присылать 5 английских слов»: назови день или время.\n" + reminder_desk.TASK_PROMPT
+    )
     phrase = "Напомни каждый день в 11 присылать 5 английских слов"
     await desk.create_from_prompt(member, phrase, reminder_desk.DO)
     assert extract.call_args.args[0] == phrase  # said with «напомни» it is not doubled
@@ -599,6 +603,100 @@ async def test_a_task_from_my_day_is_one_luna_carries_out(
     async with db_sessions() as db:
         row = await db.scalar(select(AssistantReminder))
     assert row is not None and row.kind == reminder_desk.DO and row.repeat == "daily"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "first", "heard", "then", "card"),
+    [
+        (
+            reminder_desk.REMIND,
+            _parts(task="покормить кота"),
+            "напомни покормить кота в 7 вечера",
+            _parts(task="покормить кота", time="19:00"),
+            "🔔 Напомню сегодня в 19:00: покормить кота",
+        ),
+        (
+            reminder_desk.DO,
+            _parts(task="присылать английские слова"),
+            "напомни присылать английские слова в 7 вечера",
+            _parts(task="присылать английские слова", time="19:00", repeat="daily"),
+            "🗓 Сделаю сама каждый день в 19:00: присылать английские слова",
+        ),
+    ],
+)
+async def test_asked_again_for_the_time_luna_keeps_what_to_do(
+    db_sessions: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    first: ReminderParts,
+    heard: str,
+    then: ReminderParts,
+    card: str,
+) -> None:
+    """«покормить кота», then «в 7 вечера»: the second answer alone would make a blank reminder or task."""
+    monkeypatch.setattr(reminder_desk, "local_now", lambda: NOW)
+    member = await _member(db_sessions)
+    telegram = _telegram()
+    extract = AsyncMock(side_effect=[first, None, then])
+    desk = reminder_desk.ReminderDesk(telegram, db_sessions, extract)
+    await desk.create_from_prompt(member, first.task, kind)
+    again, _ = last_sent(telegram)
+    line = again.split("\n")[0]
+    assert f"«{first.task}»" in line and desk.prompt_kind(_answer_to(again)) == kind
+
+    await desk.create_from_prompt(member, "в 7 вечера", kind, asked=again)  # the model could not read it
+    assert extract.call_args.args[0] == heard
+    assert last_sent(telegram)[0] == again  # the same question, still keeping what to do
+
+    said = await desk.create_from_prompt(member, "в 7 вечера", kind, asked=again)
+    assert extract.call_args.args[0] == heard  # read together with what was kept
+    assert said == card == last_sent(telegram)[0]
+    async with db_sessions() as db:
+        row = await db.scalar(select(AssistantReminder))
+    assert row is not None and row.text == first.task and row.kind == kind
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "line"),
+    [
+        (reminder_desk.REMIND, "Поняла время «в 7 вечера», а что напомнить? Напиши, о чём."),
+        (reminder_desk.DO, "Поняла время «в 7 вечера», а что мне делать? Напиши, что именно."),
+    ],
+)
+async def test_an_answer_with_a_time_and_nothing_to_do_asks_what_and_keeps_the_time(
+    db_sessions: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch, kind: str, line: str
+) -> None:
+    monkeypatch.setattr(reminder_desk, "local_now", lambda: NOW)
+    member = await _member(db_sessions)
+    telegram = _telegram()
+    extract = AsyncMock(side_effect=[_parts(task="", time="19:00"), _parts(task="покормить кота", time="19:00")])
+    desk = reminder_desk.ReminderDesk(telegram, db_sessions, extract)
+    assert await desk.create_from_prompt(member, "Напомни в 7 вечера", kind) is None
+    again, markup = last_sent(telegram)
+    assert again == f"{line}\n{reminder_desk.NEW_PROMPTS[kind]}" and prompt_cancel(markup) == reminder_desk.NEW_CANCEL
+    async with db_sessions() as db:
+        assert await db.scalar(select(AssistantReminder)) is None  # nothing blank was saved
+
+    said = await desk.create_from_prompt(member, "напомни покормить кота", kind, asked=again)
+    assert extract.call_args.args[0] == "напомни в 7 вечера покормить кота"
+    assert said is not None and said.endswith("сегодня в 19:00: покормить кота")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", [reminder_desk.REMIND, reminder_desk.DO])
+async def test_a_phrase_with_nothing_to_do_sets_nothing(
+    db_sessions: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    monkeypatch.setattr(reminder_desk, "local_now", lambda: NOW)
+    member = await _member(db_sessions)
+    telegram = _telegram()
+    desk = reminder_desk.ReminderDesk(telegram, db_sessions, AsyncMock(return_value=_parts(task=" ", time="19:00")))
+    said = await desk.create(member, "напомни в 7 вечера", kind)
+    assert said == reminder_desk.NO_TASK[kind] == last_sent(telegram)[0]
+    async with db_sessions() as db:
+        assert await db.scalar(select(AssistantReminder)) is None
 
 
 @pytest.mark.asyncio

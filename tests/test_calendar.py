@@ -497,7 +497,9 @@ async def test_a_new_event_from_the_screen_asks_again_then_previews_and_leads_ba
 
     await desk.request_event(member, "стоматолог", from_screen=True)
     again = telegram.send_message.call_args
-    assert again.args[1] == f"{calendar_desk.EVENT_WHEN_MISSING}\n{calendar_desk.EVENT_PROMPT}"
+    assert again.args[1] == (
+        "Не поняла, на когда добавить «Стоматолог»: назови день или время.\n" + calendar_desk.EVENT_PROMPT
+    )
     assert prompt_cancel(again.kwargs["reply_markup"]) == calendar_desk.EVENT_CANCEL
     assert desk.is_event_reply(_answer_to(again.args[1]))  # the fresh question still works
     await desk.request_event(member, "стоматолог в четверг", from_screen=True)
@@ -514,6 +516,31 @@ async def test_a_new_event_from_the_screen_asks_again_then_previews_and_leads_ba
     assert shown.args[0].startswith("✅ Добавила в календарь: Стоматолог")
     assert pressed(shown.kwargs["reply_markup"], calendar_desk.BACK_TO_CALENDAR)[1] == "cal"
     assert [event["summary"] for event in google.created] == ["Стоматолог"]
+
+
+@pytest.mark.asyncio
+async def test_asked_again_for_the_day_the_calendar_keeps_the_event(
+    db_sessions: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """«стоматолог», then «в четверг в 15»: the second answer alone has no event to add."""
+    monkeypatch.setattr(calendar_desk, "local_now", lambda: NOW)
+    member = await _linked(db_sessions)
+    telegram = MagicMock(send_message=AsyncMock())
+    extract = AsyncMock(
+        side_effect=[EventParts(title="Стоматолог"), None, EventParts(title="Стоматолог", day="thu", time="15:00")]
+    )
+    desk = calendar_desk.CalendarDesk(telegram, db_sessions, _calendar(FakeGoogle()), extract)
+    await desk.request_event(member, "стоматолог", from_screen=True, asked=calendar_desk.EVENT_PROMPT)
+    again = telegram.send_message.call_args.args[1]
+    assert desk.is_event_reply(_answer_to(again))
+
+    await desk.request_event(member, "в четверг в 15", from_screen=True, asked=again)  # the model could not read it
+    assert extract.call_args.args[0] == "добавь в календарь Стоматолог в четверг в 15"
+    assert telegram.send_message.call_args.args[1] == again  # the same question, still keeping the event
+
+    await desk.request_event(member, "в четверг в 15", from_screen=True, asked=again)
+    assert extract.call_args.args[0] == "добавь в календарь Стоматолог в четверг в 15"
+    assert telegram.send_message.call_args.args[1] == "📅 Добавить в календарь?\n\nСтоматолог\nзавтра 15:00–16:00"
 
 
 @pytest.mark.asyncio

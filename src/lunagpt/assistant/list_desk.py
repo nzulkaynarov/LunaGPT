@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from lunagpt.assistant import access, lists
 from lunagpt.assistant.telegram import (
     CANCEL,
+    DANGER,
     Previews,
     Rich,
     edit_screen,
@@ -31,12 +32,14 @@ from lunagpt.models import AssistantFamilyList, AssistantFamilyListItem, Assista
 
 logger = logging.getLogger("lunagpt.assistant.lists")
 
-LIST_PREFIXES = {"flo", "flt", "fla", "flc", "flb", "flm", "flq", "fln", "flnq", "fls", "flx"}
+LIST_PREFIXES = {"flo", "flt", "fla", "flc", "flb", "flm", "flq", "fln", "flnq", "fls", "flx", "fld", "fldy"}
 LIST_CANCEL = "flq"  # "✖ Отмена" under "what to add": the list, removed when it was asked, comes back
 NEW_LIST = "fln"  # "➕ Новый список" on the overview
 NEW_LIST_CANCEL = "flnq"  # "✖ Отмена" under "how to name it": all the lists, removed when it was asked, come back
 WHOSE = "fls"  # "🏠 Для всей семьи" or "👤 Только мне" for the name just given
 WHOSE_CANCEL = "flx"  # "✖ Отмена" under that question: it turns back into all the lists
+DROP = "fld"  # "🗑 Удалить список" on an empty list someone named: it asks first
+DROP_YES = "fldy"
 FOR_FAMILY, FOR_ME = "f", "p"
 MAX_LISTS = 12  # for the family, and again for each person
 MAX_OPEN_ITEMS = 100
@@ -65,12 +68,22 @@ NEW_LIST_PROMPT = "📝 Как назвать новый список? Напр�
 NAME_EMPTY = "Не поняла название."
 NAME_TOO_LONG = f"Название длинное: нужно не больше {lists.MAX_NAME_CHARS} знаков."
 NAME_TAKEN = "Так уже называется список «{name}». Придумай другое название."
+# A usual word for a standing list is not a free name: phrases with it land in that list.
+ALIAS_TAKEN = (
+    "«{name}» — это уже список «{meant}»: всё, что просят добавить в {said}, я кладу туда. Придумай другое название."
+)
+MINE_TAKEN = f"«{{name}}» — это и есть твой список «{LOCK} {lists.MY_LIST}», он уже есть. Придумай другое название."
 WHOSE_QUESTION = "📝 Список «{name}»: для кого он? 🏠 Семейный видит и меняет вся семья, 👤 личный — только ты."
 BTN_FOR_FAMILY = "🏠 Для всей семьи"
 BTN_FOR_ME = "👤 Только мне"
 NAME_LOST = f"Это уже неактуально: нажми «{BTN_NEW_LIST}» ещё раз."
 LIST_MADE = "✅ Создала список «{name}». Добавь, что в нём будет."
 LIST_WAS_THERE = "Список «{name}» уже есть, вот он."
+BTN_DROP = "🗑 Удалить список"
+CONFIRM_DROP = "🗑 Удалить пустой список «{name}»? Он пропадёт у всех, кто его видит."
+CONFIRM_DROP_MINE = "🗑 Удалить пустой список «{name}»?"
+LIST_DROPPED = "🗑 Удалила список «{name}»."
+NOT_EMPTY = "В списке уже есть пункты, удалять не стала."
 
 
 def icon(target: AssistantFamilyList) -> str:
@@ -80,6 +93,11 @@ def icon(target: AssistantFamilyList) -> str:
 def label(target: AssistantFamilyList) -> str:
     """How a list is named on screen and in prompts: a personal one carries the lock."""
     return f"{LOCK} {target.name}" if target.owner_id is not None else target.name
+
+
+def standing(target: AssistantFamilyList) -> bool:
+    """«Покупки», «Дела по дому» and a person's «Мои дела» are always there; other lists were named by someone."""
+    return target.name in (lists.DEFAULT_LISTS if target.owner_id is None else (lists.MY_LIST,))
 
 
 def short(text: str, limit: int = MAX_BUTTON_CHARS) -> str:
@@ -301,7 +319,10 @@ class ListDesk:
         actions = [InlineKeyboardButton(text="➕ Добавить", callback_data=f"fla:{list_id}")]
         if ticked:
             actions.append(InlineKeyboardButton(text="🧹 Убрать отмеченное", callback_data=f"flc:{list_id}"))
-        rows += [actions, [InlineKeyboardButton(text="⬅️ Все списки", callback_data="flb")]]
+        rows.append(actions)
+        if not items and not standing(target):  # a typo or a wrong «🏠/👤» is not there for good
+            rows.append([InlineKeyboardButton(text=BTN_DROP, callback_data=f"{DROP}:{list_id}", style=DANGER)])
+        rows.append([InlineKeyboardButton(text="⬅️ Все списки", callback_data="flb")])
         return Rich("".join(parts)), InlineKeyboardMarkup(inline_keyboard=rows)
 
     async def view(self, member: AssistantMember) -> None:
@@ -440,24 +461,27 @@ class ListDesk:
 
     # ---------- a new list by buttons ----------
 
-    async def _taken(self, member: AssistantMember, name: str) -> str | None:
-        """The list this name already means for the person, as shown on screen; None when the name is free. A usual
-        word for a standing list («продукты», «мои дела») is taken by that list, since phrases with it land there."""
+    async def _taken(self, member: AssistantMember, name: str) -> str:
+        """Why this name cannot be a new list, said as it is; '' when it can. A usual word for a standing list
+        («продукты», «дела») is taken by that list, since phrases with it land there; «мои дела» and «мой список»
+        mean the person's own «Мои дела», taken once it is there."""
         family, personal = await self.names(member)
         key = name.casefold()
         found = next((one for one in family if one.casefold() == key), None)
         if found is not None:
-            return found
+            return NAME_TAKEN.format(name=found)
         found = next((one for one in personal if one.casefold() == key), None)
         if found is not None:
-            return f"{LOCK} {found}"
+            return NAME_TAKEN.format(name=f"{LOCK} {found}")
         meant, mine = lists.meant_list(name, False)
-        if mine:  # «мои дела», «мой список»: always the person's own «Мои дела»
-            return f"{LOCK} {meant}"
-        return meant if meant != name else None
+        if mine:
+            there = any(one.casefold() == lists.MY_LIST.casefold() for one in personal)
+            return MINE_TAKEN.format(name=name) if there else ""
+        return ALIAS_TAKEN.format(name=name, meant=meant, said=name.casefold()) if meant != name else ""
 
     async def name_from_reply(self, member: AssistantMember, text: str) -> None:
-        """The answer to "how to name it": a wrong name gets the question again, a good one asks whose list it is."""
+        """The answer to "how to name it": a wrong name gets the question again, a good one asks whose list it is;
+        «мои дела» is always the person's own, so it opens at once."""
         # Quotes inside a name would cut it short where a prompt quotes it back, so they become plain ones.
         typed = " ".join(text.replace("«", '"').replace("»", '"').split()).strip(lists.NAME_TRIM)
         name = lists.list_name(typed)
@@ -466,10 +490,18 @@ class ListDesk:
             problem = NAME_EMPTY
         elif len(typed) > lists.MAX_NAME_CHARS:
             problem = NAME_TOO_LONG
-        elif (taken := await self._taken(member, name)) is not None:
-            problem = NAME_TAKEN.format(name=taken)
+        else:
+            problem = await self._taken(member, name)
         if problem:
             await send_prompt(self._bot, member.telegram_id, NEW_LIST_PROMPT, NEW_LIST_CANCEL, problem)
+            return
+        if lists.meant_list(name, False)[1]:  # the same as the «👤 Мои дела» button: no question whose it is
+            async with self._sessions() as db:
+                mine = await self._named(db, member, lists.MY_LIST, personal=True, create=True)
+            if mine is None:
+                await self._send_overview(member, TOO_MANY_LISTS)
+            else:
+                await self._send_list(member, mine.id, LIST_MADE.format(name=label(mine)))
             return
         token = self._new_names.keep(member.telegram_id, name)
         markup = InlineKeyboardMarkup(
@@ -523,6 +555,9 @@ class ListDesk:
         if prefix in (NEW_LIST, NEW_LIST_CANCEL, WHOSE, WHOSE_CANCEL):
             await self._new_list(callback, member, prefix, args)
             return
+        if prefix in (DROP, DROP_YES):
+            await self._drop(callback, member, prefix, int(args[0]))
+            return
         if prefix == "flb":
             await self._edit(callback, *await self._overview(member))
             return
@@ -562,6 +597,35 @@ class ListDesk:
         if view is not None:
             await self._edit(callback, *view)
 
+    async def _drop(self, callback: CallbackQuery, member: AssistantMember, prefix: str, list_id: int) -> None:
+        """«🗑 Удалить список» asks first, then removes the list while it is still empty and all the lists come back.
+        A list that got lines meanwhile stays and says why; one that is gone leads to all the lists."""
+        async with self._sessions() as db:
+            target = await self._visible(db, member, list_id)
+            empty = target is not None and not standing(target) and not await self._items(db, list_id)
+            name = label(target) if target is not None else ""
+            if empty and target is not None and prefix == DROP_YES:
+                await db.delete(target)
+                await db.commit()
+        if target is None or (empty and prefix == DROP_YES):
+            text, markup = await self._overview(member)
+            note = LIST_DROPPED.format(name=name) if target is not None else LIST_GONE
+            await self._edit(callback, f"{note}\n\n{text}", markup)
+            return
+        if not empty:
+            screen = await self._list_screen(member, list_id, "" if standing(target) else NOT_EMPTY)
+            if screen is not None:
+                await self._edit(callback, *screen)
+            return
+        question = CONFIRM_DROP_MINE if target.owner_id is not None else CONFIRM_DROP
+        markup = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="Да, удалить", callback_data=f"{DROP_YES}:{list_id}", style=DANGER)],
+                [InlineKeyboardButton(text="← Назад", callback_data=f"flo:{list_id}")],
+            ]
+        )
+        await self._edit(callback, question.format(name=name), markup)
+
     async def _toggle(self, member: AssistantMember, item_id: int) -> int | None:
         async with self._sessions() as db:
             item = await db.get(AssistantFamilyListItem, item_id)
@@ -586,8 +650,7 @@ class ListDesk:
                 .select_from(AssistantFamilyListItem)
                 .where(AssistantFamilyListItem.list_id == list_id)
             )
-            standing = lists.DEFAULT_LISTS if target is None or target.owner_id is None else (lists.MY_LIST,)
-            gone = target is not None and target.name not in standing and not left
+            gone = target is not None and not standing(target) and not left
             if gone:
                 await db.delete(target)
             await db.commit()

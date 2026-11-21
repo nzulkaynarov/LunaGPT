@@ -97,3 +97,14 @@ async def test_rejected_markdown_falls_back_to_plain_text() -> None:
 )
 def test_only_math_stays_a_formula(raw: str, expected: str) -> None:
     assert telegram.escape_prices(raw) == expected
+
+
+def test_a_question_asked_again_keeps_the_earlier_answer_and_reads_it_back() -> None:
+    line = "Не поняла, когда напомнить «{}»: назови день или время."
+    other = "Поняла время «{}», а что напомнить? Напиши, о чём."
+    kept = telegram.keep_quoted(line, "покормить «Луну»\nи кота")
+    assert kept == 'Не поняла, когда напомнить «покормить "Луну" и кота»: назови день или время.'
+    asked = f"{kept}\n🔔 Что и когда напомнить? Например: «завтра в 9 позвонить бабушке»."
+    assert telegram.kept_quote(asked, other, line) == 'покормить "Луну" и кота'
+    assert telegram.kept_quote("🔔 Что и когда напомнить? Например: «завтра в 9 позвонить бабушке».", line) == ""
+    assert telegram.kept_quote(f"Не получилось разобрать.\n{kept}", line) == ""  # only the line above the question

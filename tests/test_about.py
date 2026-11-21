@@ -92,6 +92,21 @@ def test_help_keeps_the_calendar_hidden_until_it_is_connected() -> None:
     assert all(calendar_desk.BTN_ADD_EVENT not in menu.help_text(role) for role in access.ROLES)
 
 
+@pytest.mark.parametrize("role", sorted(access.FAMILY_ROLES))
+def test_help_says_the_event_button_comes_after_connecting_ones_own_calendar(role: str) -> None:
+    """«➕ Событие» is only on the calendar screen of someone who connected their calendar."""
+    [line] = [line for line in menu.help_text(role, calendar=True).split("\n") if calendar_desk.BTN_ADD_EVENT in line]
+    assert line.index("подключи свой Google Календарь") < line.index(calendar_desk.BTN_ADD_EVENT)
+
+
+def test_help_puts_the_phrase_where_its_button_is() -> None:
+    """The child's «😺 Фраза для Луны» is inside «🐈 Истории про Луну», as about.md says, not on «🧠 Память»."""
+    [line] = [line for line in menu.help_text("kid").split("\n") if menu.BTN_PHRASE in line]
+    assert line.startswith(f"• {memory_desk.BTN_STORY} — ")  # the stories' own line, not one beside it
+    about_text = about.ABOUT_FILE.read_text(encoding="utf-8")
+    assert f"«{menu.BTN_MEMORY}» → «{memory_desk.BTN_STORY}» → «{menu.BTN_PHRASE}»" in about_text
+
+
 def test_about_tells_the_truth_about_voice() -> None:
     """A voice note is answered aloud as well, without being asked; a typed question only when asked."""
     text = about.ABOUT_FILE.read_text(encoding="utf-8")

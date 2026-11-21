@@ -23,6 +23,8 @@ from lunagpt.assistant.telegram import (
     Previews,
     edit_screen,
     is_reply_to_prompt,
+    keep_quoted,
+    kept_quote,
     remove_menu,
     send_long,
     send_prompt,
@@ -73,7 +75,9 @@ EXPIRED = "Это уже неактуально, напиши ещё раз."
 BTN_ADD_EVENT = "➕ Событие"
 BACK_TO_CALENDAR = "← Календарь"
 EVENT_PROMPT = "📅 Что и когда добавить? Например: «стоматолог в четверг в 15:00»."
-EVENT_WHEN_MISSING = "Не поняла, на когда: назови день или время."
+# An answer with no day or time gets the question again with a line that keeps the event it named, so the next
+# answer («в четверг в 15») is read together with it.
+EVENT_WHEN_MISSING = "Не поняла, на когда добавить «{}»: назови день или время."
 EVENT_TRY_AGAIN = "Не получилось разобрать событие, попробуй ещё раз."
 CANCELLED = "Отменила, в календарь ничего не добавила."
 CONFIRM_UNLINK = (
@@ -365,9 +369,12 @@ class CalendarDesk:
     def is_event_reply(message: Message) -> bool:
         return bool(is_reply_to_prompt(message, EVENT_PROMPT))
 
-    async def request_event(self, member: AssistantMember, text: str, from_screen: bool = False) -> None:
-        """A preview of the event to add. An answer to the calendar's own question that names no time, or that
-        could not be read, gets the question again."""
+    async def request_event(
+        self, member: AssistantMember, text: str, from_screen: bool = False, asked: str = ""
+    ) -> None:
+        """A preview of the event to add. An answer to the calendar's own question (asked is its text) that names
+        no time gets the question again keeping the event it named, and the next answer is read together with it;
+        one that could not be read gets the question again as it was."""
         user_id = member.telegram_id
         if member.role not in access.FAMILY_ROLES:  # guests keep their plans in reminders
             await send_long(self._bot, user_id, GUESTS_NO_CALENDAR)
@@ -386,10 +393,16 @@ class CalendarDesk:
             "source": "luna_assistant",
             "tags": ["client:luna-assistant", "feature:calendar", f"role:{member.role}"],
         }
-        parts = await self._extract(as_request(text) if from_screen else text, now, metadata)
+        kept = kept_quote(asked, EVENT_WHEN_MISSING)
+        # «Стоматолог» kept and «в четверг в 15» answered read like «добавь в календарь Стоматолог в четверг в 15».
+        phrase = f"добавь в календарь {kept} {text}" if kept else (as_request(text) if from_screen else text)
+        parts = await self._extract(phrase, now, metadata)
         planned = plan(parts, now) if parts is not None else None
         if planned is None and from_screen:
-            problem = EVENT_TRY_AGAIN if parts is None else EVENT_WHEN_MISSING
+            if parts is not None:
+                problem = keep_quoted(EVENT_WHEN_MISSING, parts.title)
+            else:  # the same question again, still keeping the event an earlier answer named
+                problem = asked.partition("\n")[0] if kept else EVENT_TRY_AGAIN
             await send_prompt(self._bot, user_id, EVENT_PROMPT, EVENT_CANCEL, problem)
             return
         if planned is None:

@@ -158,6 +158,27 @@ async def send_prompt(bot: Bot, chat_id: int, prompt: str, cancel: str, problem:
     return sent
 
 
+KEPT_CHARS = 300  # what the line above a prompt asked again keeps of the earlier answer
+
+
+def keep_quoted(line: str, said: str) -> str:
+    """The line above a prompt asked again, keeping what the earlier answer did say in «» where the line has {}:
+    the next answer only adds the rest, and kept_quote reads it back. Quotes and line breaks in it become plain."""
+    plain = " ".join(said.replace("«", '"').replace("»", '"').split())[:KEPT_CHARS]
+    return line.format(plain)
+
+
+def kept_quote(asked: str, *lines: str) -> str:
+    """What the line above the prompt that was answered kept, when it is one of these lines; '' otherwise."""
+    first = asked.partition("\n")[0]
+    for line in lines:
+        head, _, tail = line.partition("{}")
+        found = re.fullmatch(f"{re.escape(head)}([^«»\\n]+){re.escape(tail)}", first)
+        if found:
+            return found.group(1)
+    return ""
+
+
 MAX_PREVIEWS = 5  # previews one person may have waiting at once; the oldest goes first
 
 

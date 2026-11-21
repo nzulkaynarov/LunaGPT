@@ -2422,6 +2422,10 @@ async def test_a_wrong_answer_leaves_a_fresh_prompt_in_place_of_the_old_one(
         ("kid", list_desk.WHOSE, True),
         ("guest", list_desk.NEW_LIST, False),  # guests have no lists
         ("guest", list_desk.WHOSE, False),
+        ("kid", list_desk.DROP, True),
+        ("adult", list_desk.DROP_YES, True),
+        ("guest", list_desk.DROP, False),
+        ("guest", list_desk.DROP_YES, False),
     ],
 )
 def test_new_buttons_are_open_to_the_roles_that_see_them(role: str, prefix: str, allowed: bool) -> None:
@@ -2445,6 +2449,7 @@ async def test_an_answer_to_my_days_question_sets_it_and_the_question_goes(
     await instance.on_message(reply)
     member, text, asked_kind = instance.reminders.create_from_prompt.await_args.args
     assert (member.telegram_id, text, asked_kind) == (5, "завтра в 9 позвонить", kind)
+    assert instance.reminders.create_from_prompt.await_args.kwargs == {"asked": prompt}  # it may keep an answer
     instance.reminders.create.assert_not_awaited()
     answer.assert_not_awaited()
     instance._bot.delete_message.assert_awaited_once()  # the answered question leaves the chat
@@ -2480,7 +2485,8 @@ async def test_an_answer_to_the_calendars_question_goes_the_phrases_way(
     reply.from_user.id = 5
     await instance.on_message(reply)
     call = instance.calendar.request_event.await_args
-    assert call.args[1] == "стоматолог в четверг в 15:00" and call.kwargs == {"from_screen": True}
+    assert call.args[1] == "стоматолог в четверг в 15:00"
+    assert call.kwargs == {"from_screen": True, "asked": calendar_desk.EVENT_PROMPT}  # it may keep an answer
     instance._bot.delete_message.assert_awaited_once()
     answer.assert_not_awaited()
 

@@ -561,9 +561,13 @@ async def test_every_family_member_sees_new_list_and_the_question_can_be_cancell
         ("  «» ", list_desk.NAME_EMPTY),
         ("Очень длинное название для списка на даче", list_desk.NAME_TOO_LONG),
         ("покупки", list_desk.NAME_TAKEN.format(name="Покупки")),
-        ("продукты", list_desk.NAME_TAKEN.format(name="Покупки")),  # phrases with it land in «Покупки»
-        ("дела", list_desk.NAME_TAKEN.format(name="Дела по дому")),
-        ("мои дела", list_desk.NAME_TAKEN.format(name="👤 Мои дела")),
+        # Phrases with these words land in a standing list, and the question says so instead of a false name.
+        (
+            "продукты",
+            "«Продукты» — это уже список «Покупки»: всё, что просят добавить в продукты, я кладу туда. "
+            "Придумай другое название.",
+        ),
+        ("список дел", list_desk.ALIAS_TAKEN.format(name="Список дел", meant="Дела по дому", said="список дел")),
     ],
 )
 async def test_a_wrong_name_asks_again_with_what_was_wrong(
@@ -596,7 +600,7 @@ async def test_a_child_makes_a_family_list_everyone_sees_and_it_opens_empty(
     shown = edited(choice.message)
     assert shown.startswith(list_desk.LIST_MADE.format(name="Дача")) and "Пока пусто" in shown
     screen = [b[0] for b in _buttons(choice.message.edit_text.call_args.kwargs["reply_markup"])]
-    assert screen == ["➕ Добавить", "⬅️ Все списки"]  # the next step and the way back
+    assert screen == ["➕ Добавить", list_desk.BTN_DROP, "⬅️ Все списки"]  # next step, way out, way back
     assert "Дача" in (await desk.names(people["mom"]))[0]
 
     again = _callback(data)  # the same question pressed twice makes one list
@@ -644,3 +648,129 @@ async def test_no_new_list_past_the_limit(db_sessions: async_sessionmaker[AsyncS
     await desk.handle(choice, people["mom"], prefix, args)
     assert edited(choice.message) == f"{list_desk.TOO_MANY_LISTS}\n\n{list_desk.OVERVIEW}"
     assert "Дача" not in (await desk.names(people["mom"]))[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("typed", ["Мои дела", "мой список"])
+async def test_my_own_list_by_name_opens_at_once_while_it_is_not_there(
+    db_sessions: async_sessionmaker[AsyncSession], typed: str
+) -> None:
+    """With another personal list the «👤 Мои дела» button is gone, so its name typed makes it, with no question."""
+    people = await _family(db_sessions)
+    telegram = _telegram()
+    desk = list_desk.ListDesk(telegram, db_sessions)
+    async with db_sessions() as db:
+        await desk._named(db, people["kid"], "Подарки", personal=True, create=True)
+    _, markup = await desk._overview(people["kid"])
+    assert "flm" not in [data for _, data in _buttons(markup)]
+
+    shown, markup = await _named_by(desk, people["kid"], typed)
+    assert shown.startswith(list_desk.LIST_MADE.format(name="👤 Мои дела")) and "Пока пусто" in shown
+    assert "➕ Добавить" in dict(_buttons(markup)) and list_desk.BTN_DROP not in dict(_buttons(markup))
+    assert sorted((await desk.names(people["kid"]))[1]) == ["Мои дела", "Подарки"]
+
+    again, _ = await _named_by(desk, people["kid"], "мой список")
+    assert again == (
+        "«Мой список» — это и есть твой список «👤 Мои дела», он уже есть. Придумай другое название.\n"
+        + list_desk.NEW_LIST_PROMPT
+    )
+    taken, _ = await _named_by(desk, people["kid"], "мои дела")
+    assert taken == f"{list_desk.NAME_TAKEN.format(name='👤 Мои дела')}\n{list_desk.NEW_LIST_PROMPT}"
+    assert (await desk.names(people["kid"]))[1].count("Мои дела") == 1
+
+
+async def _made_empty(desk: list_desk.ListDesk, member: AssistantMember, name: str, whose: str) -> MagicMock:
+    """A list made by «➕ Новый список» and the «🏠/👤» choice; the screen it opened on."""
+    _, markup = await _named_by(desk, member, name)
+    data, prefix, args = pressed(markup, whose)
+    choice = _callback(data)
+    await desk.handle(choice, member, prefix, args)
+    return choice
+
+
+def _screen(callback: MagicMock) -> Any:
+    return callback.message.edit_text.call_args.kwargs["reply_markup"]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_list_made_by_mistake_is_removed_from_its_own_screen(
+    db_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    people = await _family(db_sessions)
+    telegram = _telegram()
+    desk = list_desk.ListDesk(telegram, db_sessions)
+    made = await _made_empty(desk, people["mom"], "Дачв", list_desk.BTN_FOR_FAMILY)  # a typo, for the family
+    assert "Дачв" in (await desk.names(people["kid"]))[0]
+
+    data, prefix, args = pressed(_screen(made), list_desk.BTN_DROP)
+    ask = _callback(data)
+    await desk.handle(ask, people["mom"], prefix, args)
+    assert edited(ask.message) == list_desk.CONFIRM_DROP.format(name="Дачв")
+    assert "Дачв" in (await desk.names(people["kid"]))[0]  # nothing goes before the answer
+
+    data, prefix, args = pressed(_screen(ask), "← Назад")
+    back = _callback(data)
+    await desk.handle(back, people["mom"], prefix, args)
+    assert edited(back.message).startswith("📝 Дачв") and list_desk.BTN_DROP in dict(_buttons(_screen(back)))
+
+    data, prefix, args = pressed(_screen(ask), "Да, удалить")
+    yes = _callback(data)
+    await desk.handle(yes, people["mom"], prefix, args)
+    assert edited(yes.message) == f"{list_desk.LIST_DROPPED.format(name='Дачв')}\n\n{list_desk.OVERVIEW}"
+    assert (list_desk.BTN_NEW_LIST, list_desk.NEW_LIST) in _buttons(_screen(yes))
+    assert await desk.names(people["kid"]) == (["Покупки", "Дела по дому"], [])
+
+    late = _callback(data)  # the same confirmation pressed again
+    await desk.handle(late, people["mom"], prefix, args)
+    assert edited(late.message) == f"{list_desk.LIST_GONE}\n\n{list_desk.OVERVIEW}"
+
+
+@pytest.mark.asyncio
+async def test_a_personal_list_made_by_mistake_goes_only_for_its_owner(
+    db_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    people = await _family(db_sessions)
+    desk = list_desk.ListDesk(_telegram(), db_sessions)
+    made = await _made_empty(desk, people["mom"], "Работа", list_desk.BTN_FOR_ME)
+    data, prefix, args = pressed(_screen(made), list_desk.BTN_DROP)
+    list_id = args[0]
+
+    other = _callback(f"{list_desk.DROP_YES}:{list_id}")  # someone else's list is not theirs to remove
+    await desk.handle(other, people["kid"], list_desk.DROP_YES, [list_id])
+    assert edited(other.message).startswith(list_desk.LIST_GONE)
+    assert (await desk.names(people["mom"]))[1] == ["Работа"]
+
+    ask = _callback(data)
+    await desk.handle(ask, people["mom"], prefix, args)
+    assert edited(ask.message) == list_desk.CONFIRM_DROP_MINE.format(name="👤 Работа")
+    yes = _callback(f"{list_desk.DROP_YES}:{list_id}")
+    await desk.handle(yes, people["mom"], list_desk.DROP_YES, [list_id])
+    assert (await desk.names(people["mom"]))[1] == []
+
+
+@pytest.mark.asyncio
+async def test_a_list_with_lines_or_a_standing_one_is_not_removed(
+    db_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    people = await _family(db_sessions)
+    desk = list_desk.ListDesk(_telegram(), db_sessions)
+    made = await _made_empty(desk, people["mom"], "Дача", list_desk.BTN_FOR_FAMILY)
+    data, prefix, args = pressed(_screen(made), list_desk.BTN_DROP)
+    async with db_sessions() as db:
+        dacha = await db.get(AssistantFamilyList, int(args[0]))
+        assert dacha is not None
+        await desk._add(db, dacha, ["шланг"], KID)  # the child added a line while the question was open
+
+    yes = _callback(f"{list_desk.DROP_YES}:{args[0]}")
+    await desk.handle(yes, people["mom"], list_desk.DROP_YES, args)
+    shown = edited(yes.message)
+    assert shown.startswith(f"{list_desk.NOT_EMPTY}\n📝 Дача") and "шланг" in shown
+    assert list_desk.BTN_DROP not in dict(_buttons(_screen(yes)))
+    assert "Дача" in (await desk.names(people["mom"]))[0]
+
+    shopping = await _shopping(desk, people["mom"])
+    screen = await desk._list_view(people["mom"], shopping.id)
+    assert screen is not None and list_desk.BTN_DROP not in dict(_buttons(screen[1]))
+    forged = _callback(f"{list_desk.DROP_YES}:{shopping.id}")
+    await desk.handle(forged, people["mom"], list_desk.DROP_YES, [str(shopping.id)])
+    assert "Покупки" in (await desk.names(people["mom"]))[0]
