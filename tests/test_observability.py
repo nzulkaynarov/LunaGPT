@@ -10,6 +10,7 @@ import pytest
 from aiogram.types import ReactionTypeCustomEmoji, ReactionTypeEmoji
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from telegram_fakes import fake_bot, last_sent
 
 from lunagpt.assistant import feedback, model_health, usage
 from lunagpt.assistant.feedback import FeedbackDesk, verdict
@@ -251,16 +252,16 @@ def test_feedback_and_eval_lines() -> None:
 async def test_weekly_report_carries_the_extra_block_and_survives_its_failure(
     sessions: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    bot = MagicMock(send_message=AsyncMock())
+    bot = fake_bot()
     sunday = datetime(2026, 11, 22, 20, 30)
     assert await usage.send_weekly_report(bot, sessions, sunday, AsyncMock(return_value=["", "🩺 Модели за неделю"]))
-    assert bot.send_message.await_args.args[1].endswith("🩺 Модели за неделю")
+    assert last_sent(bot)[0].endswith("🩺 Модели за неделю")
 
     async with sessions() as db:
         await db.execute(update(AssistantMember).values(report_sent_on=None))
         await db.commit()
     assert await usage.send_weekly_report(bot, sessions, sunday, AsyncMock(side_effect=RuntimeError))
-    assert "📊 Luna за неделю" in bot.send_message.await_args.args[1]
+    assert "📊 Luna за неделю" in last_sent(bot)[0]
 
 
 def test_feedback_score_name_matches_the_report() -> None:

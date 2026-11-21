@@ -7,8 +7,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from telegram_fakes import fake_bot
 
 from lunagpt.assistant import usage
+from lunagpt.assistant.telegram import to_plain
 from lunagpt.models import AssistantMember, AssistantUsage
 
 SUNDAY = date(2026, 11, 15)
@@ -65,10 +67,12 @@ async def test_week_report_names_days_features_cost_and_what_nobody_opened(
     await usage.record(db_sessions, 1, "lists", SUNDAY)
     await usage.record(db_sessions, 1, "chat", date(2026, 11, 8), 5.0)  # a week earlier: left out
     async with db_sessions() as db:
-        text = usage.report_text(await usage.week(db, SUNDAY), SUNDAY)
+        screen = usage.report_html(await usage.week(db, SUNDAY), SUNDAY, ["", "🩺 Модели за неделю", "• ok"])
+    text = to_plain(screen)
     assert "09.11–15.11" in text
-    assert "• Хозяин: 3 из 7 дней — чат 3, списки 1 · $0.30" in text
-    assert "• Миша: 0 из 7 дней" in text
+    assert "Хозяин · 3 из 7 · чат 3, списки 1 · $0.30" in text
+    assert "Миша · 0 из 7 · — · $0.00" in text
+    assert "<details><summary>🩺 Модели за неделю</summary><p>• ok</p></details>" in screen
     assert "Модели за неделю: $0.30" in text
     assert "Никто не открывал:" in text and "истории" in text and "списки" not in text.split("Никто")[1]
 
@@ -83,9 +87,9 @@ def test_report_goes_out_on_sunday_evening_once() -> None:
 @pytest.mark.asyncio
 async def test_owner_gets_the_report_once(db_sessions: async_sessionmaker[AsyncSession]) -> None:
     await _family(db_sessions)
-    bot = MagicMock(send_message=AsyncMock())
+    bot = fake_bot()
     evening = datetime(2026, 11, 15, 20, 0)
     assert await usage.send_weekly_report(bot, db_sessions, evening)
     assert not await usage.send_weekly_report(bot, db_sessions, evening)
-    assert bot.send_message.await_count == 1
-    assert bot.send_message.await_args.args[0] == 1  # only the owner
+    assert bot.send_rich_message.await_count == 1
+    assert bot.send_rich_message.await_args.args[0] == 1  # only the owner

@@ -25,7 +25,7 @@ from lunagpt.assistant.phrases import PHRASE_PREFIXES
 from lunagpt.assistant.reminder_desk import REMINDER_PREFIXES
 from lunagpt.assistant.school_desk import SCHOOL_PREFIXES
 from lunagpt.assistant.stories import STORY_PREFIXES
-from lunagpt.assistant.telegram import send_long
+from lunagpt.assistant.telegram import Rich, esc, rich_table, send_long
 from lunagpt.models import AssistantMember, AssistantUsage
 
 logger = logging.getLogger("lunagpt.assistant.usage")
@@ -131,25 +131,30 @@ def _money(value: Decimal) -> str:
     return f"${value:.2f}"
 
 
-def report_text(people: Sequence[PersonWeek], last_day: date) -> str:
+def report_html(people: Sequence[PersonWeek], last_day: date, extra: Sequence[str] = ()) -> str:
+    """The owner's week as a rich screen; `extra` (the models' health) folds away under a summary."""
     first_day = last_day - timedelta(days=WEEK_DAYS - 1)
-    lines = [f"📊 Luna за неделю, {first_day:%d.%m}–{last_day:%d.%m}", ""]
+    rows = []
     for person in sorted(people, key=lambda p: (-len(p.days), p.name)):
         used = sorted(person.counts.items(), key=lambda item: -item[1])[:4]
         details = ", ".join(f"{FEATURE_NAMES.get(name, name)} {count}" for name, count in used)
-        line = f"• {person.name}: {len(person.days)} из {WEEK_DAYS} дней"
-        if details:
-            line += f" — {details}"
-        if person.cost:
-            line += f" · {_money(person.cost)}"
-        lines.append(line)
+        rows.append((person.name, f"{len(person.days)} из {WEEK_DAYS}", details or "—", _money(person.cost)))
     total = sum((p.cost for p in people), Decimal(0))
-    lines += ["", f"Модели за неделю: {_money(total)}"]
+    parts = [
+        f"<h3>📊 Luna за неделю, {first_day:%d.%m}–{last_day:%d.%m}</h3>",
+        rich_table(rows, header=("Кто", "Дней", "Чем пользовался", "$")),
+        f"<p>Модели за неделю: {_money(total)}</p>",
+    ]
     opened = {name for p in people for name in p.counts}
     unused = [FEATURE_NAMES[name] for name in OPTIONAL_FEATURES if name not in opened]
     if unused:
-        lines.append("Никто не открывал: " + ", ".join(unused) + ".")
-    return "\n".join(lines)
+        parts.append(f"<p>Никто не открывал: {esc(', '.join(unused))}.</p>")
+    lines = [line.strip() for line in extra if line.strip()]
+    if lines:
+        body = "".join(f"<p>{esc(line)}</p>" for line in lines[1:])
+        parts.append(f"<details><summary>{esc(lines[0])}</summary>{body}</details>")
+    screen: str = Rich("".join(parts))
+    return screen
 
 
 def report_due(now: datetime, sent_on: date | None) -> bool:
@@ -178,7 +183,7 @@ async def send_weekly_report(
         owner = await db.scalar(select(AssistantMember).where(AssistantMember.role == "owner"))
         if owner is None or not report_due(now, owner.report_sent_on):
             return False
-        text = "\n".join([report_text(await week(db, now.date()), now.date()), *added])
+        text = report_html(await week(db, now.date()), now.date(), added)
         owner.report_sent_on = now.date()  # marked first: a Telegram failure loses one report, never repeats it
         await db.commit()
         owner_id = owner.telegram_id
