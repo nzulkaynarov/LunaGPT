@@ -309,3 +309,15 @@ def test_only_real_brief_times_are_accepted(value: str) -> None:
 
     assert not reminder_desk.BRIEF_TIME.fullmatch(value)
     assert reminder_desk.BRIEF_TIME.fullmatch("0730") and reminder_desk.BRIEF_TIME.fullmatch("2359")
+
+
+def test_button_colours_mean_the_same_everywhere() -> None:
+    from lunagpt.assistant import school_desk
+    from lunagpt.assistant.telegram import SUCCESS
+
+    def styles(markup: object) -> dict[str, str | None]:
+        return {b.text: b.style for row in markup.inline_keyboard for b in row}  # type: ignore[attr-defined]
+
+    assert styles(reminder_desk.ring_keyboard(1))["✅ Готово"] == SUCCESS
+    assert styles(reminder_desk.ring_keyboard(1))["⏰ +10 мин"] is None
+    assert styles(school_desk._confirm("sk"))["✅ Сохранить"] == SUCCESS

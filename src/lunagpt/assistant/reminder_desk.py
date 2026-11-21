@@ -15,7 +15,16 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import access, brief, reminders
-from lunagpt.assistant.telegram import Rich, edit_screen, esc, is_reply_to_prompt, rich_table, send_long
+from lunagpt.assistant.telegram import (
+    DANGER,
+    SUCCESS,
+    Rich,
+    edit_screen,
+    esc,
+    is_reply_to_prompt,
+    rich_table,
+    send_long,
+)
 from lunagpt.config import settings
 from lunagpt.models import AssistantMember, AssistantReminder
 
@@ -59,8 +68,8 @@ def to_local(moment: datetime) -> datetime:
     return (moment.astimezone(UTC) + timedelta(hours=settings.luna_utc_offset_hours)).replace(tzinfo=None)
 
 
-def _button(text: str, data: str) -> InlineKeyboardButton:
-    return InlineKeyboardButton(text=text, callback_data=data)
+def _button(text: str, data: str, style: str | None = None) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=text, callback_data=data, style=style)
 
 
 def ring_keyboard(reminder_id: int) -> InlineKeyboardMarkup:
@@ -69,7 +78,7 @@ def ring_keyboard(reminder_id: int) -> InlineKeyboardMarkup:
             [
                 _button("⏰ +10 мин", f"rmz:{reminder_id}:10"),
                 _button("⏰ +1 час", f"rmz:{reminder_id}:60"),
-                _button("✅ Готово", f"rmok:{reminder_id}"),
+                _button("✅ Готово", f"rmok:{reminder_id}", SUCCESS),
             ]
         ]
     )
@@ -170,7 +179,7 @@ class ReminderDesk:
             await db.commit()
             reminder_id = row.id
         what = f": {parts.task}" if parts.task else ""
-        cancel = InlineKeyboardMarkup(inline_keyboard=[[_button("✖ Отменить", f"rmd:{reminder_id}")]])
+        cancel = InlineKeyboardMarkup(inline_keyboard=[[_button("✖ Отменить", f"rmd:{reminder_id}", DANGER)]])
         verb = "🗓 Сделаю сама" if kind == DO else "🔔 Напомню"
         note = "\nОбычное напоминание на это же время убрала." if replaced else ""
         return f"{verb} {reminders.when_text(due, now, parts.repeat)}{what}{note}", cancel
@@ -256,7 +265,7 @@ class ReminderDesk:
         else:
             parts.append(f"<p>🔔 Напоминаний пока нет.</p><p>{esc(HOW_TO)}</p>")
         parts.append(f"<footer>{esc(self._brief_status(member))}</footer>")
-        numbers = [_button(f"✖ {n}", f"rmd:{row.id}") for n, row in enumerate(rows[:LIST_LIMIT], start=1)]
+        numbers = [_button(f"✖ {n}", f"rmd:{row.id}", DANGER) for n, row in enumerate(rows[:LIST_LIMIT], start=1)]
         keyboard = [numbers[i : i + 5] for i in range(0, len(numbers), 5)]
         if member.role == "kid":  # the school timetable and homework are children's
             keyboard.append([_button("📚 Расписание", "sk"), _button("📝 Домашка", "tk")])

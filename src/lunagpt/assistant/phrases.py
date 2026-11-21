@@ -9,7 +9,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import access
-from lunagpt.assistant.telegram import edit_screen, is_reply_to_prompt
+from lunagpt.assistant.telegram import DANGER, SUCCESS, edit_screen, is_reply_to_prompt
 from lunagpt.models import AssistantCatPhrase, AssistantMember
 
 logger = logging.getLogger("lunagpt.assistant.phrases")
@@ -34,7 +34,7 @@ def review_keyboard(phrase_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="✅ Добавить", callback_data=f"cpy:{phrase_id}", style="success"),
+                InlineKeyboardButton(text="✅ Добавить", callback_data=f"cpy:{phrase_id}", style=SUCCESS),
                 InlineKeyboardButton(text="❌ Не надо", callback_data=f"cpn:{phrase_id}"),
             ]
         ]
@@ -121,7 +121,9 @@ class PhraseDesk:
         if prefix == "cpy":
             await self._approve(phrase_id)
             remove = InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="🗑 Убрать", callback_data=f"cpx:{phrase_id}")]]
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="🗑 Убрать", callback_data=f"cpx:{phrase_id}", style=DANGER)]
+                ]
             )
             await self._edit(callback, f"✅ Добавлено: «{phrase.text}»", remove)
             await self._tell(phrase.author_id, APPROVED_KID.format(text=phrase.text))

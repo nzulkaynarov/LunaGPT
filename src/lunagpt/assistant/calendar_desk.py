@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from lunagpt.assistant import llm, reminders, school
 from lunagpt.assistant.gcal import CalendarError, Event, GoogleCalendar
 from lunagpt.assistant.reminder_desk import local_now
-from lunagpt.assistant.telegram import edit_screen, is_reply_to_prompt, send_long
+from lunagpt.assistant.telegram import DANGER, SUCCESS, edit_screen, is_reply_to_prompt, send_long
 from lunagpt.models import AssistantMember, AssistantTask
 
 logger = logging.getLogger("lunagpt.assistant.calendar_desk")
@@ -145,8 +145,8 @@ async def extract_event(text: str, now: datetime, metadata: dict[str, object]) -
         return None
 
 
-def _button(text: str, data: str) -> InlineKeyboardButton:
-    return InlineKeyboardButton(text=text, callback_data=data)
+def _button(text: str, data: str, style: str | None = None) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=text, callback_data=data, style=style)
 
 
 class CalendarDesk:
@@ -221,13 +221,13 @@ class CalendarDesk:
             events = await self.week(user_id)
         except CalendarError as exc:
             text = NOT_SHARED.format(email=self._calendar.email) if exc.kind == "not_shared" else UNAVAILABLE
-            keyboard = [[_button("🔌 Отключить", "calx")], back]
+            keyboard = [[_button("🔌 Отключить", "calx", DANGER)], back]
             return f"📅 {text}", InlineKeyboardMarkup(inline_keyboard=keyboard)
         today = local_now().date()
         lines = [f"📅 Календарь {calendar_id} на неделю:\n"]
         lines += [f"• {event_when(e, today)} — {e.title}" for e in events] or ["Событий нет."]
         lines.append("\nДобавить: «добавь в календарь стоматолог в четверг в 15:00».")
-        keyboard = [[_button("🔌 Отключить", "calx")], back]
+        keyboard = [[_button("🔌 Отключить", "calx", DANGER)], back]
         return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     async def handle(self, callback: CallbackQuery, member: AssistantMember, prefix: str, args: list[str]) -> None:
@@ -319,7 +319,9 @@ class CalendarDesk:
             await send_long(self._bot, user_id, NOT_UNDERSTOOD)
             return
         self._pending[user_id] = planned
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[[_button("✅ Добавить", "caly"), _button("✖ Отмена", "caln")]])
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[[_button("✅ Добавить", "caly", SUCCESS), _button("✖ Отмена", "caln")]]
+        )
         preview = f"📅 Добавить в календарь?\n\n{planned.title}\n{event_when(planned, now.date())}"
         await send_long(self._bot, user_id, preview, keyboard)
 

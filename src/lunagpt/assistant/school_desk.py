@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from lunagpt.assistant import school
 from lunagpt.assistant.reminder_desk import local_now, to_utc
 from lunagpt.assistant.reminders import when_text
-from lunagpt.assistant.telegram import Rich, edit_screen, rich_table, send_long
+from lunagpt.assistant.telegram import DANGER, SUCCESS, Rich, edit_screen, rich_table, send_long
 from lunagpt.models import AssistantMember, AssistantReminder, AssistantSchedule, AssistantTask
 
 logger = logging.getLogger("lunagpt.assistant.school_desk")
@@ -53,13 +53,13 @@ class Planned:
     remind_at: datetime | None
 
 
-def _button(text: str, data: str) -> InlineKeyboardButton:
-    return InlineKeyboardButton(text=text, callback_data=data)
+def _button(text: str, data: str, style: str | None = None) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=text, callback_data=data, style=style)
 
 
 def _confirm(prefix: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[_button("✅ Сохранить", f"{prefix}y"), _button("✖ Отмена", f"{prefix}n")]]
+        inline_keyboard=[[_button("✅ Сохранить", f"{prefix}y", SUCCESS), _button("✖ Отмена", f"{prefix}n")]]
     )
 
 
@@ -268,7 +268,7 @@ class SchoolDesk:
         if not days:
             text = "📚 Расписания пока нет.\n\nПришли фото расписания с подписью «расписание» или напиши его текстом."
             return text, InlineKeyboardMarkup(inline_keyboard=[back])
-        keyboard = [[_button("🗑 Удалить расписание", "skx")], back]
+        keyboard = [[_button("🗑 Удалить расписание", "skx", DANGER)], back]
         rows = [(school.SHORT_DAYS[school.WEEKDAYS.index(d)], ", ".join(days[d])) for d in school.WEEKDAYS if d in days]
         screen = Rich("<h3>📚 Расписание</h3>" + rich_table(rows))
         return screen, InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -292,7 +292,7 @@ class SchoolDesk:
             + rich_table(rows, header=("№", "Предмет", "Задание", "Когда"))
             + "<p>Нажми номер, когда сделано.</p>"
         )
-        buttons = [_button(f"✅ {n}", f"tkd:{t.id}") for n, t in enumerate(tasks[:LIST_LIMIT], start=1)]
+        buttons = [_button(f"✅ {n}", f"tkd:{t.id}", SUCCESS) for n, t in enumerate(tasks[:LIST_LIMIT], start=1)]
         keyboard = [buttons[i : i + 5] for i in range(0, len(buttons), 5)] + [back]
         return screen, InlineKeyboardMarkup(inline_keyboard=keyboard)
 

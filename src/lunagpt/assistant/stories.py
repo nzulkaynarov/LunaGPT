@@ -12,7 +12,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import access
-from lunagpt.assistant.telegram import is_reply_to_prompt, remove_menu
+from lunagpt.assistant.telegram import DANGER, SUCCESS, is_reply_to_prompt, remove_menu
 from lunagpt.models import AssistantCatStory, AssistantMember
 
 logger = logging.getLogger("lunagpt.assistant.stories")
@@ -54,7 +54,7 @@ def review_keyboard(story_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="✅ Добавить", callback_data=f"csy:{story_id}", style="success"),
+                InlineKeyboardButton(text="✅ Добавить", callback_data=f"csy:{story_id}", style=SUCCESS),
                 InlineKeyboardButton(text="❌ Не надо", callback_data=f"csn:{story_id}"),
             ]
         ]
@@ -198,7 +198,7 @@ class StoryDesk:
                     await db.commit()
             self._approved = None
             remove = InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="🗑 Убрать", callback_data=f"csx:{story_id}")]]
+                inline_keyboard=[[InlineKeyboardButton(text="🗑 Убрать", callback_data=f"csx:{story_id}", style=DANGER)]]
             )
             await self._edit(callback, f"✅ Добавлено: «{short(story.text)}»", remove)
             await self._tell_author(story.author_id, APPROVED_AUTHOR.format(text=short(story.text)))
@@ -233,7 +233,7 @@ class StoryDesk:
         buttons: list[list[InlineKeyboardButton]] = []
         if member.role in access.ADULT_ROLES:
             buttons += [
-                [InlineKeyboardButton(text=f"🗑 {n}", callback_data=f"csx:{story_id}")]
+                [InlineKeyboardButton(text=f"🗑 {n}", callback_data=f"csx:{story_id}", style=DANGER)]
                 for n, (story_id, _, _) in enumerate(shown, page * PAGE_SIZE + 1)
             ]
         if len(rows) > PAGE_SIZE:

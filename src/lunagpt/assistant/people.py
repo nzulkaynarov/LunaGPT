@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lunagpt.assistant import access, phones
 from lunagpt.assistant.pi_client import PiClient, PiConflictError, PiNotFoundError, PiUnavailableError
-from lunagpt.assistant.telegram import edit_screen, is_reply_to_prompt
+from lunagpt.assistant.telegram import DANGER, edit_screen, is_reply_to_prompt
 from lunagpt.config import settings
 from lunagpt.models import AssistantApplication, AssistantMember
 
@@ -270,7 +270,7 @@ class PeopleDesk:
             family = [_button(f"👨‍👩‍👧 {p['name']}", f"apf:{user_id}:{p['id']}") for p in people]
             rows = _pairs(family)
             text += "\n\nКто это?"
-        rows.append([_button("🏡 Гость", f"apg:{user_id}"), _button("⛔ Отклонить", f"apr:{user_id}", "danger")])
+        rows.append([_button("🏡 Гость", f"apg:{user_id}"), _button("⛔ Отклонить", f"apr:{user_id}", DANGER)])
         return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
     # ---- decisions ----
@@ -474,7 +474,7 @@ class PeopleDesk:
                 edits.insert(0, _button("✏️ Изменить имя", f"pen:{telegram_id}"))
             rows.append(edits)
         if self._may_exclude(actor, member):
-            rows.append([_button("⛔ Снять доступ", f"px:{telegram_id}", "danger")])
+            rows.append([_button("⛔ Снять доступ", f"px:{telegram_id}", DANGER)])
         section = "g" if member.role == "guest" else "f"
         rows.append([_button("← Назад", f"pls:{section}")])
         lines = [member.name, f"Статус: {ROLE_LABELS[member.role]}"]
@@ -553,7 +553,7 @@ class PeopleDesk:
     def _confirm_exclude(self, telegram_id: int) -> View:
         markup = InlineKeyboardMarkup(
             inline_keyboard=[
-                [_button("Да, снять доступ", f"pxy:{telegram_id}", "danger")],
+                [_button("Да, снять доступ", f"pxy:{telegram_id}", DANGER)],
                 [_button("← Назад", f"pc:{telegram_id}")],
             ]
         )

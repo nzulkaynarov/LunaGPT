@@ -10,6 +10,9 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.types import CallbackQuery, InputRichMessage, Message
 
+# Button colours (Bot API 9.4): green agrees or marks done, red refuses, switches off or deletes.
+SUCCESS = "success"
+DANGER = "danger"
 MESSAGE_LIMIT = 4000  # Telegram rejects messages above 4096 characters
 RICH_MESSAGE_LIMIT = 32000  # Telegram rejects rich messages above 32768 characters
 # Code and display math stay as they are; an inline formula cannot open on a digit or a space, or close after a space.

@@ -11,7 +11,7 @@ from aiogram.types import CallbackQuery, ForceReply, InlineKeyboardButton, Inlin
 
 from lunagpt.assistant import access
 from lunagpt.assistant.memories import FAMILY_DUPLICATE, FAMILY_FAILED, FAMILY_FULL, FAMILY_SAVED, Memory
-from lunagpt.assistant.telegram import edit_screen, remove_menu, send_long
+from lunagpt.assistant.telegram import DANGER, edit_screen, remove_menu, send_long
 from lunagpt.models import AssistantMember
 
 MEMORY_PREFIXES = {"mem", "memd", "memc", "memy"}
@@ -90,7 +90,7 @@ class MemoryDesk:
             f"🏠 Общая память семьи ({len(facts)}):\n\n" + "\n".join(lines) if facts else "🏠 Общая память пока пуста."
         )
         delete_buttons = [
-            InlineKeyboardButton(text=f"🗑 {first + i}", callback_data=f"famd:{fact.id.hex}")
+            InlineKeyboardButton(text=f"🗑 {first + i}", callback_data=f"famd:{fact.id.hex}", style=DANGER)
             for i, fact in enumerate(shown)
             if self._may_delete(member, fact.author_id)
         ]
@@ -114,7 +114,7 @@ class MemoryDesk:
             return await self.family_view(member, 0)
         markup = InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="Да, удалить", callback_data=f"famy:{memory_hex}", style="danger")],
+                [InlineKeyboardButton(text="Да, удалить", callback_data=f"famy:{memory_hex}", style=DANGER)],
                 [InlineKeyboardButton(text="← Назад", callback_data="fam:0")],
             ]
         )
@@ -159,7 +159,7 @@ class MemoryDesk:
         lines = [f"{first + i}. {fact.content}" for i, fact in enumerate(shown)]
         text = f"👤 Что я о тебе помню ({len(facts)}):\n\n" + "\n".join(lines) + "\n\nНажми номер, чтобы удалить."
         delete_buttons = [
-            InlineKeyboardButton(text=f"🗑 {first + i}", callback_data=f"memd:{fact.id.hex}:{page}")
+            InlineKeyboardButton(text=f"🗑 {first + i}", callback_data=f"memd:{fact.id.hex}:{page}", style=DANGER)
             for i, fact in enumerate(shown)
         ]
         rows = [delete_buttons[i : i + 4] for i in range(0, len(delete_buttons), 4)]
@@ -170,7 +170,7 @@ class MemoryDesk:
             navigation.append(InlineKeyboardButton(text="→", callback_data=f"mem:{page + 1}"))
         if navigation:
             rows.append(navigation)
-        rows.append([InlineKeyboardButton(text="Очистить всё", callback_data="memc", style="danger")])
+        rows.append([InlineKeyboardButton(text="Очистить всё", callback_data="memc", style=DANGER)])
         return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
     async def _forget_fact(self, callback: CallbackQuery, member: AssistantMember, memory_hex: str, page: int) -> None:
@@ -182,7 +182,7 @@ class MemoryDesk:
     def _confirm_forget_all() -> tuple[str, InlineKeyboardMarkup]:
         markup = InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="Да, забыть всё", callback_data="memy", style="danger")],
+                [InlineKeyboardButton(text="Да, забыть всё", callback_data="memy", style=DANGER)],
                 [InlineKeyboardButton(text="← Назад", callback_data="mem:0")],
             ]
         )
