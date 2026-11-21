@@ -60,6 +60,13 @@ def _hears(monkeypatch: pytest.MonkeyPatch, reply: str | None) -> None:
         "вычеркни молоко",
         "убери хлеб из списка",
         "добавь шланг в список Дача",
+        "добавь в мой список записаться к врачу",
+        "добавь в мои дела позвонить в банк",
+        "добавь помыть окна в дела",
+        "в дела по дому добавь прикрутить полку",
+        "добавь дела по дому: помыть окна",
+        "покажи дела по дому",
+        "убери окна из дел",
     ],
 )
 def test_phrases_about_a_list_are_noticed(text: str) -> None:
@@ -67,10 +74,36 @@ def test_phrases_about_a_list_are_noticed(text: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "text", ["расскажи про покупки в интернете", "привет, как дела?", "напомни завтра купить хлеб"]
+    "text",
+    [
+        "расскажи про покупки в интернете",
+        "привет, как дела?",
+        "как дела в школе?",
+        "напомни завтра купить хлеб",
+    ],
 )
 def test_other_phrases_go_to_the_chat(text: str) -> None:
     assert not lists.is_list_request(text)
+
+
+@pytest.mark.parametrize(
+    ("said", "personal", "meant"),
+    [
+        ("Дела", False, (lists.CHORES, False)),
+        ("дела  по дому", False, (lists.CHORES, False)),
+        ("Домашние дела", False, (lists.CHORES, False)),
+        ("Список покупок", False, (lists.SHOPPING, False)),
+        ("Покупки", False, (lists.SHOPPING, False)),
+        ("Мои дела", False, (lists.MY_LIST, True)),
+        ("Мой список", False, (lists.MY_LIST, True)),
+        ("Дела", True, (lists.MY_LIST, True)),
+        ("Дача", False, ("Дача", False)),
+        ("Дача", True, ("Дача", True)),
+        ("Делами", False, ("Делами", False)),
+    ],
+)
+def test_usual_words_name_the_standing_lists(said: str, personal: bool, meant: tuple[str, bool]) -> None:
+    assert lists.meant_list(said, personal) == meant
 
 
 def test_items_are_trimmed_and_not_repeated() -> None:
@@ -175,7 +208,42 @@ async def test_a_named_list_is_created_ticked_by_voice_and_gone_when_empty(
 
     _hears(monkeypatch, '{"action": "show", "list": "Дача", "items": []}')
     await desk.request(people["mom"], "покажи список дача")
-    assert _sent(telegram)[0] == "Списка «Дача» нет."
+    text, markup = _sent(telegram)
+    assert text == f"Списка «Дача» нет.\n\n{list_desk.OVERVIEW}"  # all the lists to pick from, not a dead end
+    assert [b[0] for b in _buttons(markup)][:2] == ["🛒 Покупки · 0", "🧹 Дела по дому · 0"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("heard", ["Дела", "дела по дому", "Домашние дела"])
+async def test_chores_said_any_usual_way_land_in_the_one_chores_list(
+    db_sessions: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch, heard: str
+) -> None:
+    people = await _family(db_sessions)
+    telegram = _telegram()
+    desk = list_desk.ListDesk(telegram, db_sessions)
+    _hears(monkeypatch, f'{{"action": "add", "list": "{heard}", "items": ["помыть окна"]}}')
+    assert await desk.request(people["kid"], "добавь помыть окна в дела") == (
+        "✅ Добавила в «Дела по дому»: помыть окна"
+    )
+    assert _sent(telegram)[0].startswith("✅ Добавила в «Дела по дому»: помыть окна")
+    assert await desk.add_from_chat(people["mom"], "Дела", ["вынести мусор"]) == (
+        "Добавлено в «Дела по дому»: вынести мусор."
+    )
+    _hears(monkeypatch, '{"action": "done", "list": "Дела", "items": ["помыть окна"]}')
+    await desk.request(people["mom"], "вычеркни окна из дел")
+    assert "✅ Вычеркнула: помыть окна" in _sent(telegram)[0]
+    assert await desk.names(people["mom"]) == (["Покупки", "Дела по дому"], [])  # no second «Дела» list
+
+
+@pytest.mark.asyncio
+async def test_my_list_named_by_the_model_stays_personal(db_sessions: async_sessionmaker[AsyncSession]) -> None:
+    people = await _family(db_sessions)
+    desk = list_desk.ListDesk(_telegram(), db_sessions)
+    assert await desk.add_from_chat(people["mom"], "Мои дела", ["позвонить в банк"]) == (
+        "Добавлено в «👤 Мои дела»: позвонить в банк."
+    )
+    assert await desk.names(people["mom"]) == (["Покупки", "Дела по дому"], ["Мои дела"])
+    assert "банк" not in await desk.planner_text(people["kid"])
 
 
 @pytest.mark.asyncio

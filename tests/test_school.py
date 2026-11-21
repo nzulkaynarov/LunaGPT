@@ -219,6 +219,8 @@ async def test_nothing_is_saved_when_cancelled_or_unreadable(db_sessions: async_
         ("домашка не получается, помоги", False),
         ("домашка по физике, как решить задачу 4?", False),
         ("задали задачу, объясни как её решать", False),
+        ("добавь дело: выучить стих", True),
+        ("добавь дела по дому: помыть окна", False),  # the family's chores list, not homework
     ],
 )
 def test_homework_to_write_down_versus_help_with_it(text: str, is_homework: bool) -> None:

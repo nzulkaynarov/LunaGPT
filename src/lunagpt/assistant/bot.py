@@ -390,6 +390,10 @@ class LunaBot:
         if text.startswith("/"):
             await self._send(user_id, HELP_TEXT[member.role], main_keyboard(member.role))
             return
+        # «запомни для семьи, что надо купить корм» is a note for the family, though it has a list's words in it.
+        if member.role in access.FAMILY_ROLES and family_request(text) is not None:
+            await self._chat(member, text)
+            return
         if is_reminder_request(text):
             await self._new_reminder(member, text)
             return

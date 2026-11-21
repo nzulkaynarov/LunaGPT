@@ -97,7 +97,8 @@ async def _list_task(given: dict[str, Any], metadata: dict[str, Any]) -> dict[st
     request = await lists.parse_request(given["text"], cases.FAMILY_LISTS, cases.PERSONAL_LISTS, metadata)
     if request is None:
         return None
-    return {"action": request.action, "list": request.name, "personal": request.personal, "items": request.items}
+    name, personal = lists.meant_list(request.name, request.personal)  # «Дела» lands in «Дела по дому», as in the bot
+    return {"action": request.action, "list": name, "personal": personal, "items": request.items}
 
 
 def _list_check(heard: dict[str, Any] | None, expected: dict[str, Any]) -> tuple[bool, str]:

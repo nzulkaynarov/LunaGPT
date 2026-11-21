@@ -274,8 +274,11 @@ class ListDesk:
 
     async def _send_gone(self, member: AssistantMember) -> None:
         """A list that went away leads to all the lists, never to a dead end."""
+        await self._send_overview(member, LIST_GONE)
+
+    async def _send_overview(self, member: AssistantMember, note: str) -> None:
         text, markup = await self._overview(member)
-        await self._bot.send_message(member.telegram_id, f"{LIST_GONE}\n\n{text}", reply_markup=markup)
+        await self._bot.send_message(member.telegram_id, f"{note}\n\n{text}", reply_markup=markup)
 
     async def _ask_add(self, member: AssistantMember, target: AssistantFamilyList, problem: str = "") -> None:
         prompt = ADD_PROMPT.format(name=label(target))
@@ -297,11 +300,12 @@ class ListDesk:
         asked = await lists.parse_request(text, family, personal, metadata)
         if asked is None:
             return None
+        name, mine = lists.meant_list(asked.name, asked.personal)
         async with self._sessions() as db:
-            target = await self._named(db, member, asked.name, asked.personal, create=asked.action == "add")
+            target = await self._named(db, member, name, mine, create=asked.action == "add")
             if target is None:
-                note = TOO_MANY_LISTS if asked.action == "add" else f"Списка «{asked.name}» нет."
-                await self._bot.send_message(member.telegram_id, note)
+                note = TOO_MANY_LISTS if asked.action == "add" else f"Списка «{name}» нет."
+                await self._send_overview(member, note)
                 return note
             if asked.action == "add":
                 added = await self._add(db, target, asked.items, member.telegram_id)
@@ -339,7 +343,8 @@ class ListDesk:
     async def add_from_chat(self, member: AssistantMember, name: str, items: list[str], personal: bool = False) -> str:
         """What the chat model adds with its tool; the answer tells the model what happened, as data."""
         wanted = lists.clean_items(items)
-        name = lists.list_name(name) or (lists.MY_LIST if personal else lists.CHORES)
+        unnamed = lists.MY_LIST if personal else lists.CHORES
+        name, personal = lists.meant_list(lists.list_name(name) or unnamed, personal)
         if not wanted:
             return "Нечего добавлять."
         async with self._sessions() as db:

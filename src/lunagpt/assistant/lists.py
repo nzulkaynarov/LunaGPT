@@ -22,16 +22,33 @@ LIST_MODELS = ["luna-local", "luna-fast"]
 
 LIST_REQUEST = re.compile(
     r"\bв\s+(?:наш\s+|семейный\s+|общий\s+|мой\s+|личный\s+)?список\b"
-    r"|\bв\s+мои\s+(?:дела|покупки)\b"
+    r"|\bв\s+(?:мои\s+|домашние\s+)?дела\b"  # «добавь помыть окна в дела», «в дела по дому»
+    r"|\bв\s+мои\s+покупки\b"
+    r"|\bдел\w*\s+по\s+дому\b"
     r"|\b(?:мой|личный)\s+список\b"
     r"|\bв\s+покупки\b"
     r"|\bсписок\s+(?:покупок|продуктов|дел)\b"
-    r"|\b(?:из|со?)\s+(?:списка|покупок)\b"
+    r"|\b(?:из|со?)\s+(?:списка|покупок|дел)\b"
     r"|\b(?:покажи|открой|что\s+в|что\s+у\s+нас\s+в)\b.{0,30}\bсписк"
     r"|\b(?:надо|нужно|не\s+забыть|не\s+забудь)\s+купить\b"
     r"|\bвычеркни\b",
     re.IGNORECASE,
 )
+
+# Usual words for the standing lists, matched whole: a small fixed table, never a guess, so «добавь … в дела»
+# lands in «Дела по дому» and no second «Дела» list appears next to it.
+FAMILY_ALIASES = {
+    "дела": CHORES,
+    "дела по дому": CHORES,
+    "домашние дела": CHORES,
+    "список дел": CHORES,
+    "покупки": SHOPPING,
+    "список покупок": SHOPPING,
+    "продукты": SHOPPING,
+    "список продуктов": SHOPPING,
+}
+PERSONAL_ALIASES = {"дела", "мои дела", "личные дела", "мой список", "личный список", "список дел"}
+MINE_ONLY = {"мои дела", "личные дела", "мой список", "личный список"}  # never a family list, whatever was said
 
 EXTRACT_PROMPT = (
     "Есть общие списки семьи: {family}. Личные списки этого человека: {personal}. "
@@ -74,6 +91,17 @@ def list_name(raw: str) -> str:
     """A list name as it is stored and shown: one line, capitalised, short."""
     name = " ".join(str(raw).split()).strip(" .«»\"'")[:MAX_NAME_CHARS].strip()
     return name[:1].upper() + name[1:]
+
+
+def meant_list(name: str, personal: bool) -> tuple[str, bool]:
+    """The list a spoken or model-written name means, and whether it is personal: «дела» is the family's «Дела по
+    дому», «мои дела» is always the person's own «Мои дела». Any other name stays as it was given."""
+    key = " ".join(name.casefold().split())
+    if key in MINE_ONLY or (personal and key in PERSONAL_ALIASES):
+        return MY_LIST, True
+    if personal:
+        return name, True
+    return FAMILY_ALIASES.get(key, name), False
 
 
 def clean_items(raw: list[str]) -> list[str]:

@@ -29,6 +29,7 @@ from lunagpt.assistant import (
     dialogue,
     internet_desk,
     list_desk,
+    lists,
     llm,
     memory_desk,
     menu,
@@ -1375,6 +1376,29 @@ async def test_family_request_is_saved_without_the_model(harness: Any, monkeypat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("text", "fact"),
+    [
+        ("запомни для семьи, что надо купить корм", "надо купить корм"),
+        ("запиши для всех: добавь молоко в покупки по пятницам", "добавь молоко в покупки по пятницам"),
+        ("запомни для семьи, что расписание кружков меняется в мае", "расписание кружков меняется в мае"),
+    ],
+)
+async def test_a_family_note_with_list_words_goes_to_family_memory(
+    harness: Any, monkeypatch: pytest.MonkeyPatch, text: str, fact: str
+) -> None:
+    instance, memory = _with_memory(harness, monkeypatch, "kid")
+    _, _, answer = harness
+    instance.lists.request = AsyncMock(return_value="✅")
+    instance.school.handle_text = AsyncMock()
+    await instance.on_message(_message(text))
+    memory.family.add.assert_awaited_once_with(1, "Тест", fact)
+    instance.lists.request.assert_not_awaited()
+    instance.school.handle_text.assert_not_awaited()
+    answer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_guest_cannot_write_to_family_memory(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     instance, memory = _with_memory(harness, monkeypatch, "guest")
     _, _, answer = harness
@@ -1751,6 +1775,37 @@ async def test_list_button_phrase_and_reply_reach_the_list_desk(harness: Any, mo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["kid", "adult"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "добавь молоко и хлеб в покупки",
+        "вычеркни молоко",
+        "добавь шланг в список Дача",
+        "добавь в мой список записаться к врачу",
+        "надо купить батарейки",
+        "покажи список покупок",
+        "добавь помыть окна в дела",
+        "добавь дела по дому: помыть окна",
+        "в дела по дому добавь прикрутить полку",
+    ],
+)
+async def test_the_promised_list_phrases_reach_the_list_desk(
+    harness: Any, monkeypatch: pytest.MonkeyPatch, role: str, text: str
+) -> None:
+    instance, _, answer = harness
+    instance.lists.request = AsyncMock(return_value="✅")
+    instance.school.handle_text = AsyncMock()
+    instance.calendar.request_event = AsyncMock()
+    _as_member(monkeypatch, _member(role, 5))
+    await instance.on_message(_message(text, 5))
+    assert instance.lists.request.await_args.args[1] == text
+    instance.school.handle_text.assert_not_awaited()
+    instance.calendar.request_event.assert_not_awaited()
+    answer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_guests_have_no_family_lists(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     instance, _, answer = harness
     instance.lists.view = AsyncMock()
@@ -1780,8 +1835,8 @@ def _action(schema: dict[str, Any], calls: list[dict[str, Any]], result: str = "
 
 @pytest.mark.asyncio
 async def test_the_chat_model_adds_a_bare_todo_list_to_the_family_list(monkeypatch: pytest.MonkeyPatch) -> None:
-    items = {"list": "Дела", "items": ["повесить карниз", "прикрутить полки"]}
-    replies = [_tool_call("add_to_family_list", items), {"role": "assistant", "content": "Добавила в «Дела»."}]
+    items = {"list": "Дела по дому", "items": ["повесить карниз", "прикрутить полки"]}
+    replies = [_tool_call("add_to_family_list", items), {"role": "assistant", "content": "Добавила в «Дела по дому»."}]
     payloads: list[dict[str, Any]] = []
 
     async def fake_chat(_client: Any, payload: dict[str, Any], *_args: Any) -> dict[str, Any]:
@@ -1790,15 +1845,16 @@ async def test_the_chat_model_adds_a_bare_todo_list_to_the_family_list(monkeypat
 
     calls: list[dict[str, Any]] = []
     monkeypatch.setattr(llm, "_chat", fake_chat)
-    options = llm.ReplyOptions(actions=(_action(llm.LIST_TOOL, calls, "Добавлено в «Дела»."),))
+    options = llm.ReplyOptions(actions=(_action(llm.LIST_TOOL, calls, "Добавлено в «Дела по дому»."),))
     assert await llm.generate_reply("adult", 1, [], "повесить карниз, прикрутить полки", options=options) == (
-        "Добавила в «Дела»."
+        "Добавила в «Дела по дому»."
     )
     assert calls == [items]
     assert payloads[0]["model"] == "luna-smart"
     assert [t["function"]["name"] for t in payloads[0]["tools"]] == ["web_search", "add_to_family_list"]
     assert payloads[0]["messages"][0]["content"].endswith("ИНСТРУМЕНТ add_to_family_list")
-    assert payloads[1]["messages"][-1] == {"role": "tool", "tool_call_id": "c1", "content": "Добавлено в «Дела»."}
+    tool_reply = {"role": "tool", "tool_call_id": "c1", "content": "Добавлено в «Дела по дому»."}
+    assert payloads[1]["messages"][-1] == tool_reply
 
 
 @pytest.mark.asyncio
@@ -1828,6 +1884,12 @@ def test_the_local_model_only_learns_the_phrases() -> None:
     assert messages[0]["content"] == "база"
     assert "не говори, что поставила" in llm.REMINDER_HINT and "move_reminder" in llm.REMINDERS_BLOCK
     assert "«напомни" in llm.REMINDER_HINT and "добавь … в покупки" in llm.LISTS_HINT
+
+
+def test_the_chat_model_names_the_chores_list_as_the_family_sees_it() -> None:
+    for text in (llm.LISTS_BLOCK, llm.LISTS_HINT, str(llm.LIST_TOOL)):
+        assert lists.CHORES.lower() in text.lower()
+        assert "«Дела»" not in text and "в дела»" not in text and "Дела or" not in text
 
 
 @pytest.mark.asyncio
