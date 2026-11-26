@@ -96,6 +96,53 @@ def test_a_kill_inside_a_memory_limit_is_counted_too(hw: ModuleType) -> None:
     assert hw.oom_kills(journal) == (2, "claude 1.4 GB")
 
 
+RT_SCOPE = "/user.slice/user-1000.slice/user@1000.service/dev.slice/dev-rt.slice/run-p1.scope"
+PANE = "/user.slice/user-1000.slice/user@1000.service/app.slice/tmux-spawn-abc.scope"
+
+
+def test_each_kill_names_its_session_and_whether_claude_or_the_whole_pc(hw: ModuleType) -> None:
+    journal = "\n".join(
+        [
+            "2026-11-26T08:42:44+05:00 umar14j kernel: oom-kill:constraint=CONSTRAINT_MEMCG,"
+            f"nodemask=(null),oom_memcg={PANE},task_memcg={PANE},task=node-MainThread,pid=11,uid=1000",
+            "2026-11-26T08:42:44+05:00 umar14j kernel: Memory cgroup out of memory: Killed process "
+            "11 (node-MainThread) total-vm:3512188kB, anon-rss:2181908kB, file-rss:5544kB",
+            "2026-11-26T08:42:45+05:00 umar14j kernel: oom-kill:constraint=CONSTRAINT_MEMCG,"
+            f"oom_memcg={RT_SCOPE},task_memcg={RT_SCOPE},task=claude,pid=12,uid=1000",
+            "2026-11-26T08:42:45+05:00 umar14j kernel: Memory cgroup out of memory: Killed process "
+            "12 (claude) total-vm:7861940kB, anon-rss:1430412kB, file-rss:5032kB",
+            "2026-11-26T09:00:00+05:00 umar14j kernel: oom-kill:constraint=CONSTRAINT_NONE,"
+            "nodemask=(null),global_oom,task_memcg=/system.slice/docker-1.scope,task=postgres,pid=13",
+            "2026-11-26T09:00:00+05:00 umar14j kernel: Out of memory: Killed process 13 (postgres) "
+            "total-vm:1000kB, anon-rss:524288kB, file-rss:0kB",
+        ]
+    )
+    events = hw.oom_events(journal, {PANE: "KetoCare"})
+    assert events == [
+        {
+            "at": "2026-11-26T08:42:44+05:00",
+            "process": "node-MainThread 2.1 GB",
+            "session": "KetoCare",
+            "claude": False,
+            "whole_pc": False,
+        },
+        {
+            "at": "2026-11-26T08:42:45+05:00",
+            "process": "claude 1.4 GB",
+            "session": "RT_Platform",  # its scope is gone, the RT slice still names it
+            "claude": True,
+            "whole_pc": False,
+        },
+        {
+            "at": "2026-11-26T09:00:00+05:00",
+            "process": "postgres 0.5 GB",
+            "session": None,
+            "claude": False,
+            "whole_pc": True,
+        },
+    ]
+
+
 def test_tailscale_expiry_in_days(hw: ModuleType) -> None:
     now = datetime(2026, 11, 20, tzinfo=UTC)
     status = json.dumps({"Self": {"KeyExpiry": "2026-12-01T00:00:00Z"}})

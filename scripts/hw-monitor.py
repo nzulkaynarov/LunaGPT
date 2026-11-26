@@ -58,7 +58,12 @@ KERNEL_TROUBLE = re.compile(
     r"temperature above threshold",
     re.IGNORECASE,
 )
-OOM_KILL = re.compile(r"[Oo]ut of memory: Killed process \d+ \(([^)]*)\).*?anon-rss:(\d+)kB")
+OOM_KILL = re.compile(r"[Oo]ut of memory: Killed process (\d+) \(([^)]*)\).*?anon-rss:(\d+)kB")
+# The line before each kill: whether one cgroup's limit or the whole PC ran out, and the cgroup
+# of the killed task, which tells the Claude session it belonged to.
+OOM_CONTEXT = re.compile(r"oom-kill:constraint=(\w+).*?task_memcg=([^,]+).*?,pid=(\d+)")
+OOM_EVENTS_KEPT = 20
+RT_SLICE = "/dev-rt.slice"  # claude-session puts RT_Platform here, even after its scope is gone
 
 
 def _read(path: Path) -> str:
@@ -254,13 +259,76 @@ def kernel_errors(text: str) -> tuple[int, str | None]:
     return len(lines), (lines[-1].strip()[:200] if lines else None)
 
 
+def _victim(name: str, rss_kb: str) -> str:
+    return f"{name[:60]} {int(rss_kb) / 1024 / 1024:.1f} GB"
+
+
 def oom_kills(text: str) -> tuple[int, str | None]:
     """Processes the kernel killed for lack of memory since boot, and the newest as "name 4.9 GB"."""
     kills = [m for line in text.splitlines() if (m := OOM_KILL.search(line))]
     if not kills:
         return 0, None
-    name, rss_kb = kills[-1].groups()
-    return len(kills), f"{name[:60]} {int(rss_kb) / 1024 / 1024:.1f} GB"
+    _, name, rss_kb = kills[-1].groups()
+    return len(kills), _victim(name, rss_kb)
+
+
+def session_of(cgroup: str, sessions: dict[str, str]) -> str | None:
+    """The tmux session (named after its project) whose cgroup holds this one."""
+    for path, name in sessions.items():
+        if cgroup == path or cgroup.startswith(path + "/"):
+            return name
+    return "RT_Platform" if RT_SLICE in cgroup else None
+
+
+def oom_events(text: str, sessions: dict[str, str]) -> list[dict[str, Any]]:
+    """The newest kills: when, what, in which session, whether Claude itself or the whole PC."""
+    context: dict[str, tuple[str, str]] = {}
+    events: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        if found := OOM_CONTEXT.search(line):
+            constraint, cgroup, pid = found.groups()
+            context[pid] = (constraint, cgroup)
+        elif kill := OOM_KILL.search(line):
+            pid, name, rss_kb = kill.groups()
+            constraint, cgroup = context.get(pid, ("", ""))
+            events.append(
+                {
+                    "at": line.split(" ", 1)[0],
+                    "process": _victim(name, rss_kb),
+                    "session": session_of(cgroup, sessions) if cgroup else None,
+                    "claude": name == "claude",
+                    "whole_pc": constraint == "CONSTRAINT_NONE",
+                }
+            )
+    return events[-OOM_EVENTS_KEPT:]
+
+
+def _cgroup(pid: str) -> str | None:
+    text = _read(Path("/proc") / pid / "cgroup")
+    return text.split("::", 1)[1] if "::" in text else None
+
+
+def _parent(pid: str) -> str:
+    fields = _read(Path("/proc") / pid / "stat").rpartition(")")[2].split()
+    return fields[1] if len(fields) > 1 else ""
+
+
+def claude_sessions() -> dict[str, str]:
+    """cgroup -> tmux session for every pane shell and every Claude started from a pane."""
+    listing = _run(["tmux", "list-panes", "-a", "-F", "#{pane_pid} #{session_name}"])
+    panes = {pid: name for line in listing.splitlines() for pid, _, name in [line.partition(" ")] if name}
+    out = {cg: name for pid, name in panes.items() if (cg := _cgroup(pid))}
+    for pid in _run(["pgrep", "-x", "claude"]).split():
+        cgroup, parent = _cgroup(pid), _parent(pid)
+        for _ in range(10):  # claude-session: pane shell -> systemd-run scope -> claude
+            if parent in panes:
+                if cgroup:
+                    out[cgroup] = panes[parent]
+                break
+            if parent in ("", "0", "1"):
+                break
+            parent = _parent(parent)
+    return out
 
 
 def tailscale_days(status_json: str, now: datetime | None = None) -> float | None:
@@ -415,6 +483,7 @@ def main() -> None:
                     count, last = kernel_errors(journal)
                     slow["kernel_errors"], slow["kernel_error_last"] = count, last
                     slow["oom_kills"], slow["oom_last"] = oom_kills(journal)
+                    slow["oom_events"] = oom_events(journal, claude_sessions())
             if reports % TAILSCALE_EVERY == 0:
                 slow["tailscale_days"] = tailscale_days(_run(["tailscale", "status", "--json"]))
             report = {
