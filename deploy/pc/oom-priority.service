@@ -1,0 +1,11 @@
+[Unit]
+Description=LunaGPT: tests and browsers that Claude sessions start are the first to stop when memory runs out
+
+[Service]
+ExecStart=%h/projects/LunaGPT/scripts/oom-priority.py
+Restart=always
+RestartSec=10
+Nice=10
+
+[Install]
+WantedBy=default.target
