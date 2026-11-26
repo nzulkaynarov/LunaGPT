@@ -58,7 +58,7 @@ KERNEL_TROUBLE = re.compile(
     r"temperature above threshold",
     re.IGNORECASE,
 )
-OOM_KILL = re.compile(r"Out of memory: Killed process \d+ \(([^)]*)\).*?anon-rss:(\d+)kB")
+OOM_KILL = re.compile(r"[Oo]ut of memory: Killed process \d+ \(([^)]*)\).*?anon-rss:(\d+)kB")
 
 
 def _read(path: Path) -> str:
@@ -409,9 +409,12 @@ def main() -> None:
         if len(rows) >= REPORT_EVERY:
             if reports % KERNEL_EVERY == 0:
                 journal = _run(["journalctl", "-k", "-b", "-o", "short-iso", "--no-pager", "-q"], 30)
-                count, last = kernel_errors(journal)
-                slow["kernel_errors"], slow["kernel_error_last"] = count, last
-                slow["oom_kills"], slow["oom_last"] = oom_kills(journal)
+                # a failed or timed-out read is empty; reporting 0 would let the Pi re-tell old
+                # kills once the next read counts them again, so keep the last good counts
+                if journal.strip():
+                    count, last = kernel_errors(journal)
+                    slow["kernel_errors"], slow["kernel_error_last"] = count, last
+                    slow["oom_kills"], slow["oom_last"] = oom_kills(journal)
             if reports % TAILSCALE_EVERY == 0:
                 slow["tailscale_days"] = tailscale_days(_run(["tailscale", "status", "--json"]))
             report = {

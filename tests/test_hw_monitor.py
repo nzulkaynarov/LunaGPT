@@ -83,6 +83,19 @@ def test_an_oom_kill_is_counted_apart_from_hardware_trouble(hw: ModuleType) -> N
     assert hw.oom_kills("") == (0, None)
 
 
+def test_a_kill_inside_a_memory_limit_is_counted_too(hw: ModuleType) -> None:
+    """Sessions run in memory-limited slices; there the kernel says "Memory cgroup out of memory"."""
+    journal = "\n".join(
+        [
+            "2026-11-21T00:37:00 umar14j kernel: Out of memory: Killed process 81455 (pytest) "
+            "total-vm:8041740kB, anon-rss:5095260kB, file-rss:8kB, shmem-rss:0kB, UID:1000",
+            "2026-11-26T08:42:44 umar14j kernel: Memory cgroup out of memory: Killed process "
+            "20576 (claude) total-vm:7861940kB, anon-rss:1430412kB, file-rss:5032kB, UID:1000",
+        ]
+    )
+    assert hw.oom_kills(journal) == (2, "claude 1.4 GB")
+
+
 def test_tailscale_expiry_in_days(hw: ModuleType) -> None:
     now = datetime(2026, 11, 20, tzinfo=UTC)
     status = json.dumps({"Self": {"KeyExpiry": "2026-12-01T00:00:00Z"}})
